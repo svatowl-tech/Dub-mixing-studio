@@ -144,6 +144,10 @@ jobs:
       - name: Setup FFmpeg & FFprobe Sidecars
         run: node scripts/setup-ffmpeg.js
 
+      # Setup Embedded AI Python Environment (audio-separator)
+      - name: Setup Embedded AI Python Environment
+        run: node scripts/setup_embed_py.js
+
       # Setup ASIO SDK for Windows low-latency audio support
       - name: Checkout ASIO SDK (Windows)
         if: runner.os == 'Windows'
@@ -167,7 +171,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CPAL_ASIO_DIR: "C:\\ASIOSDK"
-          SKIP_AI_BUILD: "true"
           CI: "true"
 
       # ---------------------------------------------------------
