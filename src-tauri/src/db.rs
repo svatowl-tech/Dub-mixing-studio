@@ -120,13 +120,20 @@ pub struct ProjectData {
 // --- DATABASE INITIALIZATION ---
 
 pub async fn init_db(db_path: &str) -> Result<Pool<Sqlite>, sqlx::Error> {
-    if !std::path::Path::new(db_path).exists() {
-        fs::File::create(db_path).unwrap();
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
+
+    if let Some(parent) = std::path::Path::new(db_path).parent() {
+        let _ = fs::create_dir_all(parent);
     }
     
+    let options = SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal);
+
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&format!("sqlite://{}", db_path))
+        .connect_with(options)
         .await?;
 
     // MIGRATION: Schema Setup

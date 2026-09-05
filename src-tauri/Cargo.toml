@@ -11,7 +11,6 @@ tauri-build = { version = "2.6.1", features = [] }
 [dependencies]
 tauri = { version = "2.11.0", features = ["protocol-asset", "devtools"] }
 tauri-plugin-dialog = "^2.0.0"
-tauri-plugin-updater = "2.0.0"
 tauri-plugin-shell = "2.0.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -36,7 +35,7 @@ rubato = "0.15"
 
 [target.'cfg(windows)'.dependencies]
 cpal = { version = "0.15", features = ["asio"] }
-windows = { version = "0.58", features = ["Win32_System_Com", "Win32_System_Threading", "Win32_Foundation"] }
+windows = { version = "0.58", features = ["Win32_System_Com", "Win32_System_Threading", "Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(not(windows))'.dependencies]
 cpal = { version = "0.15" }
@@ -48,4 +47,4 @@ asio = ["cpal/asio"]
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
+panic = "unwind"

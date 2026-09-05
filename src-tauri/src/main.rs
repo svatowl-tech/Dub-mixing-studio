@@ -85,6 +85,30 @@ fn open_devtools(window: tauri::WebviewWindow) {
 }
 
 fn main() {
+    // Setup global panic hook to capture any fatal panics and log them
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("Dub Mixing Studio fatal startup error:\n{}", info);
+        eprintln!("{}", msg);
+        let temp_log = std::env::temp_dir().join("dubstudio_crash.log");
+        let _ = std::fs::write(&temp_log, &msg);
+        
+        #[cfg(target_os = "windows")]
+        unsafe {
+            use windows::core::HSTRING;
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+            let title = HSTRING::from("Dub Mixing Studio - Crash");
+            let text = HSTRING::from(msg);
+            let _ = MessageBoxW(None, &text, &title, MB_OK | MB_ICONERROR);
+        }
+    }));
+
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        // Initialize COM for the UI thread safely
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+
     // Shared empty state initially
     let app_state = AppState {
         db: Arc::new(Mutex::new(None)),
@@ -95,7 +119,6 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             log_debug("--- APPLICATION STARTUP ---");
             let app_handle = app.handle().clone();
@@ -180,12 +203,14 @@ fn main() {
                 }
             });
 
-            // Use Tauri 2.0 path resolver
+            // Use Tauri 2.0 path resolver safely without panicking
             use tauri::Manager;
-            let app_data_dir = app_handle.path().app_data_dir().expect("Failed to get app data dir");
+            let app_data_dir = app_handle.path().app_data_dir().unwrap_or_else(|_| {
+                std::env::temp_dir().join("dubstudio_data")
+            });
             let _ = std::fs::create_dir_all(&app_data_dir);
             let db_path = app_data_dir.join("dev.db");
-            let db_path_str = db_path.to_str().expect("Path is not valid UTF-8").to_string();
+            let db_path_str = db_path.to_string_lossy().to_string();
 
             tauri::async_runtime::spawn(async move {
                 // Initialize database asynchronously 

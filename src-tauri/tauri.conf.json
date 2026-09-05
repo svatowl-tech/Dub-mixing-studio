@@ -56,12 +56,5 @@
        "infoPlist": "Info.plist"
     }
   },
-  "plugins": {
-    "updater": {
-      "active": false,
-      "endpoints": [
-        "https://github.com/OWNER/dub-mixing-studio/releases/latest/download/latest.json"
-      ]
-    }
-  }
+  "plugins": {}
 }
