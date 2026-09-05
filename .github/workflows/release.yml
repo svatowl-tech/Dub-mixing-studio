@@ -196,13 +196,11 @@ jobs:
           fi
 
           # Create README for portable edition
-          cat << 'EOF' > "$PORTABLE_DIR/README.txt"
-Dub Mixing Studio - Portable Edition
-====================================
-Запуск: запустите файл "Dub Mixing Studio.exe".
-Данная версия не требует установки в систему и может
-запускаться с любого носителя (включая USB флешки).
-EOF
+          echo "Dub Mixing Studio - Portable Edition" > "$PORTABLE_DIR/README.txt"
+          echo "====================================" >> "$PORTABLE_DIR/README.txt"
+          echo "Запуск: запустите файл \"Dub Mixing Studio.exe\"." >> "$PORTABLE_DIR/README.txt"
+          echo "Данная версия не требует установки в систему и может" >> "$PORTABLE_DIR/README.txt"
+          echo "запускаться с любого носителя (включая USB флешки)." >> "$PORTABLE_DIR/README.txt"
 
           # Compress to ZIP
           cd dist-artifacts
