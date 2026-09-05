@@ -30,7 +30,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "dmg", "deb", "appimage"],
+    "targets": ["nsis", "dmg", "deb"],
     "resources": [
       "ai_env/**/*"
     ],
