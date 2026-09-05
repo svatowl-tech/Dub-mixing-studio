@@ -1,99 +1,81 @@
-# Dub Mixing Studio — Руководство по релизу и CI/CD на GitHub
+# Dub Mixing Studio — Руководство по сборке и релизу на GitHub
 
-Этот репозиторий полностью настроен для автоматической сборки, тестирования и публикации релизов на GitHub с поддержкой всех ключевых настольных платформ (**Windows**, **macOS**, **Linux**), включая создание **инсталляторов (Setup)** и **портативных версий (Portable)**.
-
----
-
-## 1. Автоматическая сборка и релизы на GitHub (GitHub Actions)
-
-В папке `.github/workflows/` настроены два автоматизированных пайплайна:
-
-1. **`ci.yml` (Continuous Integration)**:
-   - Срабатывает при каждом `push` и `pull_request` в ветки `main`/`master`.
-   - Проверяет TypeScript (`npm run lint`), целостность иконок (`npm run generate:icons`) и сборку фронтенда (`npm run build`).
-
-2. **`release.yml` (Automated Multi-Platform Release)**:
-   - Срабатывает при отправке тега версии вида `v*.*.*` (например, `git push origin v1.1.0`), либо при ручном запуске через вкладку **Actions -> Build & Release Dub Mixing Studio -> Run workflow**.
-   - Собирает артефакты для всех платформ:
-     - **Windows (x64)**:
-       - `Dub_Mixing_Studio_x.x.x_Windows_Setup_x64.exe` (NSIS-установщик)
-       - `Dub_Mixing_Studio_x.x.x_Windows_Portable_x64.zip` (Портативная версия)
-     - **macOS (Intel x64 + Apple Silicon ARM64)**:
-       - `Dub_Mixing_Studio_x.x.x_macOS_x64.dmg` / `.app.tar.gz`
-       - `Dub_Mixing_Studio_x.x.x_macOS_aarch64.dmg` / `.app.tar.gz`
-     - **Linux (x64)**:
-       - `Dub_Mixing_Studio_x.x.x_Linux_x64.AppImage` (Портативный исполняемый файл)
-       - `Dub_Mixing_Studio_x.x.x_Linux_x64.deb` (Пакет Debian/Ubuntu)
-       - `Dub_Mixing_Studio_x.x.x_Linux_Portable_x64.tar.gz` (Архив)
-   - Автоматически создает **GitHub Release**, прикрепляет все бинарные файлы и генерирует список изменений и контрольные суммы SHA-256.
+Этот проект полностью подготовлен для автоматической мультиплатформенной сборки в **GitHub Actions** и публикации релизов для **Windows**, **macOS** и **Linux** (с созданием установочных инсталляторов и Portable-версий).
 
 ---
 
-## 2. Управление версиями (Автоматическая версионность)
+## ⚡ Почему сборка или релиз могли не произойти и как это исправить:
 
-Для синхронизации версий между файлами `package.json`, `src-tauri/tauri.conf.json` и `src-tauri/Cargo.toml` предусмотрен скрипт:
+Если вы выгрузили проект из Google AI Studio в GitHub, но вкладка **Releases** пуста, проверьте следующие 3 стандартных правила GitHub:
+
+### 1. Включите GitHub Actions в вашем репозитории (Разово)
+На новых или импортированных репозиториях GitHub по умолчанию отключает Actions для безопасности.
+1. Откройте ваш репозиторий на GitHub.
+2. Перейдите во вкладку **Actions**.
+3. Если вы видите зеленую кнопку **«I understand my workflows, go ahead and enable them»**, нажмите её.
+
+### 2. Разрешите запись для GITHUB_TOKEN (Разово)
+Для создания релизов и загрузки собранных файлов экшену требуются права на запись:
+1. Перейдите в **Settings** (Настройки репозитория) -> слева выберите раздел **Actions** -> **General**.
+2. Прокрутите вниз до блока **«Workflow permissions»**.
+3. Выберите пункт **«Read and write permissions»** (Чтение и запись).
+4. Нажмите **Save**.
+
+### 3. Ручной запуск сборки в 1 клик (без ожидания пуша)
+Вы можете запустить сборку и публикацию релиза в любой момент:
+1. Перейдите во вкладку **Actions** на GitHub.
+2. В левой колонке выберите воркфлоу **«Build & Release Dub Mixing Studio»**.
+3. Справа нажмите выпадающую кнопку **«Run workflow»**.
+4. Оставьте галочку **«Publish immediately»** включенной и нажмите зеленую кнопку **«Run workflow»**.
+5. GitHub запустит матричную сборку для Windows, macOS и Linux, после чего релиз сразу появится в разделе **Releases**.
+
+---
+
+## 📦 Что автоматически собирается в каждом релизе:
+
+1. **Windows (x64)**:
+   - `Dub_Mixing_Studio_<version>_Windows_Setup_x64.exe` — полноценный инсталлятор NSIS с ярлыками и установкой в систему.
+   - `Dub_Mixing_Studio_<version>_Windows_Portable_x64.zip` — **портативная версия**, не требующая установки. Запускается с любого диска или USB-флешки.
+2. **macOS (Intel & Apple Silicon)**:
+   - `Dub_Mixing_Studio_<version>_macOS.dmg` — установочный образ диска.
+3. **Linux (x64)**:
+   - `Dub_Mixing_Studio_<version>_Linux_x64.AppImage` — самодостаточный портативный исполняемый файл.
+   - `dub-mixing-studio_<version>_amd64.deb` — установочный пакет для Ubuntu / Debian / Linux Mint.
+   - `Dub_Mixing_Studio_<version>_Linux_Portable_x64.tar.gz` — портативный архив.
+4. **Контрольные суммы**:
+   - `SHA256SUMS.txt` — контрольные суммы всех бинарников для проверки целостности.
+
+---
+
+## 🚀 Выпуск новых версий (Автоматическая версионность)
+
+Для синхронного обновления версии во всех файлах конфигурации (`package.json`, `tauri.conf.json`, `Cargo.toml`) используйте команду:
 
 ```bash
-# Увеличение patch-версии (1.1.0 -> 1.1.1):
+# Повысить патч-версию (например, 1.1.0 -> 1.1.1):
 npm run version:bump patch
 
-# Увеличение minor-версии (1.1.0 -> 1.2.0):
+# Повысить минор-версию (например, 1.1.0 -> 1.2.0):
 npm run version:bump minor
 
-# Увеличение major-версии (1.1.0 -> 2.0.0):
+# Повысить мажор-версию (например, 1.1.0 -> 2.0.0):
 npm run version:bump major
 
-# Установка конкретной версии:
+# Задать точную версию:
 npm run version:bump 1.2.5
 ```
 
-### Как выпустить новую версию в релиз:
+### Как выпустить релиз через Git:
 ```bash
-# 1. Повысить версию
+# 1. Повышаем версию
 npm run version:bump minor
 
-# 2. Закоммитить изменения
+# 2. Создаем коммит и тег
 git add .
 git commit -m "chore: release v1.2.0"
-
-# 3. Создать тег и отправить на GitHub
 git tag v1.2.0
+
+# 3. Отправляем в GitHub
 git push origin main --tags
 ```
-После отправки тега GitHub Actions автоматически запустит сборку всех платформ и опубликует релиз!
-
----
-
-## 3. Генерация иконок (`npm run generate:icons`)
-
-Tauri и операционные системы требуют строгого набора иконок различных размеров и форматов:
-- Исходный вектор: `app-icon.svg` (современный логотип Dub Mixing Studio с виниловым диском и звуковыми волнами).
-- Запуск генератора:
-  ```bash
-  npm run generate:icons
-  ```
-- Результаты создаются в:
-  - `src-tauri/icons/`:
-    - `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.png` (512x512)
-    - `icon.ico` (полноценный Windows ICO файл с размерами 16, 24, 32, 48, 64, 128, 256 px)
-    - `icon.icns` (бинарный Apple Icon с заголовками для macOS)
-    - Windows Store логотипы (`Square*.png`, `StoreLogo.png`)
-  - `public/`:
-    - `favicon.ico`, `favicon.svg`, `pwa-192x192.png`, `pwa-512x512.png`
-
----
-
-## 4. Локальная разработка и сборка
-
-- **Запуск веб-версии**:
-  ```bash
-  npm run dev
-  ```
-- **Сборка веб-версии**:
-  ```bash
-  npm run build
-  ```
-- **Сборка настольного приложения Tauri (локально)**:
-  ```bash
-  npm run build:desktop
-  ```
+GitHub Actions автоматически перехватит тег `v1.2.0`, запустит компиляцию всех версий и опубликует релиз.

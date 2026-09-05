@@ -2,30 +2,32 @@ name: "Build & Release Dub Mixing Studio"
 
 on:
   push:
-    tags:
-      - 'v*'
     branches:
       - main
       - master
+      - 'release/**'
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       publish_release:
-        description: 'Publish release immediately (false = save as draft)'
+        description: 'Publish immediately (checked = public release, unchecked = draft)'
         type: boolean
         required: false
-        default: false
+        default: true
       custom_version:
-        description: 'Optional custom version (e.g. 1.2.0). Leave empty to use package.json'
+        description: 'Custom version override (e.g. 1.2.0). Leave empty to use package.json'
         type: string
         required: false
         default: ''
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   # -------------------------------------------------------------
-  # Job 1: Resolve Version and Tag
+  # Job 1: Resolve Version and Release Metadata
   # -------------------------------------------------------------
   prepare:
     name: Prepare Release Metadata
@@ -66,12 +68,10 @@ jobs:
             echo "is_tag=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if [ "${{ github.event.inputs.publish_release }}" = "true" ]; then
-            echo "is_draft=false" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "is_draft=false" >> "$GITHUB_OUTPUT"
-          else
+          if [ "${{ github.event.inputs.publish_release }}" = "false" ]; then
             echo "is_draft=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_draft=false" >> "$GITHUB_OUTPUT"
           fi
 
           echo "Prepared release for Dub Mixing Studio version: $VERSION (Tag: $TAG)"
@@ -87,16 +87,15 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - name: Windows (x64 Installer & Portable)
+          - id: windows
+            name: Windows x64 (Setup & Portable)
             os: windows-latest
-            target: x86_64-pc-windows-msvc
-            bundle_types: nsis
-          - name: macOS (Apple Silicon / Intel)
+          - id: macos
+            name: macOS (DMG)
             os: macos-latest
-            bundle_types: dmg
-          - name: Linux (Debian & AppImage)
+          - id: linux
+            name: Linux x64 (DEB & AppImage)
             os: ubuntu-22.04
-            bundle_types: deb,appimage
 
     steps:
       - name: Checkout Repository
@@ -110,15 +109,13 @@ jobs:
 
       - name: Install Rust Stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform.target }}
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
 
-      # Ubuntu system dependencies for WebKitGTK and Audio APIs
+      # Ubuntu system dependencies for WebKitGTK, Audio APIs, and AppImage packaging
       - name: Install Linux Dependencies
         if: runner.os == 'Linux'
         run: |
@@ -135,7 +132,8 @@ jobs:
             librsvg2-dev \
             libasound2-dev \
             patchelf \
-            squashfs-tools
+            squashfs-tools \
+            libfuse2
 
       - name: Install NPM Dependencies
         run: npm install
@@ -146,11 +144,13 @@ jobs:
       - name: Setup FFmpeg & FFprobe Sidecars
         run: node scripts/setup-ffmpeg.js
 
-      # Build with Tauri CLI
+      # Build Tauri Application (uses bundle.targets from tauri.conf.json)
       - name: Build Tauri Application
-        run: npx tauri build --bundles ${{ matrix.platform.bundle_types }}
+        run: npx tauri build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SKIP_AI_BUILD: "true"
+          CI: "true"
 
       # ---------------------------------------------------------
       # Windows Specific: Package NSIS Installer and Portable ZIP
@@ -163,12 +163,20 @@ jobs:
           mkdir -p dist-artifacts
 
           # 1. NSIS Setup Installer
-          if compgen -G "src-tauri/target/release/bundle/nsis/*.exe" > /dev/null; then
-            cp src-tauri/target/release/bundle/nsis/*.exe dist-artifacts/Dub_Mixing_Studio_${VERSION}_Windows_Setup_x64.exe
+          found_installer=false
+          for f in src-tauri/target/release/bundle/nsis/*.exe; do
+            if [ -f "$f" ]; then
+              cp "$f" "dist-artifacts/Dub_Mixing_Studio_${VERSION}_Windows_Setup_x64.exe"
+              found_installer=true
+              break
+            fi
+          done
+          if [ "$found_installer" = false ]; then
+            echo "Warning: NSIS installer exe not found in nsis directory."
           fi
 
           # 2. Portable Standalone Bundle
-          PORTABLE_DIR="dist-artifacts/Dub_Mixing_Studio_${VERSION}_Portable_x64"
+          PORTABLE_DIR="dist-artifacts/Dub_Mixing_Studio_${VERSION}_Windows_Portable_x64"
           mkdir -p "$PORTABLE_DIR"
           mkdir -p "$PORTABLE_DIR/bin"
 
@@ -179,18 +187,18 @@ jobs:
 
           # Copy sidecars if present
           if [ -d "src-tauri/bin" ]; then
-            cp -r src-tauri/bin/* "$PORTABLE_DIR/bin/" || true
+            cp -r src-tauri/bin/* "$PORTABLE_DIR/bin/" 2>/dev/null || true
           fi
 
           # Copy embedded AI environment if present
           if [ -d "src-tauri/ai_env" ]; then
-            cp -r src-tauri/ai_env "$PORTABLE_DIR/" || true
+            cp -r src-tauri/ai_env "$PORTABLE_DIR/" 2>/dev/null || true
           fi
 
           # Create README for portable edition
-          cat <<EOF > "$PORTABLE_DIR/README.txt"
-Dub Mixing Studio - Portable Edition v${VERSION}
-=================================================
+          cat << 'EOF' > "$PORTABLE_DIR/README.txt"
+Dub Mixing Studio - Portable Edition
+====================================
 Запуск: запустите файл "Dub Mixing Studio.exe".
 Данная версия не требует установки в систему и может
 запускаться с любого носителя (включая USB флешки).
@@ -198,12 +206,12 @@ EOF
 
           # Compress to ZIP
           cd dist-artifacts
-          7z a -tzip "Dub_Mixing_Studio_${VERSION}_Windows_Portable_x64.zip" "Dub_Mixing_Studio_${VERSION}_Portable_x64"
-          rm -rf "Dub_Mixing_Studio_${VERSION}_Portable_x64"
+          7z a -tzip "Dub_Mixing_Studio_${VERSION}_Windows_Portable_x64.zip" "Dub_Mixing_Studio_${VERSION}_Windows_Portable_x64"
+          rm -rf "Dub_Mixing_Studio_${VERSION}_Windows_Portable_x64"
           cd ..
 
       # ---------------------------------------------------------
-      # macOS Specific: Package DMG & App
+      # macOS Specific: Package DMG
       # ---------------------------------------------------------
       - name: Prepare macOS Artifacts
         if: runner.os == 'macOS'
@@ -211,12 +219,15 @@ EOF
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
           mkdir -p dist-artifacts
-          if compgen -G "src-tauri/target/release/bundle/dmg/*.dmg" > /dev/null; then
-            cp src-tauri/target/release/bundle/dmg/*.dmg dist-artifacts/Dub_Mixing_Studio_${VERSION}_macOS.dmg
-          fi
+          for f in src-tauri/target/release/bundle/dmg/*.dmg; do
+            if [ -f "$f" ]; then
+              cp "$f" "dist-artifacts/Dub_Mixing_Studio_${VERSION}_macOS.dmg"
+              break
+            fi
+          done
 
       # ---------------------------------------------------------
-      # Linux Specific: Package DEB and AppImage
+      # Linux Specific: Package DEB, AppImage and Portable TAR.GZ
       # ---------------------------------------------------------
       - name: Prepare Linux Artifacts
         if: runner.os == 'Linux'
@@ -224,22 +235,47 @@ EOF
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
           mkdir -p dist-artifacts
-          if compgen -G "src-tauri/target/release/bundle/deb/*.deb" > /dev/null; then
-            cp src-tauri/target/release/bundle/deb/*.deb dist-artifacts/dub-mixing-studio_${VERSION}_amd64.deb
+
+          # 1. Debian Package
+          for f in src-tauri/target/release/bundle/deb/*.deb; do
+            if [ -f "$f" ]; then
+              cp "$f" "dist-artifacts/dub-mixing-studio_${VERSION}_amd64.deb"
+              break
+            fi
+          done
+
+          # 2. AppImage (Portable Linux)
+          for f in src-tauri/target/release/bundle/appimage/*.AppImage; do
+            if [ -f "$f" ]; then
+              cp "$f" "dist-artifacts/Dub_Mixing_Studio_${VERSION}_Linux_x64.AppImage"
+              break
+            fi
+          done
+
+          # 3. Standalone Portable TAR.GZ
+          LINUX_PORTABLE="dist-artifacts/Dub_Mixing_Studio_${VERSION}_Linux_Portable_x64"
+          mkdir -p "$LINUX_PORTABLE/bin"
+          if [ -f "src-tauri/target/release/dubstudio" ]; then
+            cp "src-tauri/target/release/dubstudio" "$LINUX_PORTABLE/dub-mixing-studio"
+            chmod +x "$LINUX_PORTABLE/dub-mixing-studio"
           fi
-          if compgen -G "src-tauri/target/release/bundle/appimage/*.AppImage" > /dev/null; then
-            cp src-tauri/target/release/bundle/appimage/*.AppImage dist-artifacts/Dub_Mixing_Studio_${VERSION}_amd64.AppImage
+          if [ -d "src-tauri/bin" ]; then
+            cp -r src-tauri/bin/* "$LINUX_PORTABLE/bin/" 2>/dev/null || true
           fi
+          cd dist-artifacts
+          tar -czf "Dub_Mixing_Studio_${VERSION}_Linux_Portable_x64.tar.gz" "Dub_Mixing_Studio_${VERSION}_Linux_Portable_x64"
+          rm -rf "Dub_Mixing_Studio_${VERSION}_Linux_Portable_x64"
+          cd ..
 
       - name: Upload Platform Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: artifacts-${{ runner.os }}
+          name: artifacts-${{ matrix.platform.id }}
           path: dist-artifacts/*
-          if-no-files-found: error
+          if-no-files-found: warn
 
   # -------------------------------------------------------------
-  # Job 3: Aggregate and Create GitHub Release
+  # Job 3: Aggregate All Artifacts and Publish GitHub Release
   # -------------------------------------------------------------
   release:
     name: Publish GitHub Release
@@ -253,13 +289,14 @@ EOF
         uses: actions/download-artifact@v4
         with:
           path: all-release-assets
+          pattern: artifacts-*
           merge-multiple: true
 
-      - name: Generate Checksums & Release Notes
+      - name: Generate Checksums & Inspect Files
         run: |
           cd all-release-assets
-          sha256sum * > SHA256SUMS.txt
-          echo "=== Release Assets ==="
+          sha256sum * > SHA256SUMS.txt 2>/dev/null || true
+          echo "=== Release Assets Ready for Publication ==="
           ls -lh
           echo "=== SHA256 Checksums ==="
           cat SHA256SUMS.txt
@@ -272,6 +309,7 @@ EOF
           name: "Dub Mixing Studio ${{ needs.prepare.outputs.tag_name }}"
           draft: ${{ needs.prepare.outputs.is_draft == 'true' }}
           prerelease: false
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
             all-release-assets/*

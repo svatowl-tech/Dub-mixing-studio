@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
     <key>NSMicrophoneUsageDescription</key>
-    <string>DubStudio Pro требует доступ к микрофону для записи озвучки.</string>
+    <string>Dub Mixing Studio требует доступ к микрофону для записи озвучки.</string>
     <key>NSCameraUsageDescription</key>
-    <string>DubStudio Pro требует доступ к камере для записи видео-бэкстейджа.</string>
+    <string>Dub Mixing Studio требует доступ к камере для записи видео-бэкстейджа.</string>
 </dict>
 </plist>
