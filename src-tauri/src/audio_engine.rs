@@ -229,7 +229,14 @@ pub fn get_audio_devices() -> Result<Vec<AudioDevice>, String> {
         let host_name = match host_id {
             #[cfg(target_os = "windows")]
             cpal::HostId::Asio => "ASIO".to_string(),
-            _ => format!("{:?}", host_id),
+            _ => {
+                let name = format!("{:?}", host_id);
+                if name.eq_ignore_ascii_case("wasapi") {
+                    "WASAPI".to_string()
+                } else {
+                    name
+                }
+            }
         };
 
         log_debug(&format!("Enumerating devices for host: {}", host_name));
@@ -618,7 +625,14 @@ pub async fn start_recording(
         let id_name = match id {
             #[cfg(target_os = "windows")]
             cpal::HostId::Asio => "ASIO".to_string(),
-            _ => format!("{:?}", id),
+            _ => {
+                let name = format!("{:?}", id);
+                if name.eq_ignore_ascii_case("wasapi") {
+                    "WASAPI".to_string()
+                } else {
+                    name
+                }
+            }
         };
         if id_name.to_uppercase() == host_name_c.to_uppercase() {
             host_id = *id;

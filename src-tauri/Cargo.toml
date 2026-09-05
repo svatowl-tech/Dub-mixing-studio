@@ -34,8 +34,6 @@ ebur128 = "0.1"
 rubato = "0.15"
 
 
-# Required for our audio implementation
-# ASIO feature must be explicitly enabled for Steinberg ASIO SDK support (Windows only)
 [target.'cfg(windows)'.dependencies]
 cpal = { version = "0.15", features = ["asio"] }
 windows = { version = "0.58", features = ["Win32_System_Com", "Win32_System_Threading", "Win32_Foundation"] }
@@ -45,6 +43,7 @@ cpal = { version = "0.15" }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+asio = ["cpal/asio"]
 
 [profile.release]
 lto = true

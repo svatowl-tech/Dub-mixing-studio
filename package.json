@@ -17,6 +17,7 @@
     "tauri": "tauri",
     "generate:icons": "node scripts/generate-icons.js",
     "version:bump": "node scripts/bump-version.js",
+    "setup:asio": "node scripts/setup-asiosdk.js",
     "postinstall": "node scripts/setup-ffmpeg.js"
   },
   "build": {

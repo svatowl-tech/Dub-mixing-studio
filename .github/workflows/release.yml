@@ -144,11 +144,29 @@ jobs:
       - name: Setup FFmpeg & FFprobe Sidecars
         run: node scripts/setup-ffmpeg.js
 
+      # Setup ASIO SDK for Windows low-latency audio support
+      - name: Checkout ASIO SDK (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/checkout@v4
+        with:
+          repository: 'audiosdk/asio'
+          path: 'asio-sdk'
+
+      - name: Setup ASIO SDK Environment (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p /c/ASIOSDK
+          cp -r asio-sdk/* /c/ASIOSDK/
+          echo "CPAL_ASIO_DIR=C:\\ASIOSDK" >> $GITHUB_ENV
+          echo "ASIO SDK successfully configured at C:\\ASIOSDK"
+
       # Build Tauri Application (uses bundle.targets from tauri.conf.json)
       - name: Build Tauri Application
         run: npx tauri build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CPAL_ASIO_DIR: "C:\\ASIOSDK"
           SKIP_AI_BUILD: "true"
           CI: "true"
 
