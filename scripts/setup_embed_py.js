@@ -68,7 +68,7 @@ async function setupWindows() {
         execSync(`"${pyExe}" -m pip install "audio-separator[gpu]" onnxruntime-gpu --no-warn-script-location`, { stdio: 'inherit' });
     } catch (gpuErr) {
         console.warn('[AI Env Setup] GPU audio-separator installation failed, falling back to CPU version:', gpuErr.message);
-        execSync(`"${pyExe}" -m pip install "audio-separator[cpu]" onnxruntime --no-warn-script-location`, { stdio: 'inherit' });
+        execSync(`"${pyExe}" -m pip install "audio-separator[cpu]" onnxruntime --extra-index-url https://download.pytorch.org/whl/cpu --no-warn-script-location`, { stdio: 'inherit' });
     }
     
     // Cleanup temporary install files
@@ -91,7 +91,7 @@ async function setupLinux() {
     const pyExe = path.join(AI_ENV_DIR, 'python', 'bin', 'python3');
     
     console.log('[AI Env Setup] Installing audio-separator for Linux...');
-    execSync(`"${pyExe}" -m pip install "audio-separator[cpu]" onnxruntime --no-warn-script-location`, { stdio: 'inherit' });
+    execSync(`"${pyExe}" -m pip install "audio-separator[cpu]" onnxruntime --extra-index-url https://download.pytorch.org/whl/cpu --no-warn-script-location`, { stdio: 'inherit' });
     
     if (fs.existsSync(pyTarPath)) fs.unlinkSync(pyTarPath);
 }
@@ -114,7 +114,7 @@ async function setupMac() {
     const pyExe = path.join(AI_ENV_DIR, 'python', 'bin', 'python3');
     
     console.log('[AI Env Setup] Installing audio-separator for macOS...');
-    execSync(`"${pyExe}" -m pip install "audio-separator[cpu]" onnxruntime --no-warn-script-location`, { stdio: 'inherit' });
+    execSync(`"${pyExe}" -m pip install "audio-separator[cpu]" onnxruntime --extra-index-url https://download.pytorch.org/whl/cpu --no-warn-script-location`, { stdio: 'inherit' });
     
     if (fs.existsSync(pyTarPath)) fs.unlinkSync(pyTarPath);
 }
