@@ -1,0 +1,135 @@
+{
+  "name": "dub-mixing-studio",
+  "private": true,
+  "version": "1.1.0",
+  "description": "Dub Mixing Studio - Professional Audio Mixing, Dubbing and Source Separation Software",
+  "author": "Dub Mixing Studio Team",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite --port=3000 --host=0.0.0.0",
+    "build": "vite build",
+    "build:desktop": "node scripts/setup_embed_py.js && tauri build",
+    "setup:ai": "node scripts/setup_embed_py.js",
+    "preview": "vite preview",
+    "clean": "rm -rf dist src-tauri/target",
+    "lint": "tsc --noEmit",
+    "tauri": "tauri",
+    "generate:icons": "node scripts/generate-icons.js",
+    "version:bump": "node scripts/bump-version.js",
+    "postinstall": "node scripts/setup-ffmpeg.js"
+  },
+  "build": {
+    "appId": "com.dubmixingstudio.app",
+    "productName": "Dub Mixing Studio",
+    "copyright": "Copyright © 2026 Dub Mixing Studio",
+    "asar": true,
+    "icon": "src-tauri/icons/icon.ico",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/ffmpeg-static",
+        "to": "ffmpeg-static",
+        "filter": [
+          "ffmpeg*",
+          "ffprobe*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "mac": {
+      "category": "public.app-category.video",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "perMachine": true
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 410,
+          "y": 150,
+          "type": "link",
+          "path": "/Applications"
+        },
+        {
+          "x": 130,
+          "y": 150,
+          "type": "file",
+          "path": "${productName}.app"
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "@google/genai": "^1.29.0",
+    "@tailwindcss/vite": "^4.2.2",
+    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-dialog": "^2.7.0",
+    "@vitejs/plugin-react": "^6.0.1",
+    "adm-zip": "^0.5.17",
+    "ass-compiler": "^0.1.16",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
+    "dotenv": "^17.2.3",
+    "epubjs": "^0.3.93",
+    "fast-xml-parser": "^5.7.1",
+    "ffprobe-static": "^3.1.0",
+    "framer-motion": "^12.0.0",
+    "hex": "^0.1.0",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.546.0",
+    "mammoth": "^1.12.0",
+    "md5": "^2.3.0",
+    "pdfjs-dist": "^5.6.205",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-dropzone": "^15.0.0",
+    "react-resizable-panels": "^4.9.0",
+    "tailwind-merge": "^3.5.0",
+    "wavesurfer.js": "^7.12.5",
+    "windows": "^0.1.2",
+    "zustand": "^5.0.13"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.0",
+    "@types/node": "^22.14.0",
+    "autoprefixer": "^10.4.21",
+    "axios": "^1.18.1",
+    "extract-zip": "^2.0.1",
+    "ffmpeg-static": "^5.3.0",
+    "tailwindcss": "^4.1.14",
+    "tar": "^7.5.20",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "vite": "^8.0.8"
+  }
+}

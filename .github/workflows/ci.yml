@@ -1,0 +1,36 @@
+name: "CI - Build & Lint Check"
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  lint-and-validate:
+    name: Lint & Frontend Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Run TypeScript Type Check
+        run: npm run lint
+
+      - name: Validate Cross-Platform Icons
+        run: npm run generate:icons
+
+      - name: Build Web Frontend
+        run: npm run build
+        env:
+          SKIP_AI_BUILD: "true"

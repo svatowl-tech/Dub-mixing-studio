@@ -1,0 +1,2 @@
+[env]
+CPAL_ASIO_DIR = "C:\\ASIOSDK"

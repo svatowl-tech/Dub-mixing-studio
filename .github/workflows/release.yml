@@ -1,0 +1,279 @@
+name: "Build & Release Dub Mixing Studio"
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Publish release immediately (false = save as draft)'
+        type: boolean
+        required: false
+        default: false
+      custom_version:
+        description: 'Optional custom version (e.g. 1.2.0). Leave empty to use package.json'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  # -------------------------------------------------------------
+  # Job 1: Resolve Version and Tag
+  # -------------------------------------------------------------
+  prepare:
+    name: Prepare Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version_step.outputs.version }}
+      tag_name: ${{ steps.version_step.outputs.tag_name }}
+      is_tag: ${{ steps.version_step.outputs.is_tag }}
+      is_draft: ${{ steps.version_step.outputs.is_draft }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Determine Version
+        id: version_step
+        run: |
+          if [ -n "${{ github.event.inputs.custom_version }}" ]; then
+            VERSION="${{ github.event.inputs.custom_version }}"
+            node scripts/bump-version.js "$VERSION"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=$(node -p "require('./package.json').version")
+          fi
+
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "is_tag=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_tag=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "${{ github.event.inputs.publish_release }}" = "true" ]; then
+            echo "is_draft=false" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "is_draft=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_draft=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Prepared release for Dub Mixing Studio version: $VERSION (Tag: $TAG)"
+
+  # -------------------------------------------------------------
+  # Job 2: Cross-Platform Matrix Build
+  # -------------------------------------------------------------
+  build-binaries:
+    name: Build (${{ matrix.platform.name }})
+    needs: prepare
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: Windows (x64 Installer & Portable)
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundle_types: nsis
+          - name: macOS (Apple Silicon / Intel)
+            os: macos-latest
+            bundle_types: dmg
+          - name: Linux (Debian & AppImage)
+            os: ubuntu-22.04
+            bundle_types: deb,appimage
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # Ubuntu system dependencies for WebKitGTK and Audio APIs
+      - name: Install Linux Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            patchelf \
+            squashfs-tools
+
+      - name: Install NPM Dependencies
+        run: npm install
+
+      - name: Generate All Platform Icons
+        run: node scripts/generate-icons.js
+
+      - name: Setup FFmpeg & FFprobe Sidecars
+        run: node scripts/setup-ffmpeg.js
+
+      # Build with Tauri CLI
+      - name: Build Tauri Application
+        run: npx tauri build --bundles ${{ matrix.platform.bundle_types }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------------------------------------------------------
+      # Windows Specific: Package NSIS Installer and Portable ZIP
+      # ---------------------------------------------------------
+      - name: Prepare Windows Artifacts (Installer + Portable)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          mkdir -p dist-artifacts
+
+          # 1. NSIS Setup Installer
+          if compgen -G "src-tauri/target/release/bundle/nsis/*.exe" > /dev/null; then
+            cp src-tauri/target/release/bundle/nsis/*.exe dist-artifacts/Dub_Mixing_Studio_${VERSION}_Windows_Setup_x64.exe
+          fi
+
+          # 2. Portable Standalone Bundle
+          PORTABLE_DIR="dist-artifacts/Dub_Mixing_Studio_${VERSION}_Portable_x64"
+          mkdir -p "$PORTABLE_DIR"
+          mkdir -p "$PORTABLE_DIR/bin"
+
+          # Copy main executable
+          if [ -f "src-tauri/target/release/dubstudio.exe" ]; then
+            cp "src-tauri/target/release/dubstudio.exe" "$PORTABLE_DIR/Dub Mixing Studio.exe"
+          fi
+
+          # Copy sidecars if present
+          if [ -d "src-tauri/bin" ]; then
+            cp -r src-tauri/bin/* "$PORTABLE_DIR/bin/" || true
+          fi
+
+          # Copy embedded AI environment if present
+          if [ -d "src-tauri/ai_env" ]; then
+            cp -r src-tauri/ai_env "$PORTABLE_DIR/" || true
+          fi
+
+          # Create README for portable edition
+          cat <<EOF > "$PORTABLE_DIR/README.txt"
+Dub Mixing Studio - Portable Edition v${VERSION}
+=================================================
+Запуск: запустите файл "Dub Mixing Studio.exe".
+Данная версия не требует установки в систему и может
+запускаться с любого носителя (включая USB флешки).
+EOF
+
+          # Compress to ZIP
+          cd dist-artifacts
+          7z a -tzip "Dub_Mixing_Studio_${VERSION}_Windows_Portable_x64.zip" "Dub_Mixing_Studio_${VERSION}_Portable_x64"
+          rm -rf "Dub_Mixing_Studio_${VERSION}_Portable_x64"
+          cd ..
+
+      # ---------------------------------------------------------
+      # macOS Specific: Package DMG & App
+      # ---------------------------------------------------------
+      - name: Prepare macOS Artifacts
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          mkdir -p dist-artifacts
+          if compgen -G "src-tauri/target/release/bundle/dmg/*.dmg" > /dev/null; then
+            cp src-tauri/target/release/bundle/dmg/*.dmg dist-artifacts/Dub_Mixing_Studio_${VERSION}_macOS.dmg
+          fi
+
+      # ---------------------------------------------------------
+      # Linux Specific: Package DEB and AppImage
+      # ---------------------------------------------------------
+      - name: Prepare Linux Artifacts
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          mkdir -p dist-artifacts
+          if compgen -G "src-tauri/target/release/bundle/deb/*.deb" > /dev/null; then
+            cp src-tauri/target/release/bundle/deb/*.deb dist-artifacts/dub-mixing-studio_${VERSION}_amd64.deb
+          fi
+          if compgen -G "src-tauri/target/release/bundle/appimage/*.AppImage" > /dev/null; then
+            cp src-tauri/target/release/bundle/appimage/*.AppImage dist-artifacts/Dub_Mixing_Studio_${VERSION}_amd64.AppImage
+          fi
+
+      - name: Upload Platform Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ runner.os }}
+          path: dist-artifacts/*
+          if-no-files-found: error
+
+  # -------------------------------------------------------------
+  # Job 3: Aggregate and Create GitHub Release
+  # -------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: [prepare, build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download All Platform Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-release-assets
+          merge-multiple: true
+
+      - name: Generate Checksums & Release Notes
+        run: |
+          cd all-release-assets
+          sha256sum * > SHA256SUMS.txt
+          echo "=== Release Assets ==="
+          ls -lh
+          echo "=== SHA256 Checksums ==="
+          cat SHA256SUMS.txt
+          cd ..
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          name: "Dub Mixing Studio ${{ needs.prepare.outputs.tag_name }}"
+          draft: ${{ needs.prepare.outputs.is_draft == 'true' }}
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            all-release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,10 @@
+{
+  "name": "Dub Mixing Studio",
+  "description": "Профессиональное кроссплатформенное приложение для сведения и озвучивания видеороликов и аудио дорожек.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
