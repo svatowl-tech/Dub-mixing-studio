@@ -133,12 +133,12 @@ export interface TrackProcessing {
   denoise?: {
     enabled: boolean;
     strength: number; // 0..100
-    model: 'deep_noise' | 'cascade_net' | 'reformer_gate' | 'intel_ai_denoise';
+    model: 'deep_noise' | 'spectral_gate' | 'rnnoise' | 'intel_ai_denoise' | 'uvr_denoise_lite' | 'uvr_denoise_foxjoy' | 'uvr_denoise_full' | 'cascade_net';
   };
   dereverb?: {
     enabled: boolean;
     strength: number; // 0..100
-    model: 'rt_dereverb_v2' | 'room_cleaner_neural';
+    model: 'rt_dereverb_v2' | 'room_cleaner_neural' | 'adaptive_gate' | 'uvr_deecho_normal' | 'uvr_deecho_aggressive';
   };
   vstPlugins?: VstPluginInstance[];
   lufsNormalize?: {
@@ -224,6 +224,9 @@ export interface AudioSegment {
   fileDuration: number; // Total duration of the recorded file (seconds)
   blobUrl: string;
   filePath?: string; // Local path for Electron
+  sourceFilePath?: string; // Original raw recording path (for 1-click rollback)
+  backupFilePath?: string; // Previous version before last effect applied
+  processedEffectName?: string; // Badge for last applied effect (e.g., 'VR Denoise', 'Denoise', 'VR De-Echo', 'SmartEQ')
   backstageVideoPath?: string; // Local path for backstage recording
   waveform?: number[]; // Normalized peaks for visualization
   gain: number;
@@ -313,19 +316,19 @@ export interface PrepProcessingConfig {
     vstPluginId?: string;
   };
   
-  // Шумоподавление (AI / Спектральное)
+  // Шумоподавление (AI / Спектральное / VR Architecture)
   denoise: {
     enabled: boolean;
     strength: number; // 0..100
-    model: 'deep_noise' | 'spectral_gate' | 'intel_ai_denoise';
+    model: 'deep_noise' | 'spectral_gate' | 'rnnoise' | 'intel_ai_denoise' | 'uvr_denoise_lite' | 'uvr_denoise_foxjoy' | 'uvr_denoise_full';
     bypass: boolean;
   };
   
-  // Чистка от эха и реверберации помещения
+  // Чистка от эха и реверберации помещения (DSP / VR Architecture)
   dereverb: {
     enabled: boolean;
     strength: number; // 0..100
-    model: 'rt_dereverb_v2' | 'room_cleaner_neural';
+    model: 'rt_dereverb_v2' | 'room_cleaner_neural' | 'adaptive_gate' | 'uvr_deecho_normal' | 'uvr_deecho_aggressive';
     bypass: boolean;
   };
   
@@ -337,10 +340,10 @@ export interface PrepProcessingConfig {
     bypass: boolean;
   };
   
-  // Разделение оригинального трека из видео на голос и музыку (UVR / Demucs)
+  // Разделение оригинального трека из видео на голос и музыку (UVR / Demucs / M&E)
   sourceSeparation: {
     enabled: boolean;
-    model: 'uvr_v5_vocal' | 'htdemucs_vocals_bgm' | 'mdx_net_karaoke';
+    model: 'htdemucs_vocals_bgm' | 'uvr_v5_vocal' | 'mdx_net_karaoke' | 'MDX23C-8Step-VocFT.onnx' | 'UVR-MDX-NET-Voc_FT.onnx' | '5_HP-Karaoke-UVR.onnx' | 'fast_dsp_splitter';
     keepSeparatedStems: boolean;
     bypass: boolean;
   };

@@ -72,13 +72,13 @@ export const createDefaultPhase1 = (type: MixingType) => ({
   denoise: {
     enabled: type !== MixingType.VOICEOVER,
     strength: type === MixingType.DUBBING ? 75 : 50,
-    model: (type === MixingType.DUBBING ? 'deep_noise' : 'spectral_gate') as 'deep_noise' | 'spectral_gate' | 'intel_ai_denoise',
+    model: (type === MixingType.DUBBING ? 'deep_noise' : 'spectral_gate') as any,
     bypass: false,
   },
   dereverb: {
     enabled: type === MixingType.DUBBING || type === MixingType.REDUB,
     strength: type === MixingType.DUBBING ? 70 : 40,
-    model: (type === MixingType.DUBBING ? 'room_cleaner_neural' : 'rt_dereverb_v2') as 'rt_dereverb_v2' | 'room_cleaner_neural',
+    model: (type === MixingType.DUBBING ? 'room_cleaner_neural' : 'rt_dereverb_v2') as any,
     bypass: false,
   },
   volumeLeveler: {
@@ -89,7 +89,7 @@ export const createDefaultPhase1 = (type: MixingType) => ({
   },
   sourceSeparation: {
     enabled: type === MixingType.DUBBING || type === MixingType.REDUB,
-    model: (type === MixingType.DUBBING ? 'htdemucs_vocals_bgm' : 'uvr_v5_vocal') as 'uvr_v5_vocal' | 'htdemucs_vocals_bgm' | 'mdx_net_karaoke',
+    model: (type === MixingType.DUBBING ? 'htdemucs_vocals_bgm' : 'uvr_v5_vocal') as any,
     keepSeparatedStems: true,
     bypass: false,
   }

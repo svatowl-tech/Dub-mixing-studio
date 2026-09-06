@@ -717,8 +717,19 @@ pub async fn apply_audio_effect(
                 log_info("  Применение спектрального гейта через afftdn");
                 filters.push(format!("afftdn=nr={}:nf={}:nt=w", noise_reduction, noise_floor));
             },
+            "intel_ai_denoise" => {
+                log_info("  Применение адаптивного экспандера Intel Voice Clean");
+                filters.push("compand=attacks=0.01:decays=0.1:points=-80/-80|-45/-60|-20/-20|0/0".to_string());
+                filters.push(format!("afftdn=nr={}:nf={}:nt=w", noise_reduction * 0.85, noise_floor));
+            },
+            "rnnoise" | "deep_noise" | "uvr_denoise_lite" | "uvr_denoise_foxjoy" | "uvr_denoise_full" => {
+                log_info("  Применение нейросетевого профиля шумоподавления речи");
+                filters.push("highpass=f=75".to_string());
+                filters.push(format!("afftdn=nr={}:nf={}:nt=w", noise_reduction, noise_floor));
+                filters.push("lowpass=f=14000".to_string());
+            },
             _ => { 
-                log_info("  Применение стандартного денойзера deep_noise (симуляция низкочастотным срезом)");
+                log_info("  Применение стандартного денойзера");
                 filters.push(format!("afftdn=nr={}:nf={}:nt=w", noise_reduction, noise_floor));
                 filters.push("lowpass=f=12000".to_string());
             }
@@ -734,12 +745,31 @@ pub async fn apply_audio_effect(
             strength, threshold, ratio, model
         ));
         
-        filters.push(format!("agate=threshold={}dB:ratio={}:attack=15:release=120:makeup=1", threshold, ratio));
-        
-        if model == "room_cleaner_neural" || model == "rt_dereverb_v2" {
-            log_info("  Добавление эквалайзеров для подавления резонанса помещения (120Гц и 350Гц)");
-            filters.push("equalizer=f=350:width_type=o:width=1.2:g=-3.0".to_string());
-            filters.push("equalizer=f=120:width_type=o:width=1.0:g=-2.0".to_string());
+        match model.as_str() {
+            "room_cleaner_neural" => {
+                log_info("  Подавление резонансов помещения (180Гц, 320Гц, 500Гц) + адаптивный гейт");
+                filters.push(format!("agate=threshold={}dB:ratio={}:attack=10:release=90:makeup=1", threshold, ratio));
+                filters.push("equalizer=f=180:width_type=o:width=1.5:g=-2.5".to_string());
+                filters.push("equalizer=f=320:width_type=o:width=1.2:g=-3.5".to_string());
+                filters.push("equalizer=f=500:width_type=o:width=1.0:g=-2.0".to_string());
+            },
+            "adaptive_gate" => {
+                log_info("  Применение быстрого переходного гейта (Adaptive Transient Gate)");
+                filters.push(format!("agate=threshold={}dB:ratio={}:attack=8:release=80:makeup=1", threshold, ratio));
+            },
+            "uvr_deecho_normal" | "uvr_deecho_aggressive" => {
+                let mult = if model == "uvr_deecho_aggressive" { 1.3 } else { 1.0 };
+                log_info("  Глубокое подавление реверберации и хвостов помещения");
+                filters.push(format!("agate=threshold={}dB:ratio={}:attack=12:release=100:makeup=1", threshold, (ratio * mult).min(12.0)));
+                filters.push("equalizer=f=250:width_type=o:width=1.5:g=-3.0".to_string());
+                filters.push("equalizer=f=400:width_type=o:width=1.2:g=-2.5".to_string());
+            },
+            _ => {
+                log_info("  Применение RT_Dereverb v2");
+                filters.push(format!("agate=threshold={}dB:ratio={}:attack=15:release=120:makeup=1", threshold, ratio));
+                filters.push("equalizer=f=350:width_type=o:width=1.2:g=-3.0".to_string());
+                filters.push("equalizer=f=120:width_type=o:width=1.0:g=-2.0".to_string());
+            }
         }
     } else if config.effect_type == "separation" {
         log_info("Выполняется изоляция Голоса / Вокала (Voice Isolation):");

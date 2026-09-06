@@ -90,7 +90,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     return null;
   }, [project, selectedSegmentIds]);
 
-  const updateSegmentWithProcessedFile = (resultPath: string) => {
+  const updateSegmentWithProcessedFile = (resultPath: string, effectName?: string) => {
     if (!resultPath || !project || !selectedSegment) return;
     const { segment, trackId } = selectedSegment;
 
@@ -105,6 +105,9 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
             if (s.id === segment.id) {
               return {
                 ...s,
+                sourceFilePath: s.sourceFilePath || s.filePath,
+                backupFilePath: s.filePath,
+                processedEffectName: effectName || s.processedEffectName,
                 filePath: resultPath,
                 waveform: undefined, // Clear peaks so App.tsx auto-regenerates
                 isExtractingWaveform: false,
@@ -121,6 +124,46 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     onUpdateProject({ tracks: updatedTracks });
     playbackEngine.updateTracks(updatedTracks).catch(console.error);
     showToast('Сегмент на таймлайне успешно обновлен и перерисован!');
+  };
+
+  const handleRevertSelectedSegment = () => {
+    if (!project || !selectedSegment) return;
+    const { segment, trackId } = selectedSegment;
+    const revertPath = segment.sourceFilePath || segment.backupFilePath;
+    if (!revertPath || revertPath === segment.filePath) {
+      showToast('Сегмент уже находится в исходном состоянии');
+      return;
+    }
+
+    playbackEngine.stop();
+    playbackEngine.clearCache();
+
+    const updatedTracks = project.tracks.map(t => {
+      if (t.id === trackId) {
+        return {
+          ...t,
+          segments: t.segments.map(s => {
+            if (s.id === segment.id) {
+              return {
+                ...s,
+                filePath: revertPath,
+                waveform: undefined,
+                isExtractingWaveform: false,
+                processedEffectName: undefined,
+                backupFilePath: undefined,
+                originalFileName: revertPath.split(/[\\/]/).pop() || s.originalFileName
+              };
+            }
+            return s;
+          })
+        };
+      }
+      return t;
+    });
+
+    onUpdateProject({ tracks: updatedTracks });
+    playbackEngine.updateTracks(updatedTracks).catch(console.error);
+    showToast('Сегмент успешно возвращен к исходному состоянию!');
   };
 
   const handleReplaceSelectedSegment = () => {
@@ -768,8 +811,10 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     
     try {
       let config: any = { effect_type: effectType };
+      let effectLabel = effectType;
 
       if (effectType === 'normalization') {
+        effectLabel = 'Нормализация';
         config = {
           effect_type: 'normalization',
           target_lufs: activePreset.phase1.normalization.targetLufs,
@@ -778,34 +823,79 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           upward_ratio: activePreset.phase1.normalization.upwardRatio,
         };
       } else if (effectType === 'declick') {
+        effectLabel = 'De-Click';
         config = {
           effect_type: 'declick',
           sensitivity: activePreset.phase1.deClick.sensitivity,
           max_click_width_ms: activePreset.phase1.deClick.maxClickWidthMs,
         };
       } else if (effectType === 'smarteq') {
+        effectLabel = 'Smart EQ';
         config = {
           effect_type: 'smarteq',
           eq_profile: activePreset.phase1.eqMatching.profileModel,
         };
       } else if (effectType === 'denoise') {
+        const isVr = activePreset.phase1.denoise.model.startsWith('uvr_');
+        effectLabel = isVr ? 'VR Denoise' : 'Denoise';
         config = {
           effect_type: 'denoise',
           denoise_model: activePreset.phase1.denoise.model,
           denoise_strength: activePreset.phase1.denoise.strength,
         };
       } else if (effectType === 'dereverb') {
+        const isVr = activePreset.phase1.dereverb.model.startsWith('uvr_');
+        effectLabel = isVr ? 'VR De-Echo' : 'Dereverb';
         config = {
           effect_type: 'dereverb',
           dereverb_model: activePreset.phase1.dereverb.model,
           dereverb_strength: activePreset.phase1.dereverb.strength,
         };
       } else if (effectType === 'separation') {
+        effectLabel = 'Separation';
         config = {
           effect_type: 'separation',
           separation_model: activePreset.phase1.sourceSeparation.model,
         };
       }
+
+      // Helper to execute single file through VR service or FFmpeg fallback
+      const processSingleAudioFile = async (inPath: string, outPath: string, eff: string, cfg: any): Promise<string> => {
+        const isVrDenoise = eff === 'denoise' && (cfg.denoise_model?.startsWith('uvr_') || cfg.denoise_model?.includes('.onnx'));
+        const isVrDereverb = eff === 'dereverb' && (cfg.dereverb_model?.startsWith('uvr_') || cfg.dereverb_model?.includes('.onnx'));
+
+        if (isVrDenoise || isVrDereverb) {
+          let modelFilename = 'UVR-DeNoise-Lite.onnx';
+          if (isVrDenoise) {
+            if (cfg.denoise_model === 'uvr_denoise_foxjoy') modelFilename = 'UVR-DeNoise-By-FoxJoy.onnx';
+            else if (cfg.denoise_model === 'uvr_denoise_full') modelFilename = 'UVR-DeNoise.onnx';
+            else modelFilename = 'UVR-DeNoise-Lite.onnx';
+          } else if (isVrDereverb) {
+            if (cfg.dereverb_model === 'uvr_deecho_aggressive') modelFilename = 'UVR-De-Echo-Aggressive.onnx';
+            else modelFilename = 'UVR-De-Echo-Normal.onnx';
+          }
+
+          try {
+            const outDir = outPath.substring(0, Math.max(outPath.lastIndexOf('/'), outPath.lastIndexOf('\\')));
+            const vrResult = await AudioSeparatorService.runSeparation(
+              inPath,
+              modelFilename,
+              outDir || undefined,
+              useGpuForSeparator,
+              false
+            );
+            if (vrResult) return vrResult;
+          } catch (vrErr) {
+            console.warn("VR separator model execution fallback to high-speed DSP filter:", vrErr);
+          }
+        }
+
+        return await invoke<string>('apply_audio_effect', {
+          inputPath: inPath,
+          outputPath: outPath,
+          config: cfg
+        });
+      };
 
       if (effectType === 'separation') {
         // Находим оригинал
@@ -829,26 +919,50 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         const vocalPath = `${dirPath}/${nameWithoutExt}_vocals.${ext}`;
         const instrumentalPath = `${dirPath}/${nameWithoutExt}_instruments.${ext}`;
 
-        await invoke<string>('apply_audio_effect', {
-          inputPath: originalFile,
-          outputPath: vocalPath,
-          config: {
-            effect_type: 'separation',
-            separation_model: activePreset.phase1.sourceSeparation.model || 'htdemucs'
-          }
-        });
+        const sepModel = activePreset.phase1.sourceSeparation.model || 'htdemucs_vocals_bgm';
+        const isVrSep = sepModel.includes('.onnx') || sepModel === 'htdemucs_vocals_bgm' || sepModel === 'uvr_v5_vocal' || sepModel === 'mdx_net_karaoke';
 
-        await invoke<string>('apply_audio_effect', {
+        let voiceResult = vocalPath;
+        let soundResult = instrumentalPath;
+
+        if (isVrSep && sepModel !== 'fast_dsp_splitter') {
+          let modelFilename = 'htdemucs';
+          if (sepModel === 'MDX23C-8Step-VocFT.onnx') modelFilename = 'MDX23C-8Step-VocFT.onnx';
+          else if (sepModel === '5_HP-Karaoke-UVR.onnx' || sepModel === 'mdx_net_karaoke') modelFilename = '5_HP-Karaoke-UVR.onnx';
+          else if (sepModel === 'UVR-MDX-NET-Voc_FT.onnx' || sepModel === 'uvr_v5_vocal') modelFilename = 'UVR-MDX-NET-Voc_FT.onnx';
+          else modelFilename = 'htdemucs';
+
+          try {
+            voiceResult = await AudioSeparatorService.runSeparation(
+              originalFile,
+              modelFilename,
+              dirPath,
+              useGpuForSeparator,
+              false
+            ) || vocalPath;
+          } catch (vrErr) {
+            console.warn("VR isolation fallback to DSP:", vrErr);
+            voiceResult = await invoke<string>('apply_audio_effect', {
+              inputPath: originalFile,
+              outputPath: vocalPath,
+              config: { effect_type: 'separation', separation_model: sepModel }
+            });
+          }
+        } else {
+          voiceResult = await invoke<string>('apply_audio_effect', {
+            inputPath: originalFile,
+            outputPath: vocalPath,
+            config: { effect_type: 'separation', separation_model: sepModel }
+          });
+        }
+
+        soundResult = await invoke<string>('apply_audio_effect', {
           inputPath: originalFile,
           outputPath: instrumentalPath,
-          config: {
-            effect_type: 'separation_instruments',
-            separation_model: activePreset.phase1.sourceSeparation.model || 'htdemucs'
-          }
+          config: { effect_type: 'separation_instruments', separation_model: sepModel }
         });
 
         const duration = project.duration || 60;
-
         const soundsTrackId = 'track-' + Math.random().toString(36).substring(2, 11);
         const voicesTrackId = 'track-' + Math.random().toString(36).substring(2, 11);
 
@@ -859,11 +973,13 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           fileOffset: 0,
           fileDuration: duration,
           blobUrl: '',
-          filePath: instrumentalPath,
+          filePath: soundResult,
+          sourceFilePath: originalFile,
           gain: 1.0,
           playbackRate: 1.0,
           originalFileName: `${nameWithoutExt}_instruments.${ext}`,
-          waveform: []
+          waveform: undefined,
+          isExtractingWaveform: false
         };
 
         const voicesSegment = {
@@ -873,11 +989,13 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           fileOffset: 0,
           fileDuration: duration,
           blobUrl: '',
-          filePath: vocalPath,
+          filePath: voiceResult,
+          sourceFilePath: originalFile,
           gain: 1.0,
           playbackRate: 1.0,
           originalFileName: `${nameWithoutExt}_vocals.${ext}`,
-          waveform: []
+          waveform: undefined,
+          isExtractingWaveform: false
         };
 
         const soundsTrack: AudioTrack = {
@@ -915,15 +1033,52 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
         onUpdateProject({ tracks: updatedTracks });
         playbackEngine.updateTracks(updatedTracks).catch(console.error);
-        showToast('Разделение завершено! Созданы 2 новые дорожки: "Звуки" и "Голоса".');
+        showToast('Разделение оригинала завершено! Добавлены дорожки "Звуки" и "Голоса".');
+      } else if (selectedEffectFile) {
+        // Обработка внешнего выбранного файла
+        const pathParts = selectedEffectFile.split(/[\\/]/);
+        const fileName = pathParts.pop() || '';
+        const dirPath = pathParts.join('/');
+        const extMatch = fileName.match(/\.([^.]+)$/);
+        const ext = extMatch ? extMatch[1] : 'wav';
+        const nameWithoutExt = fileName.replace(/\.[^.]+$/, '');
+        const outFileName = `${nameWithoutExt}_${effectType}.${ext}`;
+        const outputPath = `${dirPath}/${outFileName}`;
+
+        const result = await processSingleAudioFile(selectedEffectFile, outputPath, effectType, config);
+        setProcessedEffectFile(result);
+        showToast(`Файл успешно обработан: ${outFileName}`);
+      } else if (selectedSegment) {
+        // Обработка конкретного выбранного сегмента на таймлайне
+        const { segment } = selectedSegment;
+        if (!segment.filePath) {
+          showToast('У выбранного сегмента отсутствует аудиофайл');
+          return;
+        }
+
+        playbackEngine.stop();
+        playbackEngine.clearCache();
+
+        const pathParts = segment.filePath.split(/[\\/]/);
+        const fileName = pathParts.pop() || '';
+        const dirPath = pathParts.join('/');
+        const extMatch = fileName.match(/\.([^.]+)$/);
+        const ext = extMatch ? extMatch[1] : 'wav';
+        const nameWithoutExt = fileName.replace(/\.[^.]+$/, '').replace(/_(denoise|dereverb|normalization|declick|smarteq|vr_denoise|vr_deecho)/gi, '');
+        const outFileName = `${nameWithoutExt}_${effectType}.${ext}`;
+        const outputPath = `${dirPath}/${outFileName}`;
+
+        const result = await processSingleAudioFile(segment.filePath, outputPath, effectType, config);
+        updateSegmentWithProcessedFile(result, effectLabel);
+        showToast(`Эффект "${effectLabel}" успешно применен к выбранному фрагменту!`);
       } else {
+        // Обработка всех активных дорожек дубляжа
         playbackEngine.stop();
         playbackEngine.clearCache();
 
         let updatedTracks = JSON.parse(JSON.stringify(project.tracks)) as AudioTrack[];
         let processedCount = 0;
 
-        // Фильтруем по чекбоксам (не оригинал, не звуки, не голоса, и чекбокс выбран)
         const targetTracks = updatedTracks.filter(t => t.name !== 'Оригинал' && t.name !== 'Звуки (Музыка)' && t.name !== 'Голоса (Вокал)' && t.isProcessingEnabled !== false);
         const totalSegments = targetTracks.reduce((sum, t) => sum + (t.segments?.length || 0), 0);
 
@@ -934,7 +1089,6 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         }
 
         for (let track of updatedTracks) {
-          const isOriginal = track.name === 'Оригинал';
           const isExcluded = track.name === 'Оригинал' || track.name === 'Звуки (Музыка)' || track.name === 'Голоса (Вокал)';
           const isEnabled = track.isProcessingEnabled !== false;
           if (!isExcluded && isEnabled && track.segments && track.segments.length > 0) {
@@ -946,21 +1100,20 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
               const dirPath = pathParts.join('/');
               const extMatch = fileName.match(/\.([^.]+)$/);
               const ext = extMatch ? extMatch[1] : 'wav';
-              const nameWithoutExt = fileName.replace(/\.[^.]+$/, '');
+              const nameWithoutExt = fileName.replace(/\.[^.]+$/, '').replace(/_(denoise|dereverb|normalization|declick|smarteq|vr_denoise|vr_deecho)/gi, '');
               const outFileName = `${nameWithoutExt}_${effectType}.${ext}`;
               const outputPath = `${dirPath}/${outFileName}`;
 
               try {
-                const result = await invoke<string>('apply_audio_effect', {
-                  inputPath: seg.filePath,
-                  outputPath: outputPath,
-                  config: config
-                });
+                const result = await processSingleAudioFile(seg.filePath, outputPath, effectType, config);
 
+                seg.sourceFilePath = seg.sourceFilePath || seg.filePath;
+                seg.backupFilePath = seg.filePath;
+                seg.processedEffectName = effectLabel;
                 seg.filePath = result;
                 seg.originalFileName = outFileName;
-                seg.id = 'seg-' + Math.random().toString(36).substring(2, 11);
-                seg.waveform = [];
+                seg.waveform = undefined;
+                seg.isExtractingWaveform = false;
                 processedCount++;
               } catch (err) {
                 console.error(`Ошибка обработки сегмента ${seg.id}:`, err);
@@ -977,7 +1130,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
         onUpdateProject({ tracks: updatedTracks });
         playbackEngine.updateTracks(updatedTracks).catch(console.error);
-        showToast(`Эффект "${effectType}" успешно применен к ${processedCount} фрагментам на выбранных дорожках!`);
+        showToast(`Эффект "${effectLabel}" успешно применен к ${processedCount} фрагментам на активных дорожках!`);
       }
     } catch (e: any) {
       console.error(e);
@@ -2011,20 +2164,38 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   };
 
   const renderProcessingActions = (effectType: string, buttonText: string, colorClass: string) => {
+    const hasTargetSegment = !!selectedSegment;
+    const canRevert = !!(selectedSegment?.segment?.sourceFilePath || selectedSegment?.segment?.backupFilePath);
+
     return (
-      <div className="pt-2 border-t border-white/5 space-y-2">
+      <div className="pt-2.5 border-t border-white/5 space-y-2">
+        <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
+          <span>Цель обработки:</span>
+          <span className="font-bold text-zinc-200 truncate max-w-[180px]">
+            {hasTargetSegment 
+              ? `Выбранный сегмент (${selectedSegment.segment.originalFileName || 'дубль'})` 
+              : selectedEffectFile 
+                ? 'Выбранный файл' 
+                : 'Все активные дорожки'}
+          </span>
+        </div>
+
         <div className="flex gap-2">
           <button
+            type="button"
             onClick={handleSelectEffectFile}
-            className="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-700 hover:border-zinc-500 rounded-lg text-xs font-bold transition-all text-zinc-300"
+            className="px-2.5 py-2 bg-zinc-900 border border-zinc-700 hover:border-zinc-500 rounded-lg text-xs font-bold transition-all text-zinc-300 flex items-center justify-center gap-1.5"
+            title="Выбрать внешний аудиофайл для обработки"
           >
-            {selectedEffectFile ? 'Файл выбран' : 'Выбрать файл'}
+            <FolderOpen className="w-3.5 h-3.5 text-zinc-400" />
+            <span className="truncate max-w-[80px]">{selectedEffectFile ? 'Файл выбран' : 'Файл...'}</span>
           </button>
           <button
+            type="button"
             onClick={() => handleApplyEffect(effectType as any)}
-            disabled={isApplyingEffect || !selectedEffectFile}
+            disabled={isApplyingEffect}
             className={cn(
-              "flex-[2] px-3 py-2 text-white rounded-lg text-xs font-bold transition-all flex justify-center items-center gap-2 disabled:opacity-50",
+              "flex-1 px-3 py-2 text-white rounded-lg text-xs font-bold transition-all flex justify-center items-center gap-2 disabled:opacity-50 shadow-md",
               colorClass
             )}
           >
@@ -2032,9 +2203,20 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
             {isApplyingEffect ? 'Обработка...' : buttonText}
           </button>
         </div>
+
+        {canRevert && (
+          <button
+            type="button"
+            onClick={handleRevertSelectedSegment}
+            className="w-full px-2.5 py-1.5 bg-zinc-850 hover:bg-zinc-800 text-amber-300 border border-amber-500/20 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1.5"
+          >
+            <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+            Откатить сегмент к оригиналу (Revert)
+          </button>
+        )}
         
         {processedEffectFile && (
-          <div className="flex flex-col gap-1.5 w-full">
+          <div className="flex flex-col gap-1.5 w-full pt-1">
             <button
               onClick={handleImportEffectFile}
               className="w-full px-3 py-2 bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-600/30 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2"
@@ -3228,11 +3410,18 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 onChange={(e) => updatePhase1({
                                   denoise: { ...activePreset.phase1.denoise, model: e.target.value as any }
                                 })}
-                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 mb-2"
+                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 mb-2 font-mono"
                               >
-                                <option value="deep_noise">Нейросеть (Deep Denoise AI)</option>
-                                <option value="spectral_gate">Спектральный гейт</option>
-                                <option value="intel_ai_denoise">Intel Voice Noise Clean</option>
+                                <optgroup label="⚡ Встроенные (DSP / Оффлайн)">
+                                  <option value="spectral_gate">Спектральный гейт (AFFTDN)</option>
+                                  <option value="deep_noise">Deep Denoise AI (RNNoise)</option>
+                                  <option value="intel_ai_denoise">Intel Voice Clean (Экспандер)</option>
+                                </optgroup>
+                                <optgroup label="🧠 VR Архитектура (UVR5 / Нейросеть)">
+                                  <option value="uvr_denoise_lite">VR-DeNoise Lite (Быстрая очистка)</option>
+                                  <option value="uvr_denoise_foxjoy">VR-DeNoise FoxJoy (Вокал / Речь)</option>
+                                  <option value="uvr_denoise_full">VR-DeNoise Full (Глубокое подавление)</option>
+                                </optgroup>
                               </select>
                             </div>
                             {renderProcessingActions('denoise', 'Подавить шум', 'bg-teal-600 hover:bg-teal-500')}
@@ -3272,10 +3461,17 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 onChange={(e) => updatePhase1({
                                   dereverb: { ...activePreset.phase1.dereverb, model: e.target.value as any }
                                 })}
-                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-mono"
                               >
-                                <option value="rt_dereverb_v2">Дереверберация (RT_Dereverb)</option>
-                                <option value="room_cleaner_neural">Нейроочистка (Neural Room Cleaner)</option>
+                                <optgroup label="⚡ Встроенные (DSP / Оффлайн)">
+                                  <option value="rt_dereverb_v2">RT_Dereverb v2 (DSP подавление)</option>
+                                  <option value="room_cleaner_neural">Neural Room Cleaner (Резонансы)</option>
+                                  <option value="adaptive_gate">Адаптивный гейт (Transient Gate)</option>
+                                </optgroup>
+                                <optgroup label="🧠 VR Архитектура (UVR5 / Нейросеть)">
+                                  <option value="uvr_deecho_normal">VR-DeEcho Normal (Мягкая очистка)</option>
+                                  <option value="uvr_deecho_aggressive">VR-DeEcho Aggressive (Глубокое подавление)</option>
+                                </optgroup>
                               </select>
                             </div>
                             {renderProcessingActions('dereverb', 'Убрать эхо', 'bg-purple-600 hover:bg-purple-500')}
@@ -3361,8 +3557,8 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                           </div>
                         );
                       } else if (stepKey === "sourceSeparation") {
-                        stepName = "Разделение голоса / музыки";
-                        stepDesc = "Разделение вокала и фонового инструментала";
+                        stepName = "Разделение оригинала (M&E / Голос)";
+                        stepDesc = "Разделение оригинальной дорожки на Музыку/Шумы и Голос";
                         stepIcon = <Volume2 className="w-3.5 h-3.5 text-indigo-400" />;
                         stepBypass = activePreset.phase1.sourceSeparation.bypass;
                         handleBypassToggle = () => updatePhase1({
@@ -3370,18 +3566,29 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                         });
                         stepElement = (
                           <div className="space-y-2.5 animate-fade-in text-xs">
+                            <div className="p-2 bg-indigo-950/30 border border-indigo-500/20 rounded-lg text-[11px] text-indigo-300 flex items-center justify-between">
+                              <span>Целевой трек:</span>
+                              <span className="font-bold text-white">Оригинал (Видео / Референс)</span>
+                            </div>
+
                             <div className="space-y-1">
-                              <label className="text-[10px] text-zinc-500 uppercase font-black block">Модель разделения (UVR5)</label>
+                              <label className="text-[10px] text-zinc-500 uppercase font-black block">Модель разделения (UVR5 / Demucs)</label>
                               <select 
                                 value={activePreset.phase1.sourceSeparation.model}
                                 onChange={(e) => updatePhase1({
                                   sourceSeparation: { ...activePreset.phase1.sourceSeparation, model: e.target.value as any }
                                 })}
-                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-mono"
                               >
-                                <option value="uvr_v5_vocal">UVR v5 Vocal Isolation</option>
-                                <option value="htdemucs_vocals_bgm">HTDemucs (Голос + Музыка)</option>
-                                <option value="mdx_net_karaoke">MDX Net Karaoke (Караоке-микс)</option>
+                                <optgroup label="🧠 Нейросети (UVR5 / Demucs)">
+                                  <option value="htdemucs_vocals_bgm">HTDemucs v4 (Голос + Музыка)</option>
+                                  <option value="MDX23C-8Step-VocFT.onnx">MDX23C 8-Step Vocal FT</option>
+                                  <option value="UVR-MDX-NET-Voc_FT.onnx">UVR MDX-Net Vocals</option>
+                                  <option value="5_HP-Karaoke-UVR.onnx">5_HP Karaoke UVR (Караоке)</option>
+                                </optgroup>
+                                <optgroup label="⚡ DSP">
+                                  <option value="fast_dsp_splitter">Быстрый стерео/фазовый сплиттер (DSP)</option>
+                                </optgroup>
                               </select>
                             </div>
                             <label className="flex items-center gap-1.5 cursor-pointer">
@@ -3393,9 +3600,9 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 })}
                                 className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
                               />
-                              <span className="text-[10px] text-zinc-400">Сохранять стемы (вокал и фоновый инструментал)</span>
+                              <span className="text-[10px] text-zinc-400">Создать отдельные дорожки "Звуки" и "Голоса"</span>
                             </label>
-                            {renderProcessingActions('separation', 'Разделить (UVR)', 'bg-sky-600 hover:bg-sky-500')}
+                            {renderProcessingActions('separation', 'Разделить оригинал', 'bg-sky-600 hover:bg-sky-500')}
                           </div>
                         );
                       } else if (stepKey.startsWith("vstStep_")) {
