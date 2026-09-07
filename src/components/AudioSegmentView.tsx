@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { GripVertical, Trash2, RotateCcw, Scissors, Edit3, Maximize, Volume2, Video, Copy, ClipboardPaste } from 'lucide-react';
+import { GripVertical, Trash2, RotateCcw, Scissors, Edit3, Maximize, Volume2, Video, Copy, ClipboardPaste, AlertTriangle, CheckCircle2, Wand2, Activity } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { AudioSegment } from '../types';
 import { VirtualizedWaveform } from './VirtualizedWaveform';
 import { SmartAlignService } from '../services/smartAlignService';
 import { ContextMenu } from './ContextMenu';
 import { logger } from '../lib/logger';
+import { SpectralAnalysisModal } from './SpectralAnalysisModal';
 
 export const AudioSegmentView = React.memo(({ 
   seg, 
@@ -28,7 +29,9 @@ export const AudioSegmentView = React.memo(({
   currentTimeRef,
   autoFadeIn = 0,
   autoFadeOut = 0,
-  trackVolume
+  trackVolume,
+  waveformScaleMode = 'real',
+  waveformVisualGain = 1
 }: { 
   seg: AudioSegment, 
   trackId: string,
@@ -51,6 +54,8 @@ export const AudioSegmentView = React.memo(({
   autoFadeIn?: number,
   autoFadeOut?: number,
   trackVolume?: number,
+  waveformScaleMode?: 'real' | 'normalized',
+  waveformVisualGain?: number,
   key?: string | number
 }) => {
   const [isResizing, setIsResizing] = useState<'left' | 'right' | 'drag' | 'slip' | null>(null);
@@ -58,6 +63,7 @@ export const AudioSegmentView = React.memo(({
   const [isAligning, setIsAligning] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number } | null>(null);
   const [activeLineDrag, setActiveLineDrag] = useState<'volume' | 'panning' | null>(null);
+  const [showSpectralAnalysis, setShowSpectralAnalysis] = useState(false);
 
   const handleLineMouseDown = (e: React.MouseEvent, type: 'volume' | 'panning') => {
     e.stopPropagation();
@@ -304,7 +310,10 @@ export const AudioSegmentView = React.memo(({
       className={cn(
         "absolute h-full flex items-center overflow-hidden transition-all group cursor-move pointer-events-auto",
         "bg-indigo-500/40 border-x border-indigo-500/60 z-10 shadow-[0_0_10px_rgba(99,102,241,0.2)]",
-        isSelected && "ring-2 ring-white ring-inset"
+        isSelected && "ring-2 ring-white ring-inset",
+        seg.timingWarning === 'overlap' && "border-2 !border-rose-500 !bg-rose-950/60 !shadow-[0_0_15px_rgba(244,63,94,0.5)] z-20",
+        seg.timingWarning === 'too_short' && "border-2 !border-amber-500 !bg-amber-950/60 !shadow-[0_0_15px_rgba(245,158,11,0.5)] z-20",
+        seg.timingWarning === 'desync' && "border-2 !border-orange-500 !bg-orange-950/60 !shadow-[0_0_15px_rgba(249,115,22,0.5)] z-20"
       )}
       style={{ 
         left: `${(seg.startTime + (audioOffsetMs / 1000)) * zoom}px`, 
@@ -322,6 +331,10 @@ export const AudioSegmentView = React.memo(({
           segmentOffset={seg.fileOffset || 0}
           segmentStartTime={seg.startTime}
           audioOffsetMs={audioOffsetMs}
+          gain={seg.gain ?? 1}
+          trackVolume={trackVolume ?? 1}
+          scaleMode={waveformScaleMode}
+          visualGain={waveformVisualGain}
         />
       )}
 
@@ -393,6 +406,31 @@ export const AudioSegmentView = React.memo(({
           {seg.text && (
             <span className="text-[7px] font-black bg-black/40 px-1 rounded text-indigo-300">
               {seg.text}
+            </span>
+          )}
+          {seg.timingWarning && (
+            <span 
+              className={cn(
+                "text-[7px] font-black px-1.5 py-0.2 rounded flex items-center gap-0.5 shadow cursor-pointer",
+                seg.timingWarning === 'overlap' && "bg-rose-600 text-white animate-pulse",
+                seg.timingWarning === 'too_short' && "bg-amber-500 text-black",
+                seg.timingWarning === 'desync' && "bg-orange-600 text-white"
+              )}
+              title={seg.timingWarningDetail || 'Проблема тайминга'}
+            >
+              <AlertTriangle className="w-2 h-2" />
+              {seg.timingWarning === 'overlap' && 'Наезд'}
+              {seg.timingWarning === 'too_short' && 'Короче саба'}
+              {seg.timingWarning === 'desync' && 'Рассинхрон'}
+            </span>
+          )}
+          {seg.alignedWithOriginal && !seg.timingWarning && (
+            <span 
+              className="text-[7px] font-black bg-emerald-600/60 px-1 py-0.2 rounded text-emerald-200 flex items-center gap-0.5"
+              title="Старт фразы выровнен по оригинальному голосу"
+            >
+              <CheckCircle2 className="w-2 h-2" />
+              Синхрон
             </span>
           )}
           {seg.gain !== 1 && (
@@ -564,9 +602,19 @@ export const AudioSegmentView = React.memo(({
               onClick: () => onPasteSegments?.()
             },
             {
+              label: "Спектральный анализ",
+              icon: <Activity className="w-3.5 h-3.5 text-purple-400" />,
+              onClick: () => setShowSpectralAnalysis(true)
+            },
+            {
               label: "Нормализовать громкость",
               icon: <Maximize className="w-3.5 h-3.5 text-emerald-400" />,
               onClick: () => onUpdateSegment(trackId, seg.id, { gain: 1.0 })
+            },
+            {
+              label: "Пересчитать пики волны (по файлу)",
+              icon: <RotateCcw className="w-3.5 h-3.5 text-sky-400" />,
+              onClick: () => onUpdateSegment(trackId, seg.id, { waveform: [] })
             },
             {
               label: "Разделить (в плейхеде)",
@@ -586,6 +634,41 @@ export const AudioSegmentView = React.memo(({
                 if (newText !== null) onUpdateSegment(trackId, seg.id, { text: newText });
               }
             },
+            ...(seg.targetStartTime !== undefined ? [{
+              label: "Синхронизировать начало по оригиналу",
+              icon: <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />,
+              onClick: () => {
+                if (seg.targetStartTime !== undefined) {
+                  onUpdateSegment(trackId, seg.id, { 
+                    startTime: seg.targetStartTime,
+                    alignedWithOriginal: true,
+                    timingWarning: undefined,
+                    timingWarningDetail: undefined
+                  });
+                }
+              }
+            }] : []),
+            ...(seg.timingWarning === 'overlap' ? [{
+              label: "Устранить наезд (сдвинуть в стык)",
+              icon: <Wand2 className="w-3.5 h-3.5 text-amber-400" />,
+              onClick: () => {
+                onUpdateSegment(trackId, seg.id, {
+                  startTime: seg.startTime + 0.35,
+                  timingWarning: undefined,
+                  timingWarningDetail: undefined
+                });
+              }
+            }] : []),
+            ...(seg.timingWarning ? [{
+              label: "Снять метку предупреждения",
+              icon: <RotateCcw className="w-3.5 h-3.5 text-zinc-400" />,
+              onClick: () => {
+                onUpdateSegment(trackId, seg.id, {
+                  timingWarning: undefined,
+                  timingWarningDetail: undefined
+                });
+              }
+            }] : []),
             ...(onGlueSegments ? [{
               label: "Склеить выделенные (Glue)",
               icon: <Volume2 className="w-3.5 h-3.5 text-indigo-400" />,
@@ -598,6 +681,14 @@ export const AudioSegmentView = React.memo(({
               onClick: () => onDeleteSegment?.(trackId, seg.id)
             }
           ]}
+        />
+      )}
+
+      {showSpectralAnalysis && (
+        <SpectralAnalysisModal
+          segment={seg}
+          onClose={() => setShowSpectralAnalysis(false)}
+          onUpdateSegment={onUpdateSegment}
         />
       )}
     </div>

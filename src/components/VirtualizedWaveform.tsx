@@ -10,6 +10,10 @@ export const VirtualizedWaveform = ({
   segmentOffset = 0,
   segmentStartTime = 0,
   audioOffsetMs = 0,
+  gain = 1,
+  trackVolume = 1,
+  scaleMode = 'real',
+  visualGain = 1,
 }: { 
   peaks: number[], 
   zoom: number, 
@@ -19,7 +23,11 @@ export const VirtualizedWaveform = ({
   isRelative?: boolean,
   segmentOffset?: number, // fileOffset in the segment
   segmentStartTime?: number, // startTime on the timeline
-  audioOffsetMs?: number // global project offset
+  audioOffsetMs?: number, // global project offset
+  gain?: number,
+  trackVolume?: number,
+  scaleMode?: 'real' | 'normalized',
+  visualGain?: number,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
@@ -86,13 +94,16 @@ export const VirtualizedWaveform = ({
     
     if (!peaks || peaks.length === 0 || duration <= 0) return;
     
-    // Find the maximum peak for normalization
-    let maxPeak = 0.0001; 
-    for (let i = 0; i < peaks.length; i++) { 
+    let scaleFactor = 1.0;
+    if (scaleMode === 'normalized') {
+      let maxPeak = 0.0001; 
+      for (let i = 0; i < peaks.length; i++) { 
         if (peaks[i] > maxPeak) maxPeak = peaks[i]; 
+      }
+      scaleFactor = 1 / maxPeak;
     }
-    
-    const scaleFactor = 1 / maxPeak;
+
+    const effectiveGain = (gain ?? 1.0) * (trackVolume ?? 1.0) * (visualGain ?? 1.0);
 
     const totalPeaks = peaks.length;
     const peaksPerSecond = totalPeaks / duration;
@@ -100,22 +111,37 @@ export const VirtualizedWaveform = ({
     const startIdx = Math.max(0, Math.floor((drawStart + segmentOffset) * peaksPerSecond));
     const endIdx = Math.min(totalPeaks, Math.ceil((drawEnd + segmentOffset) * peaksPerSecond));
     
-    const drawPoints: { x: number, yTop: number, yBottom: number }[] = [];
+    const drawPoints: { x: number, yTop: number, yBottom: number, isClipping: boolean }[] = [];
     
     for (let i = startIdx; i < endIdx; i++) {
-      const normalizedPeak = peaks[i] * scaleFactor;
-      // Mild log scale to make soft sounds visible while keeping loud parts under control
-      const visualPeak = Math.pow(normalizedPeak, 0.55); 
+      const rawPeak = peaks[i] || 0;
+      let visualPeak = 0;
+      let isClipping = false;
+
+      if (scaleMode === 'normalized') {
+        const normalizedPeak = rawPeak * scaleFactor * (visualGain ?? 1.0);
+        visualPeak = Math.pow(Math.min(1.0, Math.max(0, normalizedPeak)), 0.7);
+        isClipping = normalizedPeak > 1.05;
+      } else {
+        // REAL MODE: True linear amplitude relative to 0 dBFS (1.0 = Digital Full Scale)
+        // Reflects real volume of the track and clip gain.
+        const effectiveAmp = rawPeak * effectiveGain;
+        isClipping = effectiveAmp > 1.001;
+        visualPeak = Math.min(1.0, Math.max(0, effectiveAmp));
+      }
 
       const localTime = (i / peaksPerSecond) - segmentOffset;
       const x = (localTime - drawStart) * zoom;
       
-      // Leave 8% vertical margin so the outlines never clip the track container border
-      const h = Math.max(1.5, visualPeak * (height * 0.84));
+      // Real amplitude mapping:
+      // Maximum full-scale (1.0 = 0 dBFS) uses 94% of the track height (3% margin top & bottom).
+      // If visualPeak is 0 (silence), height is 0 (displays clean center zero reference line).
+      const maxSpan = height * 0.94;
+      const h = visualPeak > 0.0005 ? Math.max(1.5, visualPeak * maxSpan) : 0;
       const yTop = (height - h) / 2;
       const yBottom = (height + h) / 2;
       
-      drawPoints.push({ x, yTop, yBottom });
+      drawPoints.push({ x, yTop, yBottom, isClipping });
     }
 
     // Helper for beautiful translucent gradient fills
@@ -149,17 +175,17 @@ export const VirtualizedWaveform = ({
       return hexOrRgb;
     };
 
-    // Draw a very subtle middle-zero reference line, like professional DAWs
+    // Draw a subtle middle-zero reference line, like professional DAWs
     ctx.beginPath();
     ctx.moveTo(0, height / 2);
     ctx.lineTo(safeWidth, height / 2);
-    ctx.strokeStyle = getRgbaColor(color, 0.15);
+    ctx.strokeStyle = getRgbaColor(color, 0.18);
     ctx.lineWidth = 1;
     ctx.stroke();
 
     if (drawPoints.length > 1) {
       // 1. Draw continuous filled polygon for the main body
-      const fillGradient = ctx.createLinearGradient(0, height * 0.08, 0, height * 0.92);
+      const fillGradient = ctx.createLinearGradient(0, height * 0.05, 0, height * 0.95);
       fillGradient.addColorStop(0, getRgbaColor(color, 0.08));  // slight outer fade
       fillGradient.addColorStop(0.3, getRgbaColor(color, 0.45)); // rich inner body
       fillGradient.addColorStop(0.5, getRgbaColor(color, 0.55)); // brightest center
@@ -179,7 +205,7 @@ export const VirtualizedWaveform = ({
       ctx.fillStyle = fillGradient;
       ctx.fill();
 
-      // 2. Draw extremely sharp glowing top-line contour
+      // 2. Draw sharp glowing top-line contour
       ctx.beginPath();
       ctx.moveTo(drawPoints[0].x, drawPoints[0].yTop);
       for (let i = 1; i < drawPoints.length; i++) {
@@ -190,7 +216,7 @@ export const VirtualizedWaveform = ({
       ctx.lineJoin = 'round';
       ctx.stroke();
 
-      // 3. Draw extremely sharp glowing bottom-line contour
+      // 3. Draw sharp glowing bottom-line contour
       ctx.beginPath();
       ctx.moveTo(drawPoints[0].x, drawPoints[0].yBottom);
       for (let i = 1; i < drawPoints.length; i++) {
@@ -200,6 +226,23 @@ export const VirtualizedWaveform = ({
       ctx.lineWidth = 1.3;
       ctx.lineJoin = 'round';
       ctx.stroke();
+
+      // 4. Digital clipping indicators (> 0 dBFS)
+      const hasClipping = drawPoints.some(p => p.isClipping);
+      if (hasClipping) {
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.95)'; // Rose-500 clipping alert
+        ctx.lineWidth = 2.0;
+        ctx.beginPath();
+        for (let i = 0; i < drawPoints.length; i++) {
+          if (drawPoints[i].isClipping) {
+            ctx.moveTo(drawPoints[i].x - 1, drawPoints[i].yTop);
+            ctx.lineTo(drawPoints[i].x + 1, drawPoints[i].yTop);
+            ctx.moveTo(drawPoints[i].x - 1, drawPoints[i].yBottom);
+            ctx.lineTo(drawPoints[i].x + 1, drawPoints[i].yBottom);
+          }
+        }
+        ctx.stroke();
+      }
     } else if (drawPoints.length === 1) {
       // Fallback for single data point
       ctx.beginPath();
@@ -209,7 +252,7 @@ export const VirtualizedWaveform = ({
       ctx.lineWidth = 2;
       ctx.stroke();
     }
-  }, [peaks, zoom, duration, color, vRange, isRelative, segmentOffset, segmentStartTime, audioOffsetMs]);
+  }, [peaks, zoom, duration, color, vRange, isRelative, segmentOffset, segmentStartTime, audioOffsetMs, gain, trackVolume, scaleMode, visualGain]);
   
   return <canvas ref={canvasRef} className="absolute top-0 h-full pointer-events-none" />;
 };

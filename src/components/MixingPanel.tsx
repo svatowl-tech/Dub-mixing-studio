@@ -26,7 +26,15 @@ import {
   GripVertical,
   Trash2,
   Plus,
-  X
+  X,
+  Wand2,
+  Scissors,
+  Mic,
+  CheckCircle2,
+  AlertTriangle,
+  Split,
+  Search,
+  CheckCheck
 } from 'lucide-react';
 import { 
   Project, 
@@ -37,7 +45,8 @@ import {
   MixingEffectsConfig,
   FinalMixConfig,
   VstStepConfig,
-  AudioTrack
+  AudioTrack,
+  TimingIssue
 } from '../types';
 import { 
   DEFAULT_MIXING_PRESETS,
@@ -48,6 +57,7 @@ import {
 } from '../lib/defaultPresets';
 import { cn, getGlobalAudioSettings } from '../lib/utils';
 import { AudioSeparatorService } from '../services/audioSeparatorService';
+import { TimingAlignmentService } from '../services/timingAlignmentService';
 import { open as rawOpen } from '@tauri-apps/plugin-dialog';
 import { invoke as rawInvoke } from '@tauri-apps/api/core';
 
@@ -79,7 +89,7 @@ interface MixingPanelProps {
 }
 
 export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProject, fullHeight }) => {
-  const { selectedSegmentIds } = useTimelineData();
+  const { selectedSegmentIds, handleSeek } = useTimelineData();
 
   const selectedSegment = useMemo(() => {
     if (!project || !selectedSegmentIds || selectedSegmentIds.length === 0) return null;
@@ -219,6 +229,12 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   const [selectedEffectFile, setSelectedEffectFile] = useState<string>('');
   const [isApplyingEffect, setIsApplyingEffect] = useState(false);
   const [processedEffectFile, setProcessedEffectFile] = useState<string>('');
+
+  // Timing & Alignment (Фаза 2) states
+  const [timingIssues, setTimingIssues] = useState<TimingIssue[]>([]);
+  const [isAligningPhrases, setIsAligningPhrases] = useState(false);
+  const [isSplittingSilence, setIsSplittingSilence] = useState(false);
+  const [timingInspectionDone, setTimingInspectionDone] = useState(false);
 
   useEffect(() => {
     if (selectedSegment && selectedSegment.segment.filePath) {
@@ -1218,8 +1234,12 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     }
   };
 
-  const handleRunSeparation = async () => {
-    if (!selectedSeparatorFile) {
+  const handleRunSeparation = async (fileOverride?: string) => {
+    const originalTrack = project?.tracks.find(t => t.name === 'Оригинал');
+    const defaultOriginalFile = originalTrack?.segments?.[0]?.filePath || project?.referenceAudioPath || project?.videoPath || '';
+    const fileToUse = fileOverride || selectedSeparatorFile || defaultOriginalFile;
+
+    if (!fileToUse) {
       showToast('Пожалуйста, выберите файл для обработки');
       return;
     }
@@ -1228,10 +1248,12 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     setSeparatorProgress({ percent: 0, stage: 'Инициализация...' });
     setSeparatorOutputMsg('');
 
+    const modelToUse = activePreset.phase1.sourceSeparation.model || selectedSeparatorModel || 'htdemucs';
+
     try {
       const result = await AudioSeparatorService.runSeparation(
-        selectedSeparatorFile,
-        selectedSeparatorModel,
+        fileToUse,
+        modelToUse,
         project?.projectPath || '',
         useGpuForSeparator,
         false, // can be custom
@@ -2377,6 +2399,116 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     setActivePreset(updated);
   };
 
+  // --- Phase 2 Actions & Timing Handlers ---
+  const handleSplitSilence = () => {
+    if (!project || !project.tracks || project.tracks.length === 0) {
+      showToast('Нет дорожек для разреза по тишине');
+      return;
+    }
+    setIsSplittingSilence(true);
+    try {
+      const cfg = activePreset.phase2.silenceSplit;
+      const originalTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
+      
+      const updatedTracks = project.tracks.map(track => {
+        if (track.type === 'original' || (originalTrack && track.id === originalTrack.id)) {
+          return track;
+        }
+        return TimingAlignmentService.splitTrackBySilence(track, {
+          thresholdDb: cfg.thresholdDb,
+          minSilenceDurationMs: cfg.minSilenceDurationMs
+        });
+      });
+
+      onUpdateProject({ tracks: updatedTracks });
+      showToast('Разрез по тишине выполнен: тишина удалена, каждая фраза выделена в отдельный клип!');
+    } catch (err: any) {
+      console.error(err);
+      showToast('Ошибка при нарезке по тишине: ' + err.message);
+    } finally {
+      setIsSplittingSilence(false);
+    }
+  };
+
+  const handleAlignAllPhrases = async () => {
+    if (!project || !project.tracks || project.tracks.length === 0) {
+      showToast('Нет дорожек в проекте');
+      return;
+    }
+    setIsAligningPhrases(true);
+    try {
+      const originalTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
+      const allIssues: TimingIssue[] = [];
+      const updatedTracks: AudioTrack[] = [];
+
+      for (const track of project.tracks) {
+        if (track.type === 'original' || (originalTrack && track.id === originalTrack.id)) {
+          updatedTracks.push(track);
+          continue;
+        }
+        const res = await TimingAlignmentService.alignTrackPhrases(
+          track,
+          originalTrack,
+          project.subtitles || [],
+          project.mixingType || ('VOICEOVER' as any),
+          activePreset.phase2
+        );
+        allIssues.push(...res.issues);
+        updatedTracks.push(res.updatedTrack);
+      }
+
+      onUpdateProject({ tracks: updatedTracks });
+      setTimingIssues(allIssues);
+      setTimingInspectionDone(true);
+
+      const overlapCount = allIssues.filter(i => i.type === 'overlap').length;
+      const shortCount = allIssues.filter(i => i.type === 'too_short').length;
+      
+      let msg = 'Выравнивание по оригиналу завершено: старт фраз синхронизирован!';
+      if (overlapCount > 0 || shortCount > 0) {
+        msg += ` Замечания: наездов: ${overlapCount}, короче саба: ${shortCount}`;
+      }
+      showToast(msg);
+    } catch (err: any) {
+      console.error(err);
+      showToast('Ошибка выравнивания: ' + err.message);
+    } finally {
+      setIsAligningPhrases(false);
+    }
+  };
+
+  const handleInspectTiming = () => {
+    if (!project) return;
+    const originalTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
+    const issues = TimingAlignmentService.validateAllTracksTiming(
+      project.tracks,
+      originalTrack,
+      project.subtitles || [],
+      project.mixingType || ('VOICEOVER' as any),
+      activePreset.phase2
+    );
+    setTimingIssues(issues);
+    setTimingInspectionDone(true);
+    showToast(`Проверка завершена: найдено вопросов/конфликтов: ${issues.length}`);
+  };
+
+  const handleAutoFixIssue = (issue: TimingIssue) => {
+    if (!project) return;
+    const updatedTracks = TimingAlignmentService.autoFixIssue(issue, project.tracks);
+    onUpdateProject({ tracks: updatedTracks });
+    setTimingIssues(prev => prev.filter(i => i.id !== issue.id));
+    showToast('Конфликт успешно устранен!');
+  };
+
+  const handleAutoFixAllIssues = () => {
+    if (!project) return;
+    const fixableCount = timingIssues.filter(i => i.canAutoFix).length;
+    const updatedTracks = TimingAlignmentService.autoFixAllIssues(timingIssues, project.tracks);
+    onUpdateProject({ tracks: updatedTracks });
+    setTimingIssues(prev => prev.filter(i => !i.canAutoFix));
+    showToast(`Устранено конфликтов: ${fixableCount}`);
+  };
+
   return (
     <div className={cn(
       "w-full flex flex-col font-sans relative select-none",
@@ -2603,300 +2735,6 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
                 {activePreset.phase1.enabled && (
                   <div className="space-y-4 opacity-100 transition-opacity">
-                    
-                    {/* UVR5 / Audio Separator AI Panel */}
-                    <div className="bg-zinc-900/40 border border-indigo-500/10 p-3.5 rounded-xl space-y-4">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <div className="w-6 h-6 bg-indigo-500/15 rounded-lg flex items-center justify-center border border-indigo-500/30 animate-pulse">
-                            <Cpu className="w-3.5 h-3.5 text-indigo-400" />
-                          </div>
-                          <div className="flex flex-col">
-                            <span className="font-bold text-zinc-200 text-xs">ИИ-очистка и разделение (UVR5)</span>
-                            <span className="text-[9px] text-indigo-400">Служба нейросетевой обработки звука</span>
-                          </div>
-                        </div>
-                        <button 
-                          onClick={refreshSeparatorStatus}
-                          className="p-1 hover:bg-white/5 rounded text-zinc-400 hover:text-zinc-200 transition-colors"
-                          title="Обновить статус"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-
-                      {/* Status section */}
-                      {!separatorStatus ? (
-                        <div className="flex items-center gap-2 text-[11px] text-zinc-400 py-1 bg-zinc-950/20 px-2 rounded border border-white/5">
-                          <div className="w-1.5 h-1.5 bg-yellow-500 rounded-full animate-ping" />
-                          <span>Проверка окружения ИИ...</span>
-                        </div>
-                      ) : !separatorStatus.python_found ? (
-                        <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-lg space-y-2">
-                          <div className="flex items-start gap-2 text-red-400 text-[11px] font-medium">
-                            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                            <span>Встроенная среда Python для ИИ не найдена или заблокирована (ACL).</span>
-                          </div>
-                          <p className="text-[10px] text-zinc-400 leading-normal">
-                            Пожалуйста, убедитесь, что приложение собрано с актуальными правами доступа, или дождитесь завершения инициализации окружения.
-                          </p>
-                        </div>
-                      ) : !separatorStatus.separator_installed ? (
-                        <div className="p-3 bg-yellow-950/10 border border-yellow-500/10 rounded-lg space-y-3">
-                          <div className="flex items-start gap-2 text-yellow-400 text-[11px] font-medium">
-                            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                            <span>Библиотека audio-separator не установлена.</span>
-                          </div>
-                          <p className="text-[10px] text-zinc-400 leading-normal">
-                            Для запуска локального шумоподавления и разделения треков (UVR5) необходимо установить этот модуль в Python.
-                          </p>
-                          
-                          <div className="space-y-2 border-t border-white/5 pt-2">
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input 
-                                type="checkbox"
-                                checked={useGpuForSeparator}
-                                onChange={(e) => setUseGpuForSeparator(e.target.checked)}
-                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
-                              />
-                              <span className="text-[10px] text-zinc-300 font-medium">Включить поддержку GPU (CUDA)</span>
-                            </label>
-
-                            <button
-                              onClick={handleInstallSeparator}
-                              disabled={isInstallingSeparator}
-                              className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 text-white text-[11px] font-bold py-1.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-colors"
-                            >
-                              {isInstallingSeparator ? (
-                                <>
-                                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                  <span>Установка зависимостей...</span>
-                                </>
-                              ) : (
-                                <span>Установить audio-separator</span>
-                              )}
-                            </button>
-                          </div>
-
-                          {installLogs.length > 0 && (
-                            <div className="space-y-1">
-                              <span className="text-[9px] text-zinc-500 uppercase font-black block">Логи установки:</span>
-                              <div className="bg-zinc-950/80 p-2 rounded border border-white/5 font-mono text-[9px] text-zinc-400 h-24 overflow-y-auto space-y-0.5">
-                                {installLogs.map((log, idx) => (
-                                  <div key={idx} className="truncate">{log}</div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        // Installed and Ready section
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between text-[10px] bg-emerald-500/5 border border-emerald-500/10 px-2 py-1.5 rounded-lg">
-                            <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
-                              <Check className="w-3.5 h-3.5" />
-                              <span>ИИ-Служба готова к работе (v{separatorStatus.version})</span>
-                            </div>
-                            {separatorStatus.cuda_available && (
-                              <span className="bg-emerald-500/10 text-emerald-400 text-[8px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider">
-                                GPU CUDA
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Control Panel Forms */}
-                          <div className="space-y-3 text-xs">
-                            
-                            {/* 1. Operation selection */}
-                            <div className="space-y-1">
-                              <label className="text-[9px] text-zinc-500 uppercase font-black block">Режим ИИ-обработки</label>
-                              <div className="grid grid-cols-3 gap-1 bg-zinc-950 p-0.5 rounded-lg border border-white/5">
-                                {(['denoise', 'dereverb', 'separation'] as const).map((op) => (
-                                  <button
-                                    key={op}
-                                    type="button"
-                                    onClick={() => {
-                                      setSeparatorOperation(op);
-                                      if (op === 'denoise') setSelectedSeparatorModel('UVR-DeNoise-Lite.onnx');
-                                      else if (op === 'dereverb') setSelectedSeparatorModel('UVR-De-Echo-Aggressive.onnx');
-                                      else if (op === 'separation') setSelectedSeparatorModel('htdemucs');
-                                    }}
-                                    className={cn(
-                                      "py-1 text-[10px] font-bold rounded-md transition-all uppercase tracking-tight",
-                                      separatorOperation === op 
-                                        ? "bg-indigo-600 text-white shadow" 
-                                        : "text-zinc-400 hover:text-zinc-200"
-                                    )}
-                                  >
-                                    {op === 'denoise' ? 'Шум' : op === 'dereverb' ? 'Эхо' : 'Раздел'}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-
-                            {/* 2. Model selection */}
-                            <div className="space-y-1">
-                              <label className="text-[9px] text-zinc-500 uppercase font-black block">ИИ-Модель UVR5</label>
-                              <select 
-                                value={selectedSeparatorModel}
-                                onChange={(e) => setSelectedSeparatorModel(e.target.value)}
-                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
-                              >
-                                {separatorOperation === 'denoise' && (
-                                  <>
-                                    <option value="UVR-DeNoise-Lite.onnx">UVR DeNoise Lite (Быстрая модель)</option>
-                                    <option value="UVR-DeNoise.onnx">UVR DeNoise (Высокое качество)</option>
-                                  </>
-                                )}
-                                {separatorOperation === 'dereverb' && (
-                                  <>
-                                    <option value="UVR-De-Echo-Aggressive.onnx">De-Echo Aggressive (Агрессивно)</option>
-                                    <option value="UVR-De-Echo-Normal.onnx">De-Echo Normal (Мягкая очистка)</option>
-                                  </>
-                                )}
-                                {separatorOperation === 'separation' && (
-                                  <>
-                                    <option value="htdemucs">htdemucs (Demucs v4 - Вокал/Инструментал)</option>
-                                    <option value="MDX23C-8Step-VocFT.onnx">MDX23C VocFT (Премиум вокал)</option>
-                                  </>
-                                )}
-                              </select>
-                            </div>
-
-                            {/* 3. Audio File Source Selection */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <label className="text-[9px] text-zinc-500 uppercase font-black">Аудиоисточник</label>
-                                <button
-                                  type="button"
-                                  onClick={handleSelectCustomFile}
-                                  className="flex items-center gap-1 text-[9px] text-indigo-400 hover:text-indigo-300 font-bold uppercase tracking-wider"
-                                >
-                                  <FolderOpen className="w-3 h-3" />
-                                  Обзор...
-                                </button>
-                              </div>
-                              
-                              <select 
-                                value={selectedSeparatorFile}
-                                onChange={(e) => setSelectedSeparatorFile(e.target.value)}
-                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
-                              >
-                                <option value="">-- Выберите файл проекта --</option>
-                                {project?.tracks.flatMap(t => 
-                                  t.segments.map(s => ({
-                                    id: s.id,
-                                    trackName: t.name,
-                                    fileName: s.filePath?.split(/[\\/]/).pop() || s.originalFileName || 'Запись',
-                                    filePath: s.filePath || ''
-                                  })).filter(s => !!s.filePath)
-                                ).map(seg => (
-                                  <option key={seg.id} value={seg.filePath}>
-                                    {seg.trackName}: {seg.fileName}
-                                  </option>
-                                ))}
-                              </select>
-
-                              {selectedSeparatorFile && (
-                                <div className="text-[9px] text-zinc-400 bg-zinc-950/50 p-1.5 rounded border border-white/5 break-all font-mono leading-normal">
-                                  {selectedSeparatorFile}
-                                </div>
-                              )}
-                            </div>
-
-                            {/* 4. Action Button and Progress block */}
-                            <div className="pt-1.5 space-y-3">
-                              <button
-                                onClick={handleRunSeparation}
-                                disabled={isSeparating || !selectedSeparatorFile}
-                                className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white text-xs font-bold py-2 px-3 rounded-xl flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                              >
-                                {isSeparating ? (
-                                  <>
-                                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
-                                    <span>Идет нейросетевая обработка...</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Sparkles className="w-3.5 h-3.5" />
-                                    <span>Запустить ИИ-обработку</span>
-                                  </>
-                                )}
-                              </button>
-
-                              {isSeparating && separatorProgress && (
-                                <div className="bg-zinc-950/40 p-2.5 rounded-lg border border-indigo-500/15 space-y-2 animate-fade-in">
-                                  <div className="flex items-center justify-between text-[10px]">
-                                    <span className="font-bold text-indigo-400">{separatorProgress.stage}</span>
-                                    <span className="font-mono text-zinc-300">{Math.round(separatorProgress.percent)}%</span>
-                                  </div>
-                                  <div className="w-full bg-zinc-800 rounded-full h-1.5 overflow-hidden">
-                                    <div 
-                                      className="bg-indigo-500 h-1.5 rounded-full transition-all duration-300"
-                                      style={{ width: `${separatorProgress.percent}%` }}
-                                    />
-                                  </div>
-                                  {separatorProgress.log_line && (
-                                    <div className="bg-zinc-950 p-1.5 rounded font-mono text-[9px] text-zinc-400 border border-white/5 flex gap-1 items-center">
-                                      <Terminal className="w-3 h-3 text-indigo-400 shrink-0" />
-                                      <span className="truncate">{separatorProgress.log_line}</span>
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-
-                              {isSeparatorSuccess && (
-                                <div className="p-3 bg-emerald-950/25 border border-emerald-500/25 rounded-lg space-y-2.5 animate-fade-in">
-                                  <div className="flex items-start gap-1.5 text-emerald-400 text-[11px] font-semibold">
-                                    <Check className="w-4 h-4 shrink-0 mt-0.5" />
-                                    <span>Обработка успешно завершена!</span>
-                                  </div>
-                                  <div className="space-y-1.5">
-                                    <span className="text-[9px] text-zinc-500 uppercase font-black block">Результат:</span>
-                                    <div className="text-[9px] text-zinc-300 bg-zinc-950/80 p-1.5 rounded border border-white/5 break-all font-mono leading-normal">
-                                      {processedFilePath}
-                                    </div>
-                                  </div>
-                                  <div className="flex flex-col gap-1.5">
-                                    <button
-                                      type="button"
-                                      onClick={handleImportFileToProject}
-                                      className="w-full bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold py-1.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                                    >
-                                      <ArrowRight className="w-3.5 h-3.5" />
-                                      <span>Импортировать в проект (на 1-й трек)</span>
-                                    </button>
-                                    {selectedSegment && (
-                                      <button
-                                        type="button"
-                                        onClick={handleReplaceSelectedSegmentWithSeparated}
-                                        className="w-full bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold py-1.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                                      >
-                                        <RefreshCw className="w-3.5 h-3.5" />
-                                        <span>Заменить выбранный сегмент</span>
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-                              )}
-
-                              {separatorOutputMsg && (
-                                <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-lg space-y-1.5 text-red-400 text-[10px]">
-                                  <div className="flex items-center gap-1.5 font-bold">
-                                    <AlertCircle className="w-3.5 h-3.5" />
-                                    <span>Произошла ошибка</span>
-                                  </div>
-                                  <div className="font-mono bg-zinc-950/60 p-1.5 rounded border border-white/5 break-all max-h-24 overflow-y-auto leading-normal">
-                                    {separatorOutputMsg}
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
                     {/* Кнопка добавления VST-шага */}
                     <div className="flex items-center justify-between bg-zinc-900/30 p-2.5 rounded-xl border border-white/5">
                       <div className="flex flex-col">
@@ -3557,52 +3395,307 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                           </div>
                         );
                       } else if (stepKey === "sourceSeparation") {
-                        stepName = "Разделение оригинала (M&E / Голос)";
-                        stepDesc = "Разделение оригинальной дорожки на Музыку/Шумы и Голос";
+                        stepName = "Разделение оригинала (UVR5 / Demucs)";
+                        stepDesc = "Разделение аудиодорожки на вокал/голос и фоновую музыку/шумы";
                         stepIcon = <Volume2 className="w-3.5 h-3.5 text-indigo-400" />;
                         stepBypass = activePreset.phase1.sourceSeparation.bypass;
                         handleBypassToggle = () => updatePhase1({
                           sourceSeparation: { ...activePreset.phase1.sourceSeparation, bypass: !stepBypass }
                         });
+
+                        const originalTrack = project?.tracks.find(t => t.name === 'Оригинал');
+                        const defaultOriginalFile = originalTrack?.segments?.[0]?.filePath || project?.referenceAudioPath || project?.videoPath || '';
+
                         stepElement = (
-                          <div className="space-y-2.5 animate-fade-in text-xs">
-                            <div className="p-2 bg-indigo-950/30 border border-indigo-500/20 rounded-lg text-[11px] text-indigo-300 flex items-center justify-between">
-                              <span>Целевой трек:</span>
-                              <span className="font-bold text-white">Оригинал (Видео / Референс)</span>
+                          <div className="space-y-3 animate-fade-in text-xs">
+                            {/* UVR5 / Environment Status Header */}
+                            <div className="flex items-center justify-between bg-zinc-950/50 p-2.5 rounded-xl border border-indigo-500/20">
+                              <div className="flex items-center gap-2">
+                                <div className="w-6 h-6 bg-indigo-500/15 rounded-lg flex items-center justify-center border border-indigo-500/30">
+                                  <Cpu className="w-3.5 h-3.5 text-indigo-400" />
+                                </div>
+                                <div className="flex flex-col">
+                                  <span className="font-bold text-zinc-200 text-xs">Служба ИИ (UVR5 / audio-separator)</span>
+                                  <span className="text-[9px] text-zinc-400">
+                                    {!separatorStatus ? (
+                                      <span className="text-yellow-400">Проверка окружения ИИ...</span>
+                                    ) : !separatorStatus.python_found ? (
+                                      <span className="text-red-400">Python не найден или заблокирован</span>
+                                    ) : !separatorStatus.separator_installed ? (
+                                      <span className="text-amber-400">Библиотека не установлена</span>
+                                    ) : (
+                                      <span className="text-emerald-400 font-semibold">Готова к работе (v{separatorStatus.version || '1.0'})</span>
+                                    )}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                {separatorStatus?.cuda_available && (
+                                  <span className="bg-emerald-500/10 text-emerald-400 text-[8px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider">
+                                    GPU CUDA
+                                  </span>
+                                )}
+                                <button 
+                                  onClick={refreshSeparatorStatus}
+                                  className="p-1 hover:bg-white/5 rounded text-zinc-400 hover:text-zinc-200 transition-colors"
+                                  title="Обновить статус"
+                                >
+                                  <RefreshCw className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
 
+                            {/* If audio-separator is not installed, show inline install banner */}
+                            {separatorStatus && separatorStatus.python_found && !separatorStatus.separator_installed && (
+                              <div className="p-3 bg-yellow-950/15 border border-yellow-500/20 rounded-xl space-y-2.5">
+                                <div className="flex items-start gap-2 text-yellow-400 text-[11px] font-medium">
+                                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                                  <span>Библиотека audio-separator (UVR5) не установлена</span>
+                                </div>
+                                <p className="text-[10px] text-zinc-400 leading-normal">
+                                  Для локального нейросетевого разделения вокала и фонограммы установите библиотеку в среду Python.
+                                </p>
+                                <div className="space-y-2 border-t border-white/5 pt-2">
+                                  <label className="flex items-center gap-1.5 cursor-pointer">
+                                    <input 
+                                      type="checkbox"
+                                      checked={useGpuForSeparator}
+                                      onChange={(e) => setUseGpuForSeparator(e.target.checked)}
+                                      className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                    />
+                                    <span className="text-[10px] text-zinc-300 font-medium">Включить поддержку GPU (CUDA)</span>
+                                  </label>
+
+                                  <button
+                                    onClick={handleInstallSeparator}
+                                    disabled={isInstallingSeparator}
+                                    className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 text-white text-[11px] font-bold py-1.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                                  >
+                                    {isInstallingSeparator ? (
+                                      <>
+                                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                        <span>Установка зависимостей...</span>
+                                      </>
+                                    ) : (
+                                      <span>Установить audio-separator</span>
+                                    )}
+                                  </button>
+                                </div>
+
+                                {installLogs.length > 0 && (
+                                  <div className="space-y-1">
+                                    <span className="text-[9px] text-zinc-500 uppercase font-black block">Логи установки:</span>
+                                    <div className="bg-zinc-950/80 p-2 rounded border border-white/5 font-mono text-[9px] text-zinc-400 h-20 overflow-y-auto space-y-0.5">
+                                      {installLogs.map((log, idx) => (
+                                        <div key={idx} className="truncate">{log}</div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Model selection */}
                             <div className="space-y-1">
                               <label className="text-[10px] text-zinc-500 uppercase font-black block">Модель разделения (UVR5 / Demucs)</label>
                               <select 
                                 value={activePreset.phase1.sourceSeparation.model}
-                                onChange={(e) => updatePhase1({
-                                  sourceSeparation: { ...activePreset.phase1.sourceSeparation, model: e.target.value as any }
-                                })}
-                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-mono"
+                                onChange={(e) => {
+                                  const modelVal = e.target.value;
+                                  updatePhase1({
+                                    sourceSeparation: { ...activePreset.phase1.sourceSeparation, model: modelVal as any }
+                                  });
+                                  setSelectedSeparatorModel(modelVal);
+                                }}
+                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-2 text-xs text-zinc-300 font-mono"
                               >
-                                <optgroup label="🧠 Нейросети (UVR5 / Demucs)">
-                                  <option value="htdemucs_vocals_bgm">HTDemucs v4 (Голос + Музыка)</option>
-                                  <option value="MDX23C-8Step-VocFT.onnx">MDX23C 8-Step Vocal FT</option>
-                                  <option value="UVR-MDX-NET-Voc_FT.onnx">UVR MDX-Net Vocals</option>
-                                  <option value="5_HP-Karaoke-UVR.onnx">5_HP Karaoke UVR (Караоке)</option>
+                                <optgroup label="🧠 Нейросети UVR5 / Demucs (Высокое качество)">
+                                  <option value="htdemucs">htdemucs (Demucs v4 - Вокал / Музыка)</option>
+                                  <option value="htdemucs_vocals_bgm">htdemucs_vocals_bgm (Вокал + BGM)</option>
+                                  <option value="MDX23C-8Step-VocFT.onnx">MDX23C 8-Step Vocal FT (Премиум вокал)</option>
+                                  <option value="UVR-MDX-NET-Voc_FT.onnx">UVR MDX-Net Vocals (Чистый голос)</option>
+                                  <option value="5_HP-Karaoke-UVR.onnx">5_HP Karaoke UVR (Караоке / Шумы)</option>
                                 </optgroup>
-                                <optgroup label="⚡ DSP">
+                                <optgroup label="⚡ Быстрые DSP алгоритмы">
                                   <option value="fast_dsp_splitter">Быстрый стерео/фазовый сплиттер (DSP)</option>
                                 </optgroup>
                               </select>
                             </div>
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input 
-                                type="checkbox" 
-                                checked={activePreset.phase1.sourceSeparation.keepSeparatedStems}
-                                onChange={(e) => updatePhase1({ 
-                                  sourceSeparation: { ...activePreset.phase1.sourceSeparation, keepSeparatedStems: e.target.checked } 
-                                })}
-                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
-                              />
-                              <span className="text-[10px] text-zinc-400">Создать отдельные дорожки "Звуки" и "Голоса"</span>
-                            </label>
-                            {renderProcessingActions('separation', 'Разделить оригинал', 'bg-sky-600 hover:bg-sky-500')}
+
+                            {/* Audio File Source Selection */}
+                            <div className="space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <label className="text-[10px] text-zinc-500 uppercase font-black">Аудиоисточник для разделения</label>
+                                <button
+                                  type="button"
+                                  onClick={handleSelectCustomFile}
+                                  className="flex items-center gap-1 text-[9px] text-indigo-400 hover:text-indigo-300 font-bold uppercase tracking-wider cursor-pointer"
+                                >
+                                  <FolderOpen className="w-3 h-3" />
+                                  Обзор файла...
+                                </button>
+                              </div>
+                              
+                              <select 
+                                value={selectedSeparatorFile || defaultOriginalFile}
+                                onChange={(e) => setSelectedSeparatorFile(e.target.value)}
+                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-2 text-xs text-zinc-300"
+                              >
+                                {defaultOriginalFile && (
+                                  <option value={defaultOriginalFile}>
+                                    Оригинал проекта: {originalTrack?.name || 'Видео / Референс'}
+                                  </option>
+                                )}
+                                {project?.tracks.flatMap(t => 
+                                  t.segments.map(s => ({
+                                    id: s.id,
+                                    trackName: t.name,
+                                    fileName: s.filePath?.split(/[\\/]/).pop() || s.originalFileName || 'Запись',
+                                    filePath: s.filePath || ''
+                                  })).filter(s => !!s.filePath && s.filePath !== defaultOriginalFile)
+                                ).map(seg => (
+                                  <option key={seg.id} value={seg.filePath}>
+                                    {seg.trackName}: {seg.fileName}
+                                  </option>
+                                ))}
+                                {selectedSeparatorFile && selectedSeparatorFile !== defaultOriginalFile && !project?.tracks.some(t => t.segments.some(s => s.filePath === selectedSeparatorFile)) && (
+                                  <option value={selectedSeparatorFile}>
+                                    Внешний файл: {selectedSeparatorFile.split(/[\\/]/).pop()}
+                                  </option>
+                                )}
+                              </select>
+
+                              {(selectedSeparatorFile || defaultOriginalFile) && (
+                                <div className="text-[9px] text-zinc-400 bg-zinc-950/60 p-2 rounded-lg border border-white/5 break-all font-mono leading-relaxed">
+                                  {selectedSeparatorFile || defaultOriginalFile}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Stems option & GPU */}
+                            <div className="flex items-center justify-between text-[11px] text-zinc-400 bg-zinc-950/40 p-2 rounded-lg border border-white/5">
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input 
+                                  type="checkbox" 
+                                  checked={activePreset.phase1.sourceSeparation.keepSeparatedStems}
+                                  onChange={(e) => updatePhase1({ 
+                                    sourceSeparation: { ...activePreset.phase1.sourceSeparation, keepSeparatedStems: e.target.checked } 
+                                  })}
+                                  className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                />
+                                <span>Создать отдельные дорожки "Звуки" и "Голоса"</span>
+                              </label>
+                              <label className="flex items-center gap-1.5 cursor-pointer text-zinc-400">
+                                <input 
+                                  type="checkbox"
+                                  checked={useGpuForSeparator}
+                                  onChange={(e) => setUseGpuForSeparator(e.target.checked)}
+                                  className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                />
+                                <span className="text-[10px] font-bold">GPU CUDA</span>
+                              </label>
+                            </div>
+
+                            {/* Action Button and Progress block */}
+                            <div className="pt-1 space-y-2.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!selectedSeparatorFile && defaultOriginalFile) {
+                                    setSelectedSeparatorFile(defaultOriginalFile);
+                                  }
+                                  handleRunSeparation();
+                                }}
+                                disabled={isSeparating || (!selectedSeparatorFile && !defaultOriginalFile)}
+                                className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white text-xs font-bold py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition-all shadow-md cursor-pointer"
+                              >
+                                {isSeparating ? (
+                                  <>
+                                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
+                                    <span>Идет нейросетевая обработка...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Sparkles className="w-3.5 h-3.5" />
+                                    <span>Разделить на Голос и Музыку (UVR5)</span>
+                                  </>
+                                )}
+                              </button>
+
+                              {/* Separating Progress */}
+                              {isSeparating && separatorProgress && (
+                                <div className="bg-zinc-950/60 p-3 rounded-xl border border-indigo-500/20 space-y-2 animate-fade-in">
+                                  <div className="flex items-center justify-between text-[11px]">
+                                    <span className="font-bold text-indigo-400">{separatorProgress.stage}</span>
+                                    <span className="font-mono text-zinc-300">{Math.round(separatorProgress.percent)}%</span>
+                                  </div>
+                                  <div className="w-full bg-zinc-800 rounded-full h-1.5 overflow-hidden">
+                                    <div 
+                                      className="bg-indigo-500 h-1.5 rounded-full transition-all duration-300"
+                                      style={{ width: `${separatorProgress.percent}%` }}
+                                    />
+                                  </div>
+                                  {separatorProgress.log_line && (
+                                    <div className="bg-zinc-950 p-2 rounded-lg font-mono text-[9px] text-zinc-400 border border-white/5 flex gap-1.5 items-center">
+                                      <Terminal className="w-3 h-3 text-indigo-400 shrink-0" />
+                                      <span className="truncate">{separatorProgress.log_line}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              {/* Success Result Block */}
+                              {isSeparatorSuccess && (
+                                <div className="p-3 bg-emerald-950/25 border border-emerald-500/25 rounded-xl space-y-2.5 animate-fade-in">
+                                  <div className="flex items-start gap-1.5 text-emerald-400 text-[11px] font-semibold">
+                                    <Check className="w-4 h-4 shrink-0 mt-0.5" />
+                                    <span>Разделение успешно завершено!</span>
+                                  </div>
+                                  <div className="space-y-1">
+                                    <span className="text-[9px] text-zinc-500 uppercase font-black block">Файл результата:</span>
+                                    <div className="text-[9px] text-zinc-300 bg-zinc-950/80 p-2 rounded-lg border border-white/5 break-all font-mono leading-normal">
+                                      {processedFilePath}
+                                    </div>
+                                  </div>
+                                  <div className="flex flex-col gap-1.5 pt-1">
+                                    <button
+                                      type="button"
+                                      onClick={handleImportFileToProject}
+                                      className="w-full bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                                    >
+                                      <ArrowRight className="w-3.5 h-3.5" />
+                                      <span>Импортировать в проект (дорожки Голос + M&E)</span>
+                                    </button>
+                                    {selectedSegment && (
+                                      <button
+                                        type="button"
+                                        onClick={handleReplaceSelectedSegmentWithSeparated}
+                                        className="w-full bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                                      >
+                                        <RefreshCw className="w-3.5 h-3.5" />
+                                        <span>Заменить выбранный сегмент</span>
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Error Output */}
+                              {separatorOutputMsg && (
+                                <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-xl space-y-1.5 text-red-400 text-[10px]">
+                                  <div className="flex items-center gap-1.5 font-bold">
+                                    <AlertCircle className="w-3.5 h-3.5" />
+                                    <span>Ошибка при разделении</span>
+                                  </div>
+                                  <div className="font-mono bg-zinc-950/60 p-2 rounded-lg border border-white/5 break-all max-h-24 overflow-y-auto leading-normal">
+                                    {separatorOutputMsg}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Batch Pipeline Step Processing Action */}
+                              {renderProcessingActions('separation', 'Пакетный запуск шага', 'bg-sky-600 hover:bg-sky-500')}
+                            </div>
                           </div>
                         );
                       } else if (stepKey.startsWith("vstStep_")) {
@@ -3986,7 +4079,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                     <div className="flex items-center justify-between bg-zinc-900/30 p-2.5 rounded-xl border border-white/5">
                       <div className="flex flex-col">
                         <span className="text-[10px] font-black uppercase text-zinc-400">Последовательность шагов</span>
-                        <span className="text-[9px] text-zinc-500">Добавляйте VST плагины в цепочку</span>
+                        <span className="text-[9px] text-zinc-500">Настраивайте шаги тайминга и VST-цепочки</span>
                       </div>
                       <button
                         type="button"
@@ -4029,12 +4122,16 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
                       if (stepKey === "silenceSplit") {
                         stepName = "Разрез по тишине";
+                        stepIcon = <Scissors className="w-3.5 h-3.5 text-pink-400" />;
                         stepBypass = activePreset.phase2.silenceSplit.bypass;
                         handleBypassToggle = () => updatePhase2({
                           silenceSplit: { ...activePreset.phase2.silenceSplit, bypass: !stepBypass }
                         });
                         stepElement = (
                           <div className="space-y-3 text-xs">
+                            <p className="text-[11px] text-zinc-400 leading-relaxed">
+                              Удаляет тишину между репликами, формируя независимые клипы фраз на таймлайне.
+                            </p>
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-mono text-zinc-500">
                                 <span>Порог тишины</span>
@@ -4060,7 +4157,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 type="range" 
                                 min="100" 
                                 max="1500" 
-                                step="50"
+                                step="50" 
                                 value={activePreset.phase2.silenceSplit.minSilenceDurationMs}
                                 onChange={(e) => updatePhase2({
                                   silenceSplit: { ...activePreset.phase2.silenceSplit, minSilenceDurationMs: parseInt(e.target.value) }
@@ -4068,16 +4165,53 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
                               />
                             </div>
+                            <button
+                              type="button"
+                              onClick={handleSplitSilence}
+                              disabled={isSplittingSilence}
+                              className={cn(
+                                "w-full mt-2 py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-2 border transition-all cursor-pointer active:scale-98",
+                                isSplittingSilence 
+                                  ? "bg-zinc-800 border-zinc-750 text-zinc-400 cursor-wait"
+                                  : "bg-zinc-900 hover:bg-zinc-800 border-white/10 text-zinc-200"
+                              )}
+                            >
+                              <Scissors className={cn("w-3.5 h-3.5 text-pink-400", isSplittingSilence && "animate-spin")} />
+                              <span>{isSplittingSilence ? 'Нарезка...' : 'Удалить тишину (нарезать клипы)'}</span>
+                            </button>
                           </div>
                         );
                       } else if (stepKey === "smartAlign") {
                         stepName = "Smart Align (Авто-выравнивание)";
+                        stepIcon = <Wand2 className="w-3.5 h-3.5 text-indigo-400" />;
                         stepBypass = activePreset.phase2.smartAlign.bypass;
                         handleBypassToggle = () => updatePhase2({
                           smartAlign: { ...activePreset.phase2.smartAlign, bypass: !stepBypass }
                         });
                         stepElement = (
                           <div className="space-y-3 text-xs">
+                            <div className="space-y-1">
+                              <label className="text-[10px] text-zinc-500 uppercase font-black block">Приоритет базы выравнивания</label>
+                              <select 
+                                value={activePreset.phase2.alignPriority || 'original_voice'}
+                                onChange={(e) => updatePhase2({ alignPriority: e.target.value as any })}
+                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                              >
+                                <option value="original_voice">Оригинальная дорожка с голосами (Приоритет №1)</option>
+                                <option value="subtitles">Только субтитры</option>
+                              </select>
+                            </div>
+
+                            <label className="flex items-center gap-2 p-1.5 bg-zinc-950/60 rounded-lg border border-white/5 cursor-pointer">
+                              <input 
+                                type="checkbox"
+                                checked={activePreset.phase2.alignToOriginalStart ?? true}
+                                onChange={(e) => updatePhase2({ alignToOriginalStart: e.target.checked })}
+                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                              />
+                              <span className="text-[10px] text-zinc-300 font-medium">Синхрон начала фраз (дабер и оригинал говорят одновременно)</span>
+                            </label>
+
                             <div className="space-y-1">
                               <label className="text-[10px] text-zinc-500 uppercase font-black block">Режим липсинга / точности</label>
                               <select 
@@ -4092,6 +4226,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 <option value="recast_tolerance">Допуск рекаста (По границам)</option>
                               </select>
                             </div>
+
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-mono text-zinc-500">
                                 <span>Лимит деформации (Stretch)</span>
@@ -4101,7 +4236,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 type="range" 
                                 min="1.05" 
                                 max="1.50" 
-                                step="0.05"
+                                step="0.05" 
                                 value={activePreset.phase2.smartAlign.maxStretchRatio}
                                 onChange={(e) => updatePhase2({
                                   smartAlign: { ...activePreset.phase2.smartAlign, maxStretchRatio: parseFloat(e.target.value) }
@@ -4109,16 +4244,47 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
                               />
                             </div>
+
+                            <div className="p-2 bg-zinc-950/60 rounded-lg border border-white/5 text-[10px] text-zinc-400 space-y-0.5">
+                              <span className="font-bold text-zinc-300 block">
+                                {project?.mixingType === 'RECAST' ? 'Правило Рекаста' :
+                                 project?.mixingType === 'REDUB' ? 'Правило Редаба' :
+                                 project?.mixingType === 'DUBBING' ? 'Правило Дубляжа' : 'Правило Закадра'}:
+                              </span>
+                              <span>
+                                {project?.mixingType === 'RECAST' || project?.mixingType === 'REDUB' 
+                                  ? 'Фраза дабера не должна быть меньше саба. Охи-вздохи озвучиваются.' 
+                                  : project?.mixingType === 'DUBBING'
+                                  ? 'Полный липсинг артикуляции губ и смысловых пауз.'
+                                  : 'Длительность не критична, главное — точное совпадение старта фразы.'}
+                              </span>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={handleAlignAllPhrases}
+                              disabled={isAligningPhrases}
+                              className={cn(
+                                "w-full mt-2 py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-2 border transition-all cursor-pointer active:scale-98 shadow-md",
+                                isAligningPhrases 
+                                  ? "bg-zinc-800 border-zinc-750 text-zinc-400 cursor-wait"
+                                  : "bg-indigo-600 hover:bg-indigo-500 border-indigo-500/30 text-white shadow-indigo-600/20"
+                              )}
+                            >
+                              <Wand2 className={cn("w-3.5 h-3.5", isAligningPhrases && "animate-spin")} />
+                              <span>{isAligningPhrases ? 'Выравнивание...' : 'Выровнять всё по оригиналу'}</span>
+                            </button>
                           </div>
                         );
                       } else if (stepKey === "subtitleCompliance") {
-                        stepName = "Контроль пропусков фраз";
+                        stepName = "Контроль субтитров и пропусков";
+                        stepIcon = <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />;
                         stepBypass = activePreset.phase2.subtitleCompliance.bypass;
                         handleBypassToggle = () => updatePhase2({
                           subtitleCompliance: { ...activePreset.phase2.subtitleCompliance, bypass: !stepBypass }
                         });
                         stepElement = (
-                          <div className="space-y-2 text-xs">
+                          <div className="space-y-2.5 text-xs">
                             <label className="flex items-center gap-1.5 cursor-pointer">
                               <input 
                                 type="checkbox" 
@@ -4128,8 +4294,194 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 })}
                                 className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
                               />
-                              <span className="text-[10px] text-zinc-400">Сверять с субтитрами на пропуски</span>
+                              <span className="text-[10px] text-zinc-300">Сверять с субтитрами на пропуски реплик</span>
                             </label>
+                            <label className="flex items-center gap-1.5 cursor-pointer">
+                              <input 
+                                type="checkbox" 
+                                checked={activePreset.phase2.conflictDetection?.flagShortPhrases ?? true}
+                                onChange={(e) => updatePhase2({ 
+                                  conflictDetection: { ...activePreset.phase2.conflictDetection, flagShortPhrases: e.target.checked } 
+                                })}
+                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                              />
+                              <span className="text-[10px] text-zinc-300">Контроль длительности для Рекаста/Редаба (фраза не меньше саба)</span>
+                            </label>
+                          </div>
+                        );
+                      } else if (stepKey === "whisper") {
+                        stepName = "Whisper Распознавание речи";
+                        stepIcon = <Mic className="w-3.5 h-3.5 text-indigo-400" />;
+                        stepBypass = activePreset.phase2.whisper?.bypass ?? false;
+                        handleBypassToggle = () => updatePhase2({
+                          whisper: { ...activePreset.phase2.whisper, bypass: !stepBypass }
+                        });
+                        stepElement = (
+                          <div className="space-y-3 text-xs">
+                            <div className="space-y-1">
+                              <label className="text-[10px] text-zinc-500 uppercase font-black block">Модель Whisper</label>
+                              <select
+                                value={activePreset.phase2.whisper?.model || 'base'}
+                                onChange={(e) => updatePhase2({
+                                  whisper: { ...activePreset.phase2.whisper, model: e.target.value as any }
+                                })}
+                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                              >
+                                <option value="tiny">Tiny (Мгновенно, низкое потребление)</option>
+                                <option value="base">Base (Оптимально для речи)</option>
+                                <option value="small">Small (Повышенная точность)</option>
+                                <option value="medium">Medium (Высокая детализация)</option>
+                                <option value="large-v3">Large-v3 (Студийный стандарт)</option>
+                              </select>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <label className="flex items-center gap-1.5 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={activePreset.phase2.whisper?.autoTranscribe ?? true}
+                                  onChange={(e) => updatePhase2({
+                                    whisper: { ...activePreset.phase2.whisper, autoTranscribe: e.target.checked }
+                                  })}
+                                  className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                />
+                                <span className="text-[10px] text-zinc-300">Автораспознавание текста фраз для сверки</span>
+                              </label>
+                            </div>
+                          </div>
+                        );
+                      } else if (stepKey === "conflictDetection") {
+                        stepName = "Детекция конфликтов и наездов";
+                        stepIcon = <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />;
+                        stepBypass = activePreset.phase2.conflictDetection?.bypass ?? false;
+                        handleBypassToggle = () => updatePhase2({
+                          conflictDetection: { ...activePreset.phase2.conflictDetection, bypass: !stepBypass }
+                        });
+                        stepElement = (
+                          <div className="space-y-3 text-xs">
+                            <label className="flex items-center gap-1.5 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={activePreset.phase2.conflictDetection?.detectOverlaps ?? true}
+                                onChange={(e) => updatePhase2({
+                                  conflictDetection: { ...activePreset.phase2.conflictDetection, detectOverlaps: e.target.checked }
+                                })}
+                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                              />
+                              <span className="text-[10px] text-zinc-300">Подсвечивать наезды фраз друг на друга (Overlap)</span>
+                            </label>
+                            <label className="flex items-center gap-1.5 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={activePreset.phase2.conflictDetection?.flagShortPhrases ?? true}
+                                onChange={(e) => updatePhase2({
+                                  conflictDetection: { ...activePreset.phase2.conflictDetection, flagShortPhrases: e.target.checked }
+                                })}
+                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                              />
+                              <span className="text-[10px] text-zinc-300">Проверять недотяг фразы по отношению к сабу (Рекаст/Редаб)</span>
+                            </label>
+                            <label className="flex items-center gap-1.5 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={activePreset.phase2.conflictDetection?.autoResolveOverlaps ?? false}
+                                onChange={(e) => updatePhase2({
+                                  conflictDetection: { ...activePreset.phase2.conflictDetection, autoResolveOverlaps: e.target.checked }
+                                })}
+                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                              />
+                              <span className="text-[10px] text-zinc-300">Автоматически раздвигать наезды в стык</span>
+                            </label>
+
+                            <button
+                              type="button"
+                              onClick={handleInspectTiming}
+                              className="w-full mt-1.5 py-1.5 px-3 bg-zinc-900 hover:bg-zinc-800 border border-white/10 rounded-lg text-xs font-bold text-zinc-200 flex items-center justify-center gap-2 transition-all active:scale-98 cursor-pointer"
+                            >
+                              <Search className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Проверить тайминги дорожек</span>
+                            </button>
+
+                            {/* Список замечаний прямо внутри шага */}
+                            {(timingIssues.length > 0 || timingInspectionDone) && (
+                              <div className="pt-2 border-t border-white/5 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] font-black uppercase text-amber-400 flex items-center gap-1">
+                                    <AlertTriangle className="w-3 h-3" />
+                                    Замечаний: {timingIssues.length}
+                                  </span>
+                                  {timingIssues.filter(i => i.canAutoFix).length > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={handleAutoFixAllIssues}
+                                      className="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 rounded text-[9px] font-bold flex items-center gap-1 transition-all cursor-pointer"
+                                    >
+                                      <Wand2 className="w-2.5 h-2.5" />
+                                      <span>Устранить все ({timingIssues.filter(i => i.canAutoFix).length})</span>
+                                    </button>
+                                  )}
+                                </div>
+
+                                {timingIssues.length === 0 ? (
+                                  <div className="text-[11px] text-emerald-400 p-2 bg-emerald-950/30 rounded-lg border border-emerald-500/20 flex items-center gap-1.5">
+                                    <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />
+                                    <span>Наездов и рассинхронов не обнаружено!</span>
+                                  </div>
+                                ) : (
+                                  <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                                    {timingIssues.map((issue) => (
+                                      <div 
+                                        key={issue.id}
+                                        className="flex items-center justify-between p-1.5 rounded-lg bg-zinc-950 border border-white/5 text-xs"
+                                      >
+                                        <div className="flex items-center gap-1.5 overflow-hidden">
+                                          <span className={cn(
+                                            "px-1 py-0.2 rounded text-[7px] font-black uppercase whitespace-nowrap",
+                                            issue.type === 'overlap' && "bg-rose-600 text-white",
+                                            issue.type === 'too_short' && "bg-amber-600 text-black",
+                                            issue.type === 'desync' && "bg-orange-600 text-white",
+                                            issue.type === 'missing_phrase' && "bg-zinc-700 text-zinc-300"
+                                          )}>
+                                            {issue.type === 'overlap' && 'Наезд'}
+                                            {issue.type === 'too_short' && 'Короче саба'}
+                                            {issue.type === 'desync' && 'Рассинхрон'}
+                                            {issue.type === 'missing_phrase' && 'Пропуск'}
+                                          </span>
+                                          <button
+                                            type="button"
+                                            onClick={() => handleSeek(issue.timestamp)}
+                                            className="font-mono text-[9px] text-indigo-400 hover:underline cursor-pointer"
+                                          >
+                                            {Math.floor(issue.timestamp / 60)}:{(issue.timestamp % 60).toFixed(1).padStart(4, '0')}
+                                          </button>
+                                          <span className="text-[10px] text-zinc-300 truncate" title={issue.description}>
+                                            {issue.description}
+                                          </span>
+                                        </div>
+
+                                        <div className="flex items-center gap-1 flex-shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={() => handleSeek(issue.timestamp)}
+                                            className="px-1.5 py-0.5 bg-zinc-800 hover:bg-zinc-750 text-zinc-300 rounded text-[8px] font-bold cursor-pointer"
+                                          >
+                                            Перейти
+                                          </button>
+                                          {issue.canAutoFix && (
+                                            <button
+                                              type="button"
+                                              onClick={() => handleAutoFixIssue(issue)}
+                                              className="px-1.5 py-0.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[8px] font-bold cursor-pointer"
+                                            >
+                                              Сдвиг
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                         );
                       } else if (stepKey.startsWith("vstStep_")) {

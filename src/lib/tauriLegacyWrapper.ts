@@ -438,17 +438,12 @@ export const tauriAPI = {
                 const val = Math.abs(channelData[j]);
                 if (val > max) max = val;
             }
-            peaks[i] = max;
+            peaks[i] = Math.min(1.0, max);
             if (max > globalMax) globalMax = max;
         }
         
-        // Normalize
-        if (globalMax > 0.001) {
-            for (let i = 0; i < points; i++) {
-                peaks[i] = peaks[i] / globalMax;
-            }
-        }
-        
+        // Return real linear peaks relative to 0 dBFS (0.0 = silence, 1.0 = full scale)
+        // We do not normalize to globalMax so waveforms show true volume and dynamic range.
         return { success: true, data: peaks };
       } catch (e) {
         console.warn("Could not decode peaks via Web Audio, falling back...", e);

@@ -1,7 +1,17 @@
 import React, { useEffect, useRef } from 'react';
 import { logger } from '../lib/logger';
 
-export const Waveform = ({ peaks, color = '#3b82f6' }: { peaks: number[], color?: string }) => {
+export const Waveform = ({ 
+  peaks, 
+  color = '#3b82f6',
+  scaleMode = 'real',
+  gain = 1
+}: { 
+  peaks: number[], 
+  color?: string,
+  scaleMode?: 'real' | 'normalized',
+  gain?: number
+}) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -33,12 +43,14 @@ export const Waveform = ({ peaks, color = '#3b82f6' }: { peaks: number[], color?
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, width, height);
       
-      // Find maximum peak to normalize the visual waveform
-      let maxPeak = 0.0001;
-      for (let i = 0; i < peaks.length; i++) {
+      let scaleFactor = 1.0;
+      if (scaleMode === 'normalized') {
+        let maxPeak = 0.0001;
+        for (let i = 0; i < peaks.length; i++) {
           if (peaks[i] > maxPeak) maxPeak = peaks[i];
+        }
+        scaleFactor = 1 / maxPeak;
       }
-      const scaleFactor = 1 / maxPeak;
 
       // Draw beautiful, spaced vertical bars with rounded caps like professional DAWs
       const barWidth = 2;
@@ -63,13 +75,19 @@ export const Waveform = ({ peaks, color = '#3b82f6' }: { peaks: number[], color?
             if (peaks[j] > maxVal) maxVal = peaks[j];
           }
           
-          const normalizedPeak = maxVal * scaleFactor;
-          const visualPeak = Math.pow(normalizedPeak, 0.6); // slight curve boost for lower sounds
+          let visualPeak = 0;
+          if (scaleMode === 'normalized') {
+            const normalizedPeak = maxVal * scaleFactor;
+            visualPeak = Math.pow(Math.min(1.0, Math.max(0, normalizedPeak)), 0.6);
+          } else {
+            // Real amplitude proportional to 0 dBFS
+            visualPeak = Math.min(1.0, Math.max(0, maxVal * gain));
+          }
           
           const x = i * (barWidth + barGap) + barWidth / 2;
-          const h = Math.max(2, visualPeak * height * 0.85); // ensure thin visible line for low amplitude
+          const h = visualPeak > 0.001 ? Math.max(1.5, visualPeak * height * 0.94) : 0;
           const y1 = (height - h) / 2;
-          const y2 = y1 + h;
+          const y2 = (height + h) / 2;
           
           ctx.moveTo(x, y1);
           ctx.lineTo(x, y2);
@@ -89,7 +107,7 @@ export const Waveform = ({ peaks, color = '#3b82f6' }: { peaks: number[], color?
     return () => {
       resizeObserver.disconnect();
     };
-  }, [peaks, color]);
+  }, [peaks, color, scaleMode, gain]);
 
   return <canvas ref={canvasRef} className="w-full h-full opacity-60 pointer-events-none block" />;
 };

@@ -14,7 +14,9 @@ export const DEFAULT_PHASE1_ORDER = [
 
 export const DEFAULT_PHASE2_ORDER = [
   'silenceSplit',
+  'whisper',
   'smartAlign',
+  'conflictDetection',
   'subtitleCompliance'
 ];
 
@@ -96,24 +98,48 @@ export const createDefaultPhase1 = (type: MixingType) => ({
 });
 
 export const createDefaultPhase2 = (type: MixingType) => ({
-  enabled: type !== MixingType.VOICEOVER,
+  enabled: true, // Включаем для всех типов, так как даже для закадра нужно синхронизировать старт фраз
   vstSteps: {},
+  alignPriority: 'original_voice' as const,
+  alignToOriginalStart: true,
+  voiceoverLeadMs: 0,
   silenceSplit: {
-    enabled: type !== MixingType.VOICEOVER,
+    enabled: true,
     thresholdDb: -42.0,
-    minSilenceDurationMs: 400,
-    minSegmentDurationMs: 200,
+    minSilenceDurationMs: type === MixingType.VOICEOVER ? 450 : 350,
+    minSegmentDurationMs: 180,
+    padSilenceMs: 40,
+    bypass: false,
+  },
+  whisper: {
+    enabled: true,
+    model: 'auto' as const,
+    language: 'ru',
+    autoMatchSubtitles: true,
     bypass: false,
   },
   smartAlign: {
-    enabled: type !== MixingType.VOICEOVER,
+    enabled: true,
     alignMode: (type === MixingType.DUBBING ? 'tight' : type === MixingType.REDUB ? 'loose' : 'recast_tolerance') as 'tight' | 'loose' | 'recast_tolerance',
     maxStretchRatio: type === MixingType.DUBBING ? 1.15 : type === MixingType.REDUB ? 1.25 : 1.35,
     algorithm: (type === MixingType.DUBBING ? 'rubberband' : 'wsola') as 'rubberband' | 'wsola' | 'phase_vocoder',
     bypass: false,
   },
+  projectTypeRules: {
+    ignoreBreathsAndSighsInVO: type === MixingType.VOICEOVER,
+    enforceMinSubDuration: type === MixingType.RECAST || type === MixingType.REDUB,
+    fullLipSync: type === MixingType.DUBBING,
+    maxStretchRatio: type === MixingType.DUBBING ? 1.15 : 1.30,
+  },
+  conflictDetection: {
+    detectOverlaps: true,
+    detectGaps: type !== MixingType.VOICEOVER,
+    detectShortPhrases: type === MixingType.RECAST || type === MixingType.REDUB,
+    autoFixOverlaps: true,
+    bypass: false,
+  },
   subtitleCompliance: {
-    enabled: type === MixingType.DUBBING || type === MixingType.REDUB,
+    enabled: true,
     checkMissingPhrases: true,
     toleranceMs: 300,
     bypass: false,

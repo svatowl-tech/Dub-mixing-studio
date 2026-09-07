@@ -12,7 +12,8 @@ import {
   ChevronRight,
   ZoomIn,
   ZoomOut,
-  Magnet
+  Magnet,
+  Activity
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Project, AudioTrack, AudioSegment } from '../types';
@@ -168,6 +169,8 @@ interface TrackRowProps {
   onGlueSegments?: () => void;
   currentTimeRef: React.MutableRefObject<number>;
   timelineVisibleRange: { start: number; end: number };
+  waveformScaleMode?: 'real' | 'normalized';
+  waveformVisualGain?: number;
 }
 
 const TrackRow = React.memo(({ 
@@ -187,7 +190,9 @@ const TrackRow = React.memo(({
   onPasteSegments,
   onGlueSegments,
   currentTimeRef,
-  timelineVisibleRange
+  timelineVisibleRange,
+  waveformScaleMode = 'real',
+  waveformVisualGain = 1.0
 }: TrackRowProps) => {
   const segmentsWithFades = React.useMemo(() => {
     // 1. Sort all segments first
@@ -249,6 +254,8 @@ const TrackRow = React.memo(({
           autoFadeIn={autoFadeIn}
           autoFadeOut={autoFadeOut}
           trackVolume={track.volume}
+          waveformScaleMode={waveformScaleMode}
+          waveformVisualGain={waveformVisualGain}
         />
       ))}
     </div>
@@ -356,6 +363,8 @@ export const AdvancedTimeline = ({
   const [isMarqueeSelecting, setIsMarqueeSelecting] = useState(false);
   const [marqueeStart, setMarqueeStart] = useState<{ x: number, y: number } | null>(null);
   const [marqueeCurrent, setMarqueeCurrent] = useState<{ x: number, y: number } | null>(null);
+  const [waveformScaleMode, setWaveformScaleMode] = useState<'real' | 'normalized'>('real');
+  const [waveformVisualGain, setWaveformVisualGain] = useState<number>(1.0);
 
   const [isSnapEnabled, setIsSnapEnabled] = useState(true);
   const [snapLine, setSnapLine] = useState<number | null>(null);
@@ -691,6 +700,23 @@ export const AdvancedTimeline = ({
                 <ChevronRight size={18} />
               </button>
             )}
+            <button 
+              onClick={() => setWaveformScaleMode(prev => prev === 'real' ? 'normalized' : 'real')}
+              className={cn(
+                "h-10 px-2.5 rounded-md flex items-center gap-1.5 transition-all ml-2 text-xs font-semibold",
+                waveformScaleMode === 'real' 
+                  ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm" 
+                  : "bg-zinc-800 text-zinc-400 hover:text-white border border-white/5"
+              )}
+              title={waveformScaleMode === 'real' 
+                ? "Реальная громкость (0 dBFS) — показывает истинную высоту и громкость сигнала без искусственного растягивания. Кликните для переключения на авто-высоту." 
+                : "Авто-масштабирование — растягивает тихие звуки по высоте. Кликните для переключения на реальную шкалу громкости."}
+            >
+              <Activity size={15} className={waveformScaleMode === 'real' ? "text-emerald-400" : "text-zinc-400"} />
+              <span className="text-[11px] font-mono tracking-tight hidden sm:inline">
+                {waveformScaleMode === 'real' ? "Реал. громкость" : "Авто-высота"}
+              </span>
+            </button>
           </div>
 
           {sortedFixTimes.length > 0 && (
@@ -943,6 +969,8 @@ export const AdvancedTimeline = ({
                     onGlueSegments={onGlueSegments}
                     currentTimeRef={currentTimeRef}
                     timelineVisibleRange={timelineVisibleRange}
+                    waveformScaleMode={waveformScaleMode}
+                    waveformVisualGain={waveformVisualGain}
                   />
                   {/* Live Recording Segment */}
                   {isRecording && idx === recordingTrackIndex && (

@@ -4,6 +4,14 @@
 
 ![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)
 ![Build](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+![Status](https://img.shields.io/badge/status-active%20development-orange.svg)
+
+> [!WARNING]
+> **⚠️ Внимание: Проект находится в стадии активной разработки (WIP / Beta)!**
+> 
+> Приложение активно дорабатывается и развивается. Вы можете сталкиваться с ошибками, временными сбоями, недоработками интерфейса или нестабильностью отдельных функций (включая экспериментальные аудиодвижки и ИИ-модули).
+> 
+> Если вы обнаружили баг или у вас есть предложения по улучшению — пожалуйста, [создайте Issue](https://github.com/svatowl-tech/ASIO-AnimeDubStudio/issues) в репозитории. Спасибо за понимание и поддержку!
 
 ## ✨ Основные возможности
 

@@ -237,6 +237,35 @@ export interface AudioSegment {
   fadeOut?: number; // Fade out duration (seconds)
   panning?: number; // Stereo panning: -1.0 (left) to 1.0 (right)
   isExtractingWaveform?: boolean; // Temporary state for async loaded waveforms
+
+  // Метки и параметры тайминга / выравнивания (Фаза 2)
+  timingWarning?: 'overlap' | 'too_short' | 'too_long' | 'desync' | 'missing' | 'none';
+  timingWarningDetail?: string;
+  targetStartTime?: number; // Целевой тайминг старта по оригинальному голосу
+  targetDuration?: number; // Целевая длительность по оригинальной фразе/сабу
+  alignedWithOriginal?: boolean; // Старт фразы синхронизирован с оригинальной дорожкой
+  whisperText?: string; // Распознанный текст через Whisper
+  whisperConfidence?: number; // Уверенность распознавания (0..1)
+  matchedSubId?: string; // ID связанной строки субтитров
+}
+
+// Зафиксированная проблема тайминга для инспектора и звукорежиссера
+export interface TimingIssue {
+  id: string;
+  type: 'overlap' | 'too_short' | 'too_long' | 'desync' | 'missing';
+  trackId: string;
+  trackName: string;
+  segmentId?: string;
+  timestamp: number;
+  duration?: number;
+  title: string;
+  description: string;
+  severity: 'error' | 'warning' | 'info';
+  originalStart?: number;
+  matchedSubText?: string;
+  targetDuration?: number;
+  actualDuration?: number;
+  canAutoFix: boolean;
 }
 
 export interface BridgeResponse<T> {
@@ -354,15 +383,30 @@ export interface TimingAlignmentConfig {
   enabled: boolean;
   vstSteps?: Record<string, VstStepConfig>;
   
+  // Приоритет выравнивания: оригинальная дорожка с голосами (Вокал) или субтитры
+  alignPriority: 'original_voice' | 'subtitles';
+  alignToOriginalStart: boolean; // Старт дабера и оригинала синхронизированы в одну точку
+  voiceoverLeadMs: number; // Смещение начала для закадра (мс, по умолчанию 0)
+
   // Разделение записанной единой дороги на отдельные фразы по тишине
   silenceSplit: {
     enabled: boolean;
     thresholdDb: number; // порог в dB, например, -45
     minSilenceDurationMs: number; // минимальная длина тишины для сплита, мс
     minSegmentDurationMs: number; // минимальная длина фрагмента
+    padSilenceMs: number; // отступ до и после фразы во избежание срезки согласных (мс)
     bypass: boolean;
   };
   
+  // Распознавание каждой фразы через Whisper и сопоставление со сценарием
+  whisper: {
+    enabled: boolean;
+    model: 'whisper-base' | 'whisper-small' | 'whisper-medium' | 'whisper-large-v3' | 'web-stt' | 'auto';
+    language: string; // 'ru', 'en', 'ja', 'auto'
+    autoMatchSubtitles: boolean; // Автоматическое сопоставление распознанной фразы с субтитрами
+    bypass: boolean;
+  };
+
   // Сравнение с оригинальными фразами по длительности и выравнивание (Time Stretching / Smart Align)
   smartAlign: {
     enabled: boolean;
@@ -372,6 +416,23 @@ export interface TimingAlignmentConfig {
     bypass: boolean;
   };
   
+  // Правила типов проектов (Закадр / Рекаст / Редаб / Дубляж)
+  projectTypeRules: {
+    ignoreBreathsAndSighsInVO: boolean; // Закадр: охи/вздохи/физика не озвучиваются, длительность свободна
+    enforceMinSubDuration: boolean; // Рекаст/Редаб: длительность фразы не меньше саба (больше можно, меньше нельзя)
+    fullLipSync: boolean; // Дубляж: полное озвучание с полным липсинком и подгонкой рта
+    maxStretchRatio: number; // Лимит растяжения/сжатия для липсинга
+  };
+
+  // Детектирование конфликтов: наезды друг на друга, пропуски, недотяг по времени
+  conflictDetection: {
+    detectOverlaps: boolean; // Наезды реплик друг на друга
+    detectGaps: boolean; // Пропуски фраз по субтитрам
+    detectShortPhrases: boolean; // Фраза короче субтитра (для рекаста/редаба)
+    autoFixOverlaps: boolean; // Автоматическое устранение наездов
+    bypass: boolean;
+  };
+
   // Сравнение с субтитрами (проверка на пропуски фраз)
   subtitleCompliance: {
     enabled: boolean;
