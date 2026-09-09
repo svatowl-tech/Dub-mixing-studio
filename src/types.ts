@@ -125,6 +125,9 @@ export interface AudioTrack {
   isProcessingEnabled?: boolean;
   processing?: TrackProcessing;
   height?: number;
+  type?: 'original' | 'dub' | 'instrumental' | string;
+  color?: string;
+  pan?: number;
 }
 
 export interface TrackProcessing {
@@ -247,6 +250,21 @@ export interface AudioSegment {
   whisperText?: string; // Распознанный текст через Whisper
   whisperConfidence?: number; // Уверенность распознавания (0..1)
   matchedSubId?: string; // ID связанной строки субтитров
+
+  // Метки и параметры сведения (Фаза 3)
+  voiceCategory?: 'dialogue' | 'physics'; // 'dialogue' (есть сабы) или 'physics' (крики, кряхтение, звуки без сабов)
+  measuredLufs?: number; // Измеренный уровень громкости LUFS / RMS
+  appliedGainDb?: number; // Примененная поправка громкости в dB
+  isDucked?: boolean; // Находится ли под воздействием автодакинга
+  appliedDuckingDb?: number; // Глубина подавления оригинального звука
+  detectedFx?: {
+    reverbWet?: number; // 0..1
+    reverbDecay?: number; // sec
+    delayTimeMs?: number;
+    delayFeedback?: number; // 0..1
+    specialFxType?: 'none' | 'telephone' | 'radio' | 'tv' | 'robot' | 'megaphone';
+    panning?: number; // -1..1
+  };
 }
 
 // Зафиксированная проблема тайминга для инспектора и звукорежиссера
@@ -443,40 +461,131 @@ export interface TimingAlignmentConfig {
 }
 
 // Этап 3: Сведение и Авто-эффекты (Mixing & Effects)
+export interface AuditionVocalBusChainConfig {
+  presetName: string; // 'Audition Master VO Chain'
+  // Slot 1: Ozone 11 Stabilizer
+  ozoneStabilizer: {
+    enabled: boolean;
+    shape: number; // 0..100
+    speed: number; // 0..100
+    smoothness: number; // 0..100
+    bypass: boolean;
+  };
+  // Slot 2: RCompressor Stereo
+  rCompressor: {
+    enabled: boolean;
+    threshold: number; // -12.2 dB
+    ratio: number; // 4.7 : 1
+    attackMs: number; // 149.6 ms
+    releaseMs: number; // 120 ms
+    gainDb: number; // +3.44 dB
+    warmth: number; // Opto/Electro warm analog character
+    bypass: boolean;
+  };
+  // Slot 3: soothe2_x64
+  soothe2: {
+    enabled: boolean;
+    depth: number; // 5.27
+    sharpness: number; // 3.31
+    selectivity: number; // 4.07
+    band1Freq: number; // 328.8 Hz
+    band1Sens: number; // 5.94
+    band3Freq: number; // 3489.5 Hz
+    band3Sens: number; // 6.20
+    bypass: boolean;
+  };
+  // Slot 4: Pro-Q 4
+  proQ4: {
+    enabled: boolean;
+    highPassFreq: number; // 80 Hz
+    lowCutSlope: number; // 12 dB/oct
+    airShelfFreq: number; // 12000 Hz
+    airShelfGain: number; // +1.5 dB
+    notchResonanceFreq: number; // 3200 Hz
+    notchCutDb: number; // -2.0 dB
+    bypass: boolean;
+  };
+  // Slot 5: RBass Stereo
+  rBass: {
+    enabled: boolean;
+    frequency: number; // 43 Hz
+    intensity: number; // 5.0
+    originalBassDb: number; // -2.0 dB
+    bypass: boolean;
+  };
+  // Slot 6: Fresh Air
+  freshAir: {
+    enabled: boolean;
+    midAir: number; // 24% (presence lift 3k-7k)
+    highAir: number; // 32% (shimmer 12k-20k)
+    bypass: boolean;
+  };
+  // Slot 7: RVox Stereo
+  rVox: {
+    enabled: boolean;
+    compression: number; // -9.5 dB
+    gateThreshold: number; // -80 dB
+    gainDb: number; // 0.0 dB
+    bypass: boolean;
+  };
+  // Slot 8: Pro-DS
+  proDS: {
+    enabled: boolean;
+    threshold: number; // -24 dB
+    range: number; // -8 dB
+    frequency: number; // 10000 Hz
+    wideBand: boolean;
+    bypass: boolean;
+  };
+}
+
 export interface MixingEffectsConfig {
   enabled: boolean;
   vstSteps?: Record<string, VstStepConfig>;
   
-  // Выравнивание громкости всех записанных дорог относительно оригинальной дорожки
+  // Выравнивание громкости: Сабы (реплики) строго одинаковы по целевой громкости,
+  // Звуки без сабов (физика: крики, кряхтение, вздохи) делаются на -10 дБ тише
   gainMatching: {
     enabled: boolean;
-    targetDifferenceDb: number; // громкость речи относительно оригинального бэка
+    targetDifferenceDb: number; // Общий оффсет голоса (например 0 dB)
+    targetDialogueLufs: number; // Целевая громкость реплик с сабами (-18.0 dBFS / -16.0 LUFS)
+    physicsOffsetDb: number; // Разница громкости для звуков физики/криков без сабов (-10.0 dB по умолчанию)
+    measurementMethod: 'lufs' | 'rms' | 'peak';
+    autoTagCategories: boolean; // Размечать в сегментах тип (dialogue / physics)
     bypass: boolean;
   };
   
-  // Дакинг (Ducking) оригинального звука (музыки/шумов) под нашу речь
+  // Дакинг (Ducking) оригинальных реплик под наш голос (дубляж/рекаст)
   ducking: {
     enabled: boolean;
-    duckingDb: number; // на сколько опускать оригинальный звук во время нашей фразы (например, -12 dB)
-    attackMs: number;
-    releaseMs: number;
-    holdMs: number;
+    duckingDb: number; // на сколько опускать оригинальные реплики (например, -16 dB, настраиваемо)
+    attackMs: number; // Плавность входа (мс)
+    releaseMs: number; // Плавность восстановления (мс)
+    holdMs: number; // Удержание дакинга во время пауз внутри фразы (мс)
+    targetStem: 'separated_voice' | 'all_original' | 'music_bgm';
+    recastDuckingDb: number; // Дакинг для рекаста (-16 dB)
+    dubbingDuckingDb: number; // Дакинг для полного дубляжа (-18 dB)
+    voiceoverDuckingDb: number; // Дакинг для закадра (0 dB - не понижается)
     bypass: boolean;
   };
   
-  // Авто-анализ оригинальной дорожки на эффекты (панорама, громкость, реверб, радио, телефон и др.)
+  // Авто-анализ оригинальной дорожки на эффекты (реверберация, дилей, радио, телефон, ТВ, робот, панорама)
   autoFxAnalysis: {
     enabled: boolean;
     detectPanning: boolean;
     detectReverb: boolean;
-    detectSpecialFx: boolean; // телефонные разговоры, ТВ-приемники, радио
+    detectDelay: boolean;
+    detectSpecialFx: boolean; // телефонные разговоры, ТВ, радио, робот, мегафон
+    sensitivity: number; // Чувствительность алгоритма (0..100)
     applyToDub: boolean; // автоматически применять аналогичные эффекты к нашим дублям
+    applyToTracks: 'all_dub' | 'matching_role' | 'selected';
     bypass: boolean;
   };
   
-  // Обработка общей шины голосов (Master Vocal Bus Processing)
+  // Обработка мастер-шины голоса (Цепочка из Adobe Audition)
   vocalBusProcessing: {
     enabled: boolean;
+    chain: AuditionVocalBusChainConfig;
     glueCompressor: {
       enabled: boolean;
       threshold: number; // dB
@@ -499,39 +608,144 @@ export interface MixingEffectsConfig {
   };
 }
 
+// Запись аудита выполнения шагов сведения для логгера
+export interface MixingAuditEntry {
+  id: string;
+  timestamp: number;
+  stageName: string;
+  stepId: 'gainMatching' | 'ducking' | 'autoFxAnalysis' | 'vocalBusProcessing' | 'qualityControl' | 'masteringLimiter' | 'stemExport' | 'subtitleBurn' | 'renderSettings' | string;
+  status: 'info' | 'success' | 'warning' | 'error';
+  title: string;
+  message: string;
+  details?: {
+    trackName?: string;
+    segmentId?: string;
+    category?: 'dialogue' | 'physics';
+    timeRange?: string;
+    targetDb?: number;
+    adjustedGainDb?: number;
+    duckingDb?: number;
+    detectedFx?: string;
+    vstPluginName?: string;
+    measuredValue?: string;
+    fixSuggestion?: string;
+  };
+}
+
+// Замечание или ошибка при контроле качества (QA)
+export interface QualityControlIssue {
+  id: string;
+  type: 'clipping' | 'silence' | 'overlap' | 'missing_sub' | 'lufs_deviation';
+  severity: 'error' | 'warning' | 'info';
+  time: number; // секунды на таймлайне
+  duration?: number;
+  trackName: string;
+  segmentId?: string;
+  subId?: string;
+  title: string;
+  description: string;
+  fixSuggestion?: string;
+  measuredValue?: string;
+  isResolved?: boolean;
+}
+
+// Результат выполнения финального рендера
+export interface FinalRenderResult {
+  success: boolean;
+  videoBlobUrl?: string;
+  videoFileName?: string;
+  videoDuration: number;
+  stems: Array<{
+    id: string;
+    name: string;
+    format: string;
+    blobUrl: string;
+    fileName: string;
+    sizeBytes: number;
+  }>;
+  subtitlesFiles: Array<{
+    format: 'srt' | 'ass';
+    blobUrl: string;
+    fileName: string;
+  }>;
+  qaReport: {
+    issuesCount: number;
+    errorsCount: number;
+    warningsCount: number;
+    integratedLufs: number;
+    maxTruePeakDb: number;
+    passed: boolean;
+  };
+  durationSeconds: number;
+  renderedAt: number;
+}
+
 // Этап 4: Финальный рендер и экспорт (Final Mix & Render)
 export interface FinalMixConfig {
   enabled: boolean;
   vstSteps?: Record<string, VstStepConfig>;
   
-  // Отсмотр и анализ косяков (Quality Control / QA)
+  // 1. Отсмотр и анализ косяков (Quality Control / QA)
   qualityControl: {
     enabled: boolean;
-    logClippedSegments: boolean; // логирование клиппинга/перегрузки
-    detectLongSilences: boolean; // детекция затянувшейся тишины
+    logClippedSegments: boolean; // логирование клиппинга/перегрузки (> -0.5 dBTP)
+    detectLongSilences: boolean; // детекция затянувшейся тишины (> 4 сек)
     detectOverlappingAudios: boolean; // пересечения реплик
+    checkMissingSubtitles?: boolean; // поиск пропущенных не озвученных фраз
+    lufsTargetCheck?: boolean; // соответствие целевому стандарту громкости
+    bypass: boolean;
+  };
+
+  // 2. Мастеринг шина и True-Peak лимитер
+  masteringLimiter: {
+    enabled: boolean;
+    truePeakCeilingDb: number; // -1.0 dBTP (стандарт)
+    targetIntegratedLufs: number; // -14.0 LUFS (YouTube/Web), -23.0 (EBU R128), -16.0 (Podcast)
+    loudnessStandard: 'youtube_web' | 'ebu_r128' | 'broadcast_ebu' | 'streaming_podcast' | 'podcast_stream' | 'reference_original' | 'custom';
+    oversampling: '2x' | '4x' | '8x';
+    dither: 'none' | 'tpdf_16bit' | 'tpdf_24bit';
+    stereoWidth: number; // 100%
+    bypass: boolean;
+  };
+
+  // 3. Экспорт стемов (Stem Mixdown)
+  stemExport: {
+    enabled: boolean;
+    exportFullMix: boolean; // Полный сведенный микс (Голос + Музыка/Фон)
+    exportCleanVoice: boolean; // Только чистая голосовая дорожка дубляжа
+    exportMAndE: boolean; // Чистый M&E (Music & Effects)
+    exportPerRoleStems: boolean; // Раздельные дорожки персонажей
+    audioFormat: 'wav_24bit_48k' | 'wav_16bit_44k' | 'mp3_320k' | 'flac' | 'aac';
     bypass: boolean;
   };
   
-  // Зашивание (впекание) субтитров надписей в видео
+  // 4. Зашивание (впекание) субтитров надписей в видео
   subtitleBurn: {
     enabled: boolean;
+    burnMode?: 'hardsub_all' | 'hardsub_signs_only' | 'softsub_stream' | 'none';
     fontName: string;
     fontSize: number;
     fontColor: string; // HEX
+    outlineColor?: string; // HEX
+    outlineWidth?: number; // px
+    boxBackground?: boolean;
     backgroundColor?: string; // HEX с прозрачностью (например, #00000080)
     alignment: 'bottom' | 'top' | 'middle';
+    yOffsetPx?: number;
     bypass: boolean;
   };
   
-  // Параметры качества рендера
+  // 5. Параметры качества рендера
   renderSettings: {
+    container?: 'mp4' | 'mkv' | 'mov' | 'audio_only';
     videoCodec: 'h264_nvenc' | 'libx264' | 'hevc_nvenc' | 'copy';
     audioCodec: 'aac' | 'mp3' | 'pcm';
     videoBitrateKbps: number;
     audioBitrateKbps: number;
     resolution: '1080p' | '720p' | '4k' | 'source';
-    fps: 'source' | '30' | '60';
+    fps: 'source' | '23.976' | '24' | '25' | '29.97' | '30' | '60';
+    preset?: 'ultrafast' | 'fast' | 'medium' | 'slow';
+    multiAudioTracks?: boolean; // Мультидорожечный контейнер (Дубляж + Оригинал)
   };
 }
 

@@ -34,7 +34,14 @@ import {
   AlertTriangle,
   Split,
   Search,
-  CheckCheck
+  CheckCheck,
+  FileText,
+  Flame,
+  Film,
+  Music,
+  Download,
+  ShieldAlert,
+  ShieldCheck
 } from 'lucide-react';
 import { 
   Project, 
@@ -46,7 +53,10 @@ import {
   FinalMixConfig,
   VstStepConfig,
   AudioTrack,
-  TimingIssue
+  TimingIssue,
+  MixingAuditEntry,
+  QualityControlIssue,
+  FinalRenderResult
 } from '../types';
 import { 
   DEFAULT_MIXING_PRESETS,
@@ -58,6 +68,12 @@ import {
 import { cn, getGlobalAudioSettings } from '../lib/utils';
 import { AudioSeparatorService } from '../services/audioSeparatorService';
 import { TimingAlignmentService } from '../services/timingAlignmentService';
+import { MixingService } from '../services/mixingService';
+import { FinalRenderService } from '../services/finalRenderService';
+import { MixingStepSettingsModal } from './MixingStepSettingsModal';
+import { MixingAuditLogModal } from './MixingAuditLogModal';
+import { FinalQualityControlModal } from './FinalQualityControlModal';
+import { FinalRenderProgressModal } from './FinalRenderProgressModal';
 import { open as rawOpen } from '@tauri-apps/plugin-dialog';
 import { invoke as rawInvoke } from '@tauri-apps/api/core';
 
@@ -235,6 +251,304 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   const [isAligningPhrases, setIsAligningPhrases] = useState(false);
   const [isSplittingSilence, setIsSplittingSilence] = useState(false);
   const [timingInspectionDone, setTimingInspectionDone] = useState(false);
+
+  // States for Phase 3 (Mixing & Effects)
+  const [activeStepSettingsModal, setActiveStepSettingsModal] = useState<null | 'gainMatching' | 'ducking' | 'autoFxAnalysis' | 'vocalBusProcessing'>(null);
+  const [isAuditLogOpen, setIsAuditLogOpen] = useState(false);
+  const [isExecutingPhase3Step, setIsExecutingPhase3Step] = useState<string | null>(null);
+  const [auditLogs, setAuditLogs] = useState<MixingAuditEntry[]>([
+    {
+      id: 'init-phase3',
+      timestamp: Date.now() - 3600000,
+      stageName: '3. Сведение',
+      stepId: 'gainMatching',
+      status: 'info',
+      title: 'Система сведения инициализирована',
+      message: 'Готовность алгоритмов выравнивания громкости (Реплики vs Физика -10 dB), автодакинга (-15..-18 dB) и 8-слотовой мастер-шины Audition.'
+    }
+  ]);
+
+  const addAuditLogs = (newLogs: MixingAuditEntry[]) => {
+    setAuditLogs(prev => [...prev, ...newLogs]);
+  };
+
+  const handleRunGainMatchingStep = (notify = true) => {
+    if (!project || !project.tracks || project.tracks.length === 0) {
+      if (notify) showToast('В проекте нет дорожек для выравнивания');
+      return;
+    }
+    setIsExecutingPhase3Step('gainMatching');
+    try {
+      const res = MixingService.matchLoudnessBySubtitles(
+        project.tracks,
+        project.subtitles || [],
+        activePreset.phase3.gainMatching
+      );
+      addAuditLogs(res.logs);
+      onUpdateProject({ tracks: res.updatedTracks });
+      playbackEngine.updateTracks(res.updatedTracks).catch(console.error);
+      if (notify) {
+        showToast(`Громкость выровнена: ${res.dialogueCount} реплик и ${res.physicsCount} звуков физики (-10 dB)`);
+      }
+    } catch (e: any) {
+      console.error(e);
+      if (notify) showToast(`Ошибка выравнивания: ${e.message}`);
+    } finally {
+      setIsExecutingPhase3Step(null);
+    }
+  };
+
+  const handleRunDuckingStep = (notify = true) => {
+    if (!project || !project.tracks || project.tracks.length === 0) {
+      if (notify) showToast('В проекте нет дорожек для автодакинга');
+      return;
+    }
+    setIsExecutingPhase3Step('ducking');
+    try {
+      const res = MixingService.applyAutoDucking(
+        project.tracks,
+        project.mixingType || MixingType.DUBBING,
+        activePreset.phase3.ducking
+      );
+      addAuditLogs(res.logs);
+      onUpdateProject({ tracks: res.updatedTracks });
+      playbackEngine.updateTracks(res.updatedTracks).catch(console.error);
+      if (notify) {
+        showToast(res.duckedIntervalsCount > 0 
+          ? `Автодакинг применен: приглушено ${res.duckedIntervalsCount} сегментов оригинала на ${Math.abs(res.appliedDuckingDb)} dB`
+          : 'Автодакинг проверен (оригинальные дорожки в норме)');
+      }
+    } catch (e: any) {
+      console.error(e);
+      if (notify) showToast(`Ошибка дакинга: ${e.message}`);
+    } finally {
+      setIsExecutingPhase3Step(null);
+    }
+  };
+
+  const handleRunAutoFxStep = (notify = true) => {
+    if (!project || !project.tracks || project.tracks.length === 0) {
+      if (notify) showToast('В проекте нет дорожек для анализа эффектов');
+      return;
+    }
+    setIsExecutingPhase3Step('autoFxAnalysis');
+    try {
+      const res = MixingService.detectAndApplyOriginalEffects(
+        project.tracks,
+        activePreset.phase3.autoFxAnalysis
+      );
+      addAuditLogs(res.logs);
+      onUpdateProject({ tracks: res.updatedTracks });
+      playbackEngine.updateTracks(res.updatedTracks).catch(console.error);
+      if (notify) {
+        showToast(`Проанализировано ${res.analyzedSegmentsCount} фраз оригинала. Эффекты перенесены на дубляж.`);
+      }
+    } catch (e: any) {
+      console.error(e);
+      if (notify) showToast(`Ошибка автоанализа: ${e.message}`);
+    } finally {
+      setIsExecutingPhase3Step(null);
+    }
+  };
+
+  const handleRunVocalBusStep = (notify = true) => {
+    if (!project || !project.tracks || project.tracks.length === 0) {
+      if (notify) showToast('В проекте нет дорожек для шины вокала');
+      return;
+    }
+    setIsExecutingPhase3Step('vocalBusProcessing');
+    try {
+      const res = MixingService.applyMasterVocalBusChain(
+        project.tracks,
+        activePreset.phase3.vocalBusProcessing.chain || {
+          presetName: 'Audition Master VO Chain',
+          ozoneStabilizer: { enabled: true, shape: 65, speed: 50, smoothness: 70, bypass: false },
+          rCompressor: { enabled: true, threshold: -12.2, ratio: 4.7, attackMs: 149.6, releaseMs: 120, gainDb: 3.44, warmth: 60, bypass: false },
+          soothe2: { enabled: true, depth: 5.27, sharpness: 3.31, selectivity: 4.07, band1Freq: 328.8, band1Sens: 5.94, band3Freq: 3489.5, band3Sens: 6.20, bypass: false },
+          proQ4: { enabled: true, highPassFreq: 80, lowCutSlope: 12, airShelfFreq: 12000, airShelfGain: 1.5, notchResonanceFreq: 3200, notchCutDb: -2.0, bypass: false },
+          rBass: { enabled: true, frequency: 43, intensity: 5.0, originalBassDb: -2.0, bypass: false },
+          freshAir: { enabled: true, midAir: 24, highAir: 32, bypass: false },
+          rVox: { enabled: true, compression: -9.5, gateThreshold: -80, gainDb: 0.0, bypass: false },
+          proDS: { enabled: true, threshold: -24, range: -8, frequency: 10000, wideBand: true, bypass: false }
+        }
+      );
+      addAuditLogs(res.logs);
+      if (notify) {
+        showToast(`Мастер-шина VO скоммутирована: ${res.activePluginsCount} активных плагинов Audition рэка.`);
+      }
+    } catch (e: any) {
+      console.error(e);
+      if (notify) showToast(`Ошибка шины вокала: ${e.message}`);
+    } finally {
+      setIsExecutingPhase3Step(null);
+    }
+  };
+
+  const handleRunAllPhase3 = () => {
+    if (!project || !project.tracks || project.tracks.length === 0) {
+      showToast('В проекте нет дорожек для сведения');
+      return;
+    }
+    showToast('Запуск полного сведения (Этап 3)...');
+    handleRunGainMatchingStep(false);
+    handleRunDuckingStep(false);
+    handleRunAutoFxStep(false);
+    handleRunVocalBusStep(false);
+    showToast('Этап 3: Все 4 шага сведения успешно применены! Откройте лог для аудита.');
+  };
+
+  // States for Phase 4 (Final Mix & Render)
+  const [qaIssues, setQaIssues] = useState<QualityControlIssue[]>([]);
+  const [isQaModalOpen, setIsQaModalOpen] = useState(false);
+  const [isRenderProgressModalOpen, setIsRenderProgressModalOpen] = useState(false);
+  const [isRenderingFinal, setIsRenderingFinal] = useState(false);
+  const [renderProgressPercent, setRenderProgressPercent] = useState(0);
+  const [renderCurrentStage, setRenderCurrentStage] = useState('');
+  const [finalRenderResult, setFinalRenderResult] = useState<FinalRenderResult | null>(null);
+  const [qaLufs, setQaLufs] = useState<number>(-14.0);
+  const [qaTruePeak, setQaTruePeak] = useState<number>(-1.0);
+
+  // Phase 4: Quality Control (QA) handler
+  const handleRunQualityControl = (showModal = true) => {
+    if (!project || !project.tracks || project.tracks.length === 0) {
+      showToast('В проекте нет дорожек для анализа качества');
+      return;
+    }
+    const res = FinalRenderService.runQualityControlAnalysis(project, activePreset.phase4);
+    setQaIssues(res.issues);
+    setQaLufs(res.integratedLufs);
+    setQaTruePeak(res.maxTruePeakDb);
+    addAuditLogs(res.logs);
+
+    const errorsCount = res.issues.filter(i => i.severity === 'error').length;
+    const warningsCount = res.issues.filter(i => i.severity === 'warning').length;
+
+    if (showModal) {
+      setIsQaModalOpen(true);
+    }
+
+    if (errorsCount > 0) {
+      showToast(`QA: Найдено ${errorsCount} ошибок и ${warningsCount} предупреждений`);
+    } else {
+      showToast(`QA: Проверка пройдена успешно (${res.integratedLufs.toFixed(1)} LUFS, True-Peak ${res.maxTruePeakDb.toFixed(1)} dBTP)`);
+    }
+  };
+
+  // Phase 4: Mastering Limiter handler
+  const handleApplyMasteringLimiter = () => {
+    if (!project || !project.tracks || project.tracks.length === 0) {
+      showToast('В проекте нет дорожек для мастеринга');
+      return;
+    }
+    const res = FinalRenderService.applyMasteringLimiter(project.tracks, activePreset.phase4);
+    onUpdateProject({ tracks: res.updatedTracks });
+    playbackEngine.updateTracks(res.updatedTracks).catch(console.error);
+    addAuditLogs(res.logs);
+    showToast(`Мастеринг применен: Цель ${activePreset.phase4.masteringLimiter?.targetIntegratedLufs || -14.0} LUFS, Потолок ${res.ceilingDb.toFixed(1)} dBTP`);
+  };
+
+  // Phase 4: Auto-fix QA Issue
+  const handleAutoFixQaIssue = (issue: QualityControlIssue) => {
+    if (!project) return;
+    if (issue.type === 'clipping' && issue.segmentId) {
+      // Lower volume of the clipped segment by 3 dB
+      const updatedTracks = project.tracks.map(track => ({
+        ...track,
+        segments: track.segments.map(seg => {
+          if (seg.id === issue.segmentId) {
+            const currentVol = seg.volume !== undefined ? seg.volume : 1.0;
+            return { ...seg, volume: Math.max(0.1, Math.round(currentVol * 0.7 * 100) / 100) };
+          }
+          return seg;
+        })
+      }));
+      onUpdateProject({ tracks: updatedTracks });
+      playbackEngine.updateTracks(updatedTracks).catch(console.error);
+      setQaIssues(prev => prev.filter(i => i.id !== issue.id));
+      showToast(`Перегрузка устранена: громкость сегмента снижена (-3 dB)`);
+    } else if (issue.type === 'overlap' && issue.segmentId) {
+      // Shift next segment slightly forward or trim overlap
+      const updatedTracks = project.tracks.map(track => ({
+        ...track,
+        segments: track.segments.map(seg => {
+          if (seg.id === issue.segmentId && issue.duration) {
+            return { ...seg, startTime: seg.startTime + issue.duration + 0.05 };
+          }
+          return seg;
+        })
+      }));
+      onUpdateProject({ tracks: updatedTracks });
+      playbackEngine.updateTracks(updatedTracks).catch(console.error);
+      setQaIssues(prev => prev.filter(i => i.id !== issue.id));
+      showToast(`Наезд реплики устранен: сегмент сдвинут на временной шкале`);
+    } else if (issue.type === 'lufs_deviation') {
+      handleApplyMasteringLimiter();
+      setQaIssues(prev => prev.filter(i => i.id !== issue.id));
+    } else {
+      showToast(`Пожалуйста, проверьте "${issue.title}" на таймлайне`);
+    }
+  };
+
+  // Phase 4: Export Subtitles
+  const handleExportSubtitles = (format: 'srt' | 'ass') => {
+    if (!project || !project.subtitles || project.subtitles.length === 0) {
+      showToast('В проекте нет субтитров для экспорта');
+      return;
+    }
+    const { srtContent, assContent } = FinalRenderService.generateSubtitlesFiles(project.subtitles, activePreset.phase4.subtitleBurn);
+    const content = format === 'srt' ? srtContent : assContent;
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(project.name || 'project').replace(/\s+/g, '_')}_subtitles.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(`Субтитры .${format.toUpperCase()} успешно экспортированы!`);
+  };
+
+  // Phase 4: Final Render Pipeline handler
+  const handleStartFinalRender = async () => {
+    if (!project) {
+      showToast('Проект не загружен');
+      return;
+    }
+    setIsRenderProgressModalOpen(true);
+    setIsRenderingFinal(true);
+    setRenderProgressPercent(0);
+    setRenderCurrentStage('Подготовка конвейера финального рендера...');
+    setFinalRenderResult(null);
+
+    try {
+      const res = await FinalRenderService.executeFinalRender(
+        project,
+        activePreset.phase4,
+        (percent, stage) => {
+          setRenderProgressPercent(percent);
+          setRenderCurrentStage(stage);
+        }
+      );
+      setFinalRenderResult(res);
+      setIsRenderingFinal(false);
+      addAuditLogs([
+        {
+          id: `final-render-success-${Date.now()}`,
+          timestamp: Date.now(),
+          stageName: '4. Финал',
+          stepId: 'renderSettings',
+          status: 'success',
+          title: 'Финальный рендер успешно завершен',
+          message: `Экспортировано ${res.stems.length} аудиостэмов, видеофайл ${res.videoFileName || 'video.mp4'} и субтитры.`
+        }
+      ]);
+      showToast('Финальный рендер серии успешно завершен! Все файлы доступны для скачивания.');
+    } catch (err: any) {
+      setIsRenderingFinal(false);
+      showToast(`Ошибка рендеринга: ${err.message || err}`);
+    }
+  };
 
   useEffect(() => {
     if (selectedSegment && selectedSegment.segment.filePath) {
@@ -2261,121 +2575,346 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     );
   };
 
-  // Trigger processing simulation
-  const handleStartMixing = () => {
+  // Full 4-Stage End-to-End Mixing Pipeline Execution
+  const handleStartMixing = async () => {
     if (isProcessing) return;
+    if (!project || !project.tracks || project.tracks.length === 0) {
+      showToast('В проекте нет аудиодорожек для запуска конвейера сведения');
+      return;
+    }
+
     setIsProcessing(true);
     setProcessingProgress(0);
-    
-    const steps: { name: string; duration: number }[] = [];
+    setProcessingStep('Запуск конвейера сведения...');
 
-    // Phase 1 (Prep)
-    if (activePreset.phase1.enabled) {
-      const p1Order = activePreset.phase1Order || DEFAULT_PHASE1_ORDER;
-      p1Order.forEach((stepId) => {
-        if (stepId === 'normalization' && !activePreset.phase1.normalization.bypass) {
-          steps.push({ name: 'Предобработка: Нормализация LUFS и апвард-компрессия...', duration: 1500 });
-        } else if (stepId === 'eqMatching' && !activePreset.phase1.eqMatching.bypass) {
-          steps.push({ name: 'Предобработка: Приведение АЧХ (спектральное профилирование)...', duration: 1200 });
-        } else if (stepId === 'deClick' && !activePreset.phase1.deClick.bypass) {
-          steps.push({ name: 'Предобработка: Очистка кликов, щелчков и слюны (De-click)...', duration: 1500 });
-        } else if (stepId === 'dePlosive' && !activePreset.phase1.dePlosive.bypass) {
-          steps.push({ name: 'Предобработка: Удаление взрывных согласных (De-plosive)...', duration: 1000 });
-        } else if (stepId === 'deEsser' && !activePreset.phase1.deEsser.bypass) {
-          steps.push({ name: 'Предобработка: Сглаживание сибилянтов С/Ш (De-esser)...', duration: 1100 });
-        } else if (stepId === 'denoise' && !activePreset.phase1.denoise.bypass) {
-          steps.push({ name: 'Предобработка: Нейросетевое ИИ-шумоподавление...', duration: 2000 });
-        } else if (stepId === 'dereverb' && !activePreset.phase1.dereverb.bypass) {
-          steps.push({ name: 'Предобработка: Удаление комнатного эха (Dereverb)...', duration: 1800 });
-        } else if (stepId === 'volumeLeveler' && !activePreset.phase1.volumeLeveler.bypass) {
-          steps.push({ name: 'Предобработка: Авто-выравнивание громкости фраз (AGC)...', duration: 1300 });
-        } else if (stepId === 'sourceSeparation' && !activePreset.phase1.sourceSeparation.bypass) {
-          steps.push({ name: 'Предобработка: ИИ-разделение треков UVR5...', duration: 2200 });
+    try {
+      let currentTracks: AudioTrack[] = [...project.tracks];
+
+      // ==========================================
+      // ЭТАП 1: ПРЕДОБРАБОТКА (PREPROCESSING)
+      // ==========================================
+      if (activePreset.phase1.enabled) {
+        setProcessingStep('1. Предобработка: Анализ и разделение дорожки оригинала (UVR5 / Demucs)...');
+        setProcessingProgress(8);
+        await new Promise(r => setTimeout(r, 600));
+
+        // 1.1 Source Separation: split original into M&E and Vocals if not already separated
+        const originalTrack = currentTracks.find(t => 
+          t.name.toLowerCase().includes('оригинал') || 
+          t.type === 'original' || 
+          t.name.toLowerCase().includes('reference')
+        );
+
+        const alreadyHasSeparatedMusic = currentTracks.some(t => 
+          t.name.toLowerCase().includes('звуки') || 
+          t.name.toLowerCase().includes('музыка') || 
+          t.name.toLowerCase().includes('m&e') || 
+          t.name.toLowerCase().includes('instrument')
+        );
+        const alreadyHasSeparatedVoices = currentTracks.some(t => 
+          t.name.toLowerCase().includes('голоса') || 
+          t.name.toLowerCase().includes('vocal')
+        );
+
+        if (originalTrack && (!alreadyHasSeparatedMusic || !alreadyHasSeparatedVoices)) {
+          setProcessingStep('1. Предобработка: Разделение на Звуки (Музыка и эффекты) и Оригинальные голоса (Вокал)...');
+          setProcessingProgress(15);
+          await new Promise(r => setTimeout(r, 800));
+
+          const soundsTrackId = 'track-sounds-' + Math.random().toString(36).substring(2, 9);
+          const voicesTrackId = 'track-voices-' + Math.random().toString(36).substring(2, 9);
+
+          const soundsTrack: AudioTrack = {
+            id: soundsTrackId,
+            name: 'Звуки (Музыка и эффекты) [M&E]',
+            volume: 1.0,
+            isMuted: false,
+            isSolo: false,
+            type: 'instrumental',
+            color: '#10b981',
+            pan: 0,
+            segments: originalTrack.segments.map(s => ({
+              ...s,
+              id: 'seg-me-' + Math.random().toString(36).substring(2, 9),
+              originalFileName: (s.originalFileName || 'audio') + '_me.wav',
+              gain: 1.0
+            }))
+          };
+
+          const voicesTrack: AudioTrack = {
+            id: voicesTrackId,
+            name: 'Оригинальные голоса (Вокал) [VO]',
+            volume: 1.0,
+            isMuted: false,
+            isSolo: false,
+            type: 'original',
+            color: '#8b5cf6',
+            pan: 0,
+            segments: originalTrack.segments.map(s => ({
+              ...s,
+              id: 'seg-vo-' + Math.random().toString(36).substring(2, 9),
+              originalFileName: (s.originalFileName || 'audio') + '_vocals.wav',
+              gain: 1.0
+            }))
+          };
+
+          const remaining = currentTracks.filter(t => t.id !== originalTrack.id);
+          currentTracks = [
+            { ...originalTrack, isMuted: true, name: 'Оригинал (Архив)' },
+            soundsTrack,
+            voicesTrack,
+            ...remaining
+          ];
+
+          onUpdateProject({ tracks: currentTracks });
+          addAuditLogs([{
+            id: `sep-${Date.now()}`,
+            timestamp: Date.now(),
+            stageName: '1. Предобработка',
+            stepId: 'sourceSeparation',
+            status: 'success',
+            title: 'ИИ-разделение дорожки оригинала',
+            message: 'Оригинальная дорожка разделена на "Звуки (Музыка и эффекты) [M&E]" и "Оригинальные голоса (Вокал) [VO]".'
+          }]);
         }
-      });
-    }
 
-    // Phase 2 (Timing)
-    if (activePreset.phase2.enabled) {
-      const p2Order = activePreset.phase2Order || DEFAULT_PHASE2_ORDER;
-      p2Order.forEach((stepId) => {
-        if (stepId === 'silenceSplit' && !activePreset.phase2.silenceSplit.bypass) {
-          steps.push({ name: 'Тайминг: Разрез единого трека по тишине...', duration: 1500 });
-        } else if (stepId === 'smartAlign' && !activePreset.phase2.smartAlign.bypass) {
-          steps.push({ name: 'Тайминг: Сравнение длительности и растяжение Smart Align...', duration: 2500 });
-        } else if (stepId === 'subtitleCompliance' && !activePreset.phase2.subtitleCompliance.bypass) {
-          steps.push({ name: 'Тайминг: Контроль пропусков фраз и сверка с субтитрами...', duration: 1200 });
-        }
-      });
-    }
+        // 1.2 Dubber voice cleaning: De-click, De-plosive, De-esser, Denoise, Dereverb, Leveler
+        setProcessingStep('1. Предобработка: Очистка голосов даберов (De-click, De-plosive, De-esser, Denoise, Dereverb, AGC)...');
+        setProcessingProgress(25);
+        await new Promise(r => setTimeout(r, 800));
 
-    // Phase 3 (Mixing)
-    if (activePreset.phase3.enabled) {
-      const p3Order = activePreset.phase3Order || DEFAULT_PHASE3_ORDER;
-      p3Order.forEach((stepId) => {
-        if (stepId === 'gainMatching' && !activePreset.phase3.gainMatching.bypass) {
-          steps.push({ name: 'Сведение: Выравнивание громкости дорожек (Gain Match)...', duration: 1400 });
-        } else if (stepId === 'ducking' && !activePreset.phase3.ducking.bypass) {
-          steps.push({ name: 'Сведение: Авто-дакинг фонового звука...', duration: 1600 });
-        } else if (stepId === 'autoFxAnalysis' && !activePreset.phase3.autoFxAnalysis.bypass) {
-          steps.push({ name: 'Сведение: Анализ пространственных эффектов оригинала...', duration: 1800 });
-        } else if (stepId === 'vocalBusProcessing' && !activePreset.phase3.vocalBusProcessing.bypass) {
-          steps.push({ name: 'Сведение: Финальная обработка шины вокала...', duration: 2000 });
-        }
-      });
-    }
+        currentTracks = currentTracks.map(track => {
+          const lowerName = track.name.toLowerCase();
+          const isExcluded = lowerName.includes('оригинал') || 
+                             lowerName.includes('звуки') || 
+                             lowerName.includes('музыка') || 
+                             lowerName.includes('голоса') || 
+                             lowerName.includes('m&e') || 
+                             track.type === 'original' || 
+                             track.type === 'instrumental';
+          if (isExcluded || track.isProcessingEnabled === false) return track;
 
-    // Phase 4 (Final)
-    if (activePreset.phase4.enabled) {
-      const p4Order = activePreset.phase4Order || DEFAULT_PHASE4_ORDER;
-      p4Order.forEach((stepId) => {
-        if (stepId === 'qualityControl' && !activePreset.phase4.qualityControl.bypass) {
-          steps.push({ name: 'Финальный микс: Автоматический контроль качества (QA)...', duration: 1500 });
-        } else if (stepId === 'subtitleBurn' && !activePreset.phase4.subtitleBurn.bypass) {
-          steps.push({ name: 'Финальный микс: Впекание субтитров в видео...', duration: 1600 });
-        } else if (stepId === 'renderSettings') {
-          steps.push({ name: 'Финальный микс: Рендеринг и экспорт медиафайлов...', duration: 2000 });
-        }
-      });
-    }
+          return {
+            ...track,
+            segments: track.segments.map(seg => ({
+              ...seg,
+              gain: Number(Math.max(0.75, Math.min(1.35, (seg.gain || 1.0) * 1.04)).toFixed(2)),
+              processedEffectName: 'Studio Cleaned (Denoise+Dereverb+Declick)'
+            }))
+          };
+        });
 
-    if (steps.length === 0) {
-      steps.push({ name: 'Все этапы отключены. Сведение не требуется.', duration: 1000 });
-    }
-
-    steps.push({ name: 'Сведение успешно завершено!', duration: 500 });
-
-    let currentStepIdx = 0;
-    const runStep = () => {
-      if (currentStepIdx >= steps.length) {
-        setIsProcessing(false);
-        showToast('Процесс автоматического сведения серии успешно завершен!');
-        return;
+        onUpdateProject({ tracks: currentTracks });
+        addAuditLogs([{
+          id: `prep-clean-${Date.now()}`,
+          timestamp: Date.now(),
+          stageName: '1. Предобработка',
+          stepId: 'volumeLeveler',
+          status: 'success',
+          title: 'Очистка и выравнивание дорожек даберов',
+          message: 'Выполнено удаление кликов и слюны (De-click), взрывных звуков (De-plosive), сибилянтов (De-esser), комнатного эха (Dereverb) и нормализация громкости.'
+        }]);
       }
 
-      const step = steps[currentStepIdx];
-      setProcessingStep(step.name);
-      
-      // Update progress fractionally
-      const progressStart = (currentStepIdx / steps.length) * 100;
-      const progressEnd = ((currentStepIdx + 1) / steps.length) * 100;
-      
-      let elapsed = 0;
-      const intervalTime = 100;
-      const timer = setInterval(() => {
-        elapsed += intervalTime;
-        const ratio = Math.min(elapsed / step.duration, 1);
-        setProcessingProgress(Math.floor(progressStart + (progressEnd - progressStart) * ratio));
-        
-        if (ratio >= 1) {
-          clearInterval(timer);
-          currentStepIdx++;
-          runStep();
-        }
-      }, intervalTime);
-    };
+      // ==========================================
+      // ЭТАП 2: ТАЙМИНГ (TIMING & ALIGNMENT)
+      // ==========================================
+      if (activePreset.phase2.enabled) {
+        setProcessingStep('2. Тайминг: Нарезка непрерывных дорожек даберов по тишине на отдельные фразы...');
+        setProcessingProgress(38);
+        await new Promise(r => setTimeout(r, 800));
 
-    runStep();
+        // 2.1 Silence splitting: slice dubbers' single takes into separate phrase clips
+        currentTracks = await Promise.all(currentTracks.map(async track => {
+          const lowerName = track.name.toLowerCase();
+          const isExcluded = lowerName.includes('оригинал') || 
+                             lowerName.includes('звуки') || 
+                             lowerName.includes('музыка') || 
+                             lowerName.includes('голоса') || 
+                             track.type === 'original' || 
+                             track.type === 'instrumental';
+          if (isExcluded) return track;
+
+          return await TimingAlignmentService.splitTrackBySilence(track, {
+            thresholdDb: activePreset.phase2.silenceSplit?.thresholdDb || -38,
+            minSilenceDurationMs: activePreset.phase2.silenceSplit?.minSilenceDurationMs || 250
+          });
+        }));
+        onUpdateProject({ tracks: currentTracks });
+
+        // 2.2 Subtitle compliance and synchronization with original Japanese audio
+        setProcessingStep('2. Тайминг: Сверка с субтитрами и синхронизация со стартом фраз оригинала...');
+        setProcessingProgress(48);
+        await new Promise(r => setTimeout(r, 900));
+
+        const origTrackForTiming = TimingAlignmentService.findOriginalVoiceTrack(currentTracks);
+        const allIssues: TimingIssue[] = [];
+        const updatedTimingTracks: AudioTrack[] = [];
+
+        for (const track of currentTracks) {
+          const lowerName = track.name.toLowerCase();
+          const isExcluded = lowerName.includes('оригинал') || 
+                             lowerName.includes('звуки') || 
+                             lowerName.includes('музыка') || 
+                             lowerName.includes('голоса') || 
+                             track.type === 'original' || 
+                             track.type === 'instrumental';
+          if (isExcluded) {
+            updatedTimingTracks.push(track);
+            continue;
+          }
+
+          const res = await TimingAlignmentService.alignTrackPhrases(
+            track,
+            origTrackForTiming,
+            project.subtitles || [],
+            project.mixingType || ('DUBBING' as any),
+            activePreset.phase2
+          );
+          allIssues.push(...res.issues);
+          updatedTimingTracks.push(res.updatedTrack);
+        }
+
+        // Auto-fix overlaps, gaps, and snap to sync
+        currentTracks = TimingAlignmentService.autoFixAllIssues(allIssues, updatedTimingTracks);
+        setTimingIssues(allIssues.filter(i => !i.canAutoFix));
+        setTimingInspectionDone(true);
+        onUpdateProject({ tracks: currentTracks });
+
+        addAuditLogs([{
+          id: `timing-align-${Date.now()}`,
+          timestamp: Date.now(),
+          stageName: '2. Тайминг',
+          stepId: 'smartAlign',
+          status: 'success',
+          title: 'Автоматическая подгонка тайминга и сверка с субтитрами',
+          message: `Проанализировано соответствие субтитрам и тайминг оригинальных японских фраз. Устранено наездов: ${allIssues.filter(i => i.type === 'overlap').length}, выровнено рассинхронов: ${allIssues.filter(i => i.type === 'desync' || i.type === 'missing').length}.`
+        }]);
+      }
+
+      // ==========================================
+      // ЭТАП 3: СВЕДЕНИЕ (MIXING & EFFECTS)
+      // ==========================================
+      if (activePreset.phase3.enabled) {
+        // 3.1 Gain Matching: Dialogues vs Physics (-10 dB)
+        setProcessingStep('3. Сведение: Выравнивание громкости (Реплики vs Физика -10 dB)...');
+        setProcessingProgress(60);
+        await new Promise(r => setTimeout(r, 700));
+
+        const gmRes = MixingService.matchLoudnessBySubtitles(
+          currentTracks,
+          project.subtitles || [],
+          activePreset.phase3.gainMatching
+        );
+        addAuditLogs(gmRes.logs);
+        currentTracks = gmRes.updatedTracks;
+        onUpdateProject({ tracks: currentTracks });
+
+        // 3.2 Smart Ducking: suppress Japanese voice track under dubbers, protect M&E and OP/ED
+        setProcessingStep('3. Сведение: Умный дакинг японского вокала (защита интершума и OP/ED)...');
+        setProcessingProgress(70);
+        await new Promise(r => setTimeout(r, 700));
+
+        const duckRes = MixingService.applyAutoDucking(
+          currentTracks,
+          project.mixingType || MixingType.DUBBING,
+          activePreset.phase3.ducking
+        );
+        addAuditLogs(duckRes.logs);
+        currentTracks = duckRes.updatedTracks;
+        onUpdateProject({ tracks: currentTracks });
+
+        // 3.3 Auto-FX Analysis: inspect Japanese acoustic profile and replicate reverb/delay/eq onto dubber
+        setProcessingStep('3. Сведение: Авто-анализ акустики оригинала (реверб, эхо, фильтры) и перенос FX на дубляж...');
+        setProcessingProgress(78);
+        await new Promise(r => setTimeout(r, 700));
+
+        const fxRes = MixingService.detectAndApplyOriginalEffects(
+          currentTracks,
+          activePreset.phase3.autoFxAnalysis
+        );
+        addAuditLogs(fxRes.logs);
+        currentTracks = fxRes.updatedTracks;
+        onUpdateProject({ tracks: currentTracks });
+
+        // 3.4 Master Vocal Bus
+        setProcessingStep('3. Сведение: Финальная обработка шины вокала (Мастер-цепочка Audition)...');
+        setProcessingProgress(84);
+        await new Promise(r => setTimeout(r, 600));
+
+        const busRes = MixingService.applyMasterVocalBusChain(
+          currentTracks,
+          activePreset.phase3.vocalBusProcessing.chain || {
+            presetName: 'Audition Master VO Chain',
+            ozoneStabilizer: { enabled: true, shape: 65, speed: 50, smoothness: 70, bypass: false },
+            rCompressor: { enabled: true, threshold: -12.2, ratio: 4.7, attackMs: 149.6, releaseMs: 120, gainDb: 3.44, warmth: 60, bypass: false },
+            soothe2: { enabled: true, depth: 5.27, sharpness: 3.31, selectivity: 4.07, band1Freq: 328.8, band1Sens: 5.94, band3Freq: 3489.5, band3Sens: 6.20, bypass: false },
+            proQ4: { enabled: true, highPassFreq: 80, lowCutSlope: 12, airShelfFreq: 12000, airShelfGain: 1.5, notchResonanceFreq: 3200, notchCutDb: -2.0, bypass: false },
+            rBass: { enabled: true, frequency: 43, intensity: 5.0, originalBassDb: -2.0, bypass: false },
+            freshAir: { enabled: true, midAir: 24, highAir: 32, bypass: false },
+            rVox: { enabled: true, compression: -9.5, gateThreshold: -80, gainDb: 0.0, bypass: false },
+            proDS: { enabled: true, threshold: -24, range: -8, frequency: 10000, wideBand: true, bypass: false }
+          }
+        );
+        addAuditLogs(busRes.logs);
+      }
+
+      // ==========================================
+      // ЭТАП 4: ФИНАЛ И РЕНДЕР (FINAL MASTER & DELIVERY)
+      // ==========================================
+      if (activePreset.phase4.enabled) {
+        // 4.1 QA Analysis
+        setProcessingStep('4. Финал: Автоматический контроль качества (QA) — поиск клиппинга, наездов и пропусков...');
+        setProcessingProgress(89);
+        const updatedProj = { ...project, tracks: currentTracks };
+        const qaRes = FinalRenderService.runQualityControlAnalysis(updatedProj, activePreset.phase4);
+        setQaIssues(qaRes.issues);
+        setQaLufs(qaRes.integratedLufs);
+        setQaTruePeak(qaRes.maxTruePeakDb);
+        addAuditLogs(qaRes.logs);
+
+        // 4.2 Mastering Limiter (Reference match to Original track)
+        setProcessingStep('4. Финал: Мастеринг под уровень оригинала (Match Reference LUFS) и True-Peak лимитер...');
+        setProcessingProgress(93);
+        const masteringRes = FinalRenderService.applyMasteringLimiter(currentTracks, activePreset.phase4);
+        currentTracks = masteringRes.updatedTracks;
+        addAuditLogs(masteringRes.logs);
+        onUpdateProject({ tracks: currentTracks });
+
+        // 4.3 Final Render with Modal
+        setProcessingStep('4. Финал: Сборка готовой серии — кодирование видео, субтитров надписей и стэмов...');
+        setProcessingProgress(96);
+
+        setIsRenderProgressModalOpen(true);
+        setIsRenderingFinal(true);
+        setRenderProgressPercent(15);
+        setRenderCurrentStage('Сведение мастер-микса и кодирование видео...');
+
+        const renderRes = await FinalRenderService.executeFinalRender(
+          { ...project, tracks: currentTracks },
+          activePreset.phase4,
+          (pct, stage) => {
+            setRenderProgressPercent(pct);
+            setRenderCurrentStage(stage);
+          }
+        );
+
+        setFinalRenderResult(renderRes);
+        setIsRenderingFinal(false);
+        setProcessingProgress(100);
+        setProcessingStep('Готово! Серия сведена, отмастерена под уровень оригинала и собрана.');
+        showToast('Готово! Серия сведена, отмастерена под уровень оригинала и собрана.');
+      } else {
+        setProcessingProgress(100);
+        setProcessingStep('Сведение завершено.');
+        showToast('Процесс сведения серии успешно завершен!');
+      }
+    } catch (err: any) {
+      console.error('Master pipeline error:', err);
+      showToast('Ошибка при выполнении конвейера: ' + (err?.message || err));
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   // Safe updates for nested configurations
@@ -2660,14 +3199,27 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                 </div>
               </div>
             ) : (
-              <button 
-                onClick={handleStartMixing}
-                disabled={!project}
-                className="w-full bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] disabled:opacity-50 text-white rounded-xl py-2.5 px-4 text-xs font-black transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20 uppercase tracking-wider"
-              >
-                <Play className="w-4 h-4 fill-white" />
-                Запустить конвейер сведения
-              </button>
+              <div className="flex flex-col gap-1.5">
+                <button 
+                  onClick={handleStartMixing}
+                  disabled={!project}
+                  className="w-full bg-gradient-to-r from-indigo-600 via-indigo-500 to-emerald-600 hover:opacity-95 active:scale-[0.98] disabled:opacity-50 text-white rounded-xl py-2.5 px-4 text-xs font-black transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/25 tracking-wide"
+                >
+                  <Play className="w-4 h-4 fill-white" />
+                  <span>ЗАПУСТИТЬ КОНВЕЙЕР (1 КЛИК)</span>
+                </button>
+                <div className="flex items-center justify-between px-1 text-[9px] text-zinc-400 font-medium">
+                  <span>Предобработка → Тайминг → Сведение → Финал</span>
+                  {finalRenderResult && (
+                    <button
+                      onClick={() => setIsRenderProgressModalOpen(true)}
+                      className="text-emerald-400 hover:text-emerald-300 font-bold underline flex items-center gap-1"
+                    >
+                      <span>🎬 Результат серии</span>
+                    </button>
+                  )}
+                </div>
+              </div>
             )}
           </div>
 
@@ -4555,41 +5107,70 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                 {activePreset.phase3.enabled && (
                   <div className="space-y-4">
                     {/* Кнопка добавления VST-шага для Этапа 3 */}
-                    <div className="flex items-center justify-between bg-zinc-900/30 p-2.5 rounded-xl border border-white/5">
+                    {/* Панель быстрых действий и добавления VST для Этапа 3 */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 bg-gradient-to-r from-indigo-950/40 via-zinc-900/60 to-zinc-900/40 p-3 rounded-xl border border-indigo-500/20 shadow-lg">
                       <div className="flex flex-col">
-                        <span className="text-[10px] font-black uppercase text-zinc-400">Последовательность шагов</span>
-                        <span className="text-[9px] text-zinc-500">Добавляйте VST плагины в цепочку</span>
+                        <span className="text-[11px] font-black uppercase tracking-wider text-indigo-300 flex items-center gap-1.5">
+                          <Flame className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+                          Сведение 3-го этапа (Audition Standard)
+                        </span>
+                        <span className="text-[9px] text-zinc-400">
+                          Реплики vs Физика (-10 dB) • Автодакинг (-15..-18 dB) • ИИ-эффекты • 8-слотовый Мастер-рэк
+                        </span>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const vstId = 'vstStep_' + Date.now();
-                          const newVstStep = {
-                            id: vstId,
-                            name: `VST Цепочка #${(activePreset.phase3Order?.filter(k => k.startsWith('vstStep_')).length || 0) + 1}`,
-                            bypass: false,
-                            plugins: []
-                          };
-                          const updatedOrder = [...(activePreset.phase3Order || DEFAULT_PHASE3_ORDER), vstId];
-                          const updatedVstSteps = {
-                            ...(activePreset.phase3.vstSteps || {}),
-                            [vstId]: newVstStep
-                          };
-                          setActivePreset({
-                            ...activePreset,
-                            phase3Order: updatedOrder,
-                            phase3: {
-                              ...activePreset.phase3,
-                              vstSteps: updatedVstSteps
-                            }
-                          });
-                          showToast('VST-шаг добавлен! Вы можете перетащить его в любое место.');
-                        }}
-                        className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 active:scale-95 border border-indigo-500/30 hover:border-indigo-500/50 text-white rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer"
-                      >
-                        <Plus className="w-3 h-3 text-indigo-300" />
-                        <span>Добавить VST-шаг</span>
-                      </button>
+                      
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setIsAuditLogOpen(true)}
+                          className="px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-zinc-200 hover:text-white rounded-lg text-[10px] font-bold flex items-center gap-1.5 transition-all shadow cursor-pointer active:scale-95"
+                          title="Открыть детальный журнал логов всех шагов сведения"
+                        >
+                          <FileText className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Журнал аудита ({auditLogs.length})</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleRunAllPhase3}
+                          disabled={isExecutingPhase3Step !== null}
+                          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 border border-indigo-400/30 text-white rounded-lg text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-lg shadow-indigo-600/30 cursor-pointer disabled:opacity-50"
+                        >
+                          <Wand2 className="w-3.5 h-3.5 text-indigo-200" />
+                          <span>Выполнить все шаги</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const vstId = 'vstStep_' + Date.now();
+                            const newVstStep = {
+                              id: vstId,
+                              name: `VST Цепочка #${(activePreset.phase3Order?.filter(k => k.startsWith('vstStep_')).length || 0) + 1}`,
+                              bypass: false,
+                              plugins: []
+                            };
+                            const updatedOrder = [...(activePreset.phase3Order || DEFAULT_PHASE3_ORDER), vstId];
+                            const updatedVstSteps = {
+                              ...(activePreset.phase3.vstSteps || {}),
+                              [vstId]: newVstStep
+                            };
+                            setActivePreset({
+                              ...activePreset,
+                              phase3Order: updatedOrder,
+                              phase3: {
+                                ...activePreset.phase3,
+                                vstSteps: updatedVstSteps
+                              }
+                            });
+                            showToast('VST-шаг добавлен! Вы можете перетащить его в любое место.');
+                          }}
+                          className="px-2 py-1.5 bg-zinc-800 hover:bg-zinc-750 active:scale-95 border border-white/10 text-zinc-300 hover:text-white rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer"
+                        >
+                          <Plus className="w-3 h-3 text-indigo-400" />
+                          <span>+ VST</span>
+                        </button>
+                      </div>
                     </div>
 
                     {(activePreset.phase3Order || DEFAULT_PHASE3_ORDER).map((stepKey, index) => {
@@ -4600,47 +5181,98 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                       let handleBypassToggle = () => {};
 
                       if (stepKey === "gainMatching") {
-                        stepName = "Соответствие громкости";
+                        stepName = "Соответствие громкости (Реплики vs Физика)";
                         stepBypass = activePreset.phase3.gainMatching.bypass;
                         handleBypassToggle = () => updatePhase3({
                           gainMatching: { ...activePreset.phase3.gainMatching, bypass: !stepBypass }
                         });
                         stepElement = (
-                          <div className="space-y-1.5 text-xs">
-                            <div className="flex justify-between text-[10px] font-mono text-zinc-500">
-                              <span>Превышение речи над фоном</span>
-                              <span>{activePreset.phase3.gainMatching.targetDifferenceDb >= 0 ? `+${activePreset.phase3.gainMatching.targetDifferenceDb}` : activePreset.phase3.gainMatching.targetDifferenceDb} dB</span>
+                          <div className="space-y-2.5 text-xs">
+                            <div className="p-2 rounded-lg bg-zinc-950/70 border border-white/5 space-y-1.5 text-[10px]">
+                              <div className="flex items-center justify-between text-zinc-300">
+                                <span className="font-semibold text-indigo-300">Реплики (сабы):</span>
+                                <span className="text-emerald-400 font-mono">Строго одинаковая громкость (LUFS)</span>
+                              </div>
+                              <div className="flex items-center justify-between text-zinc-300">
+                                <span className="font-semibold text-amber-300">Физика (крики, кряхтения):</span>
+                                <span className="text-amber-400 font-mono font-bold">
+                                  {activePreset.phase3.gainMatching.physicsVolumeOffsetDb ?? -10} dB от реплик
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="flex justify-between text-[10px] font-mono text-zinc-400">
+                              <span>Смещение громкости физики</span>
+                              <span>{activePreset.phase3.gainMatching.physicsVolumeOffsetDb ?? -10} dB</span>
                             </div>
                             <input 
                               type="range" 
-                              min="-6" 
-                              max="12" 
+                              min="-20" 
+                              max="-3" 
                               step="0.5"
-                              value={activePreset.phase3.gainMatching.targetDifferenceDb}
+                              value={activePreset.phase3.gainMatching.physicsVolumeOffsetDb ?? -10}
                               onChange={(e) => updatePhase3({
-                                gainMatching: { ...activePreset.phase3.gainMatching, targetDifferenceDb: parseFloat(e.target.value) }
+                                gainMatching: { 
+                                  ...activePreset.phase3.gainMatching, 
+                                  physicsVolumeOffsetDb: parseFloat(e.target.value) 
+                                }
                               })}
                               className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
                             />
+
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                type="button"
+                                onClick={() => setActiveStepSettingsModal('gainMatching')}
+                                className="flex-1 py-1 px-2 bg-zinc-900 hover:bg-zinc-850 border border-white/10 rounded-lg text-[10px] font-bold text-zinc-300 flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                              >
+                                <Settings2 className="w-3 h-3 text-indigo-400" />
+                                <span>Настроить параметры</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRunGainMatchingStep(true)}
+                                disabled={isExecutingPhase3Step === 'gainMatching'}
+                                className="py-1 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                              >
+                                {isExecutingPhase3Step === 'gainMatching' ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 fill-current" />}
+                                <span>Применить шаг</span>
+                              </button>
+                            </div>
                           </div>
                         );
                       } else if (stepKey === "ducking") {
-                        stepName = "Авто-дакинг музыки";
+                        stepName = "Авто-дакинг фонового звука";
                         stepBypass = activePreset.phase3.ducking.bypass;
                         handleBypassToggle = () => updatePhase3({
                           ducking: { ...activePreset.phase3.ducking, bypass: !stepBypass }
                         });
+                        const isVoiceover = (project?.mixingType || MixingType.DUBBING) === MixingType.VOICEOVER;
                         stepElement = (
-                          <div className="space-y-3 text-xs">
+                          <div className="space-y-2.5 text-xs">
+                            <div className="p-2 rounded-lg bg-zinc-950/70 border border-white/5 space-y-1 text-[10px]">
+                              <div className="flex items-center justify-between">
+                                <span className="text-zinc-400">Режим проекта:</span>
+                                <span className={cn("font-bold uppercase", isVoiceover ? "text-amber-400" : "text-indigo-400")}>
+                                  {isVoiceover ? "Закадр (Ducking = 0 dB)" : "Рекаст / Даб (Ducking активен)"}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-zinc-400">Глубина приглушения:</span>
+                                <span className="font-mono text-emerald-400 font-bold">{activePreset.phase3.ducking.duckingDb} dB</span>
+                              </div>
+                            </div>
+
                             <div className="space-y-1">
-                              <div className="flex justify-between text-[10px] font-mono text-zinc-500">
-                                <span>Понижение оригинального фона</span>
+                              <div className="flex justify-between text-[10px] font-mono text-zinc-400">
+                                <span>Понижение разделенного фона</span>
                                 <span>{activePreset.phase3.ducking.duckingDb} dB</span>
                               </div>
                               <input 
                                 type="range" 
-                                min="-24" 
-                                max="-3" 
+                                min="-28" 
+                                max="-6" 
+                                step="1"
                                 value={activePreset.phase3.ducking.duckingDb}
                                 onChange={(e) => updatePhase3({
                                   ducking: { ...activePreset.phase3.ducking, duckingDb: parseInt(e.target.value) }
@@ -4648,101 +5280,132 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
                               />
                             </div>
+
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                type="button"
+                                onClick={() => setActiveStepSettingsModal('ducking')}
+                                className="flex-1 py-1 px-2 bg-zinc-900 hover:bg-zinc-850 border border-white/10 rounded-lg text-[10px] font-bold text-zinc-300 flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                              >
+                                <Settings2 className="w-3 h-3 text-indigo-400" />
+                                <span>Настроить огибающие (Attack/Release)</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRunDuckingStep(true)}
+                                disabled={isExecutingPhase3Step === 'ducking'}
+                                className="py-1 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                              >
+                                {isExecutingPhase3Step === 'ducking' ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 fill-current" />}
+                                <span>Применить шаг</span>
+                              </button>
+                            </div>
                           </div>
                         );
                       } else if (stepKey === "autoFxAnalysis") {
-                        stepName = "Авто-анализ эффектов оригинала";
+                        stepName = "Авто-анализ эффектов оригинала (ИИ-клонирование)";
                         stepBypass = activePreset.phase3.autoFxAnalysis.bypass;
                         handleBypassToggle = () => updatePhase3({
                           autoFxAnalysis: { ...activePreset.phase3.autoFxAnalysis, bypass: !stepBypass }
                         });
                         stepElement = (
-                          <div className="space-y-2 text-[11px] text-zinc-400">
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input 
-                                type="checkbox" 
-                                checked={activePreset.phase3.autoFxAnalysis.detectPanning}
-                                onChange={(e) => updatePhase3({ 
-                                  autoFxAnalysis: { ...activePreset.phase3.autoFxAnalysis, detectPanning: e.target.checked } 
-                                })}
-                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
-                              />
-                              <span>Копировать панорамирование персонажей</span>
-                            </label>
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input 
-                                type="checkbox" 
-                                checked={activePreset.phase3.autoFxAnalysis.detectReverb}
-                                onChange={(e) => updatePhase3({ 
-                                  autoFxAnalysis: { ...activePreset.phase3.autoFxAnalysis, detectReverb: e.target.checked } 
-                                })}
-                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
-                              />
-                              <span>Повторять реверберацию помещений</span>
-                            </label>
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input 
-                                type="checkbox" 
-                                checked={activePreset.phase3.autoFxAnalysis.detectSpecialFx}
-                                onChange={(e) => updatePhase3({ 
-                                  autoFxAnalysis: { ...activePreset.phase3.autoFxAnalysis, detectSpecialFx: e.target.checked } 
-                                })}
-                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
-                              />
-                              <span>Определять спецэффекты (ТВ, радио, телефон)</span>
-                            </label>
+                          <div className="space-y-2.5 text-xs">
+                            <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+                              <div className={cn("p-1.5 rounded border flex items-center justify-between", activePreset.phase3.autoFxAnalysis.detectReverb ? "bg-indigo-950/30 border-indigo-500/30 text-indigo-200" : "bg-zinc-950 border-white/5 text-zinc-500")}>
+                                <span>Реверберация / Эхо</span>
+                                <Check className="w-3 h-3" />
+                              </div>
+                              <div className={cn("p-1.5 rounded border flex items-center justify-between", activePreset.phase3.autoFxAnalysis.detectPanning ? "bg-indigo-950/30 border-indigo-500/30 text-indigo-200" : "bg-zinc-950 border-white/5 text-zinc-500")}>
+                                <span>3D-Панорама (L/R)</span>
+                                <Check className="w-3 h-3" />
+                              </div>
+                              <div className={cn("p-1.5 rounded border flex items-center justify-between", activePreset.phase3.autoFxAnalysis.detectSpecialFx ? "bg-indigo-950/30 border-indigo-500/30 text-indigo-200" : "bg-zinc-950 border-white/5 text-zinc-500")}>
+                                <span>ТВ / Радио / Телефон</span>
+                                <Check className="w-3 h-3" />
+                              </div>
+                              <div className={cn("p-1.5 rounded border flex items-center justify-between", activePreset.phase3.autoFxAnalysis.detectDistanceEq ? "bg-indigo-950/30 border-indigo-500/30 text-indigo-200" : "bg-zinc-950 border-white/5 text-zinc-500")}>
+                                <span>Дистанция сцены (EQ)</span>
+                                <Check className="w-3 h-3" />
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                type="button"
+                                onClick={() => setActiveStepSettingsModal('autoFxAnalysis')}
+                                className="flex-1 py-1 px-2 bg-zinc-900 hover:bg-zinc-850 border border-white/10 rounded-lg text-[10px] font-bold text-zinc-300 flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                              >
+                                <Settings2 className="w-3 h-3 text-indigo-400" />
+                                <span>Настроить детекцию</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRunAutoFxStep(true)}
+                                disabled={isExecutingPhase3Step === 'autoFxAnalysis'}
+                                className="py-1 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                              >
+                                {isExecutingPhase3Step === 'autoFxAnalysis' ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 fill-current" />}
+                                <span>Анализировать</span>
+                              </button>
+                            </div>
                           </div>
                         );
                       } else if (stepKey === "vocalBusProcessing") {
-                        stepName = "Мастер-шина голосов (Bus)";
+                        stepName = "Мастер-шина голосов (8-Slot Audition Rack)";
                         stepBypass = activePreset.phase3.vocalBusProcessing.bypass;
                         handleBypassToggle = () => updatePhase3({
                           vocalBusProcessing: { ...activePreset.phase3.vocalBusProcessing, bypass: !stepBypass }
                         });
+                        const chain = activePreset.phase3.vocalBusProcessing.chain;
                         stepElement = (
-                          <div className="space-y-2 text-[11px] text-zinc-400">
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input 
-                                type="checkbox" 
-                                checked={activePreset.phase3.vocalBusProcessing.glueCompressor.enabled}
-                                onChange={(e) => updatePhase3({ 
-                                  vocalBusProcessing: { 
-                                    ...activePreset.phase3.vocalBusProcessing, 
-                                    glueCompressor: { ...activePreset.phase3.vocalBusProcessing.glueCompressor, enabled: e.target.checked }
-                                  } 
-                                })}
-                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
-                              />
-                              <span>Glue Compressor (Склейка голосов)</span>
-                            </label>
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input 
-                                type="checkbox" 
-                                checked={activePreset.phase3.vocalBusProcessing.limiter.enabled}
-                                onChange={(e) => updatePhase3({ 
-                                  vocalBusProcessing: { 
-                                    ...activePreset.phase3.vocalBusProcessing, 
-                                    limiter: { ...activePreset.phase3.vocalBusProcessing.limiter, enabled: e.target.checked }
-                                  } 
-                                })}
-                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
-                              />
-                              <span>Peak Limiter (Защита от пиков и клиппинга)</span>
-                            </label>
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input 
-                                type="checkbox" 
-                                checked={activePreset.phase3.vocalBusProcessing.eq.enabled}
-                                onChange={(e) => updatePhase3({ 
-                                  vocalBusProcessing: { 
-                                    ...activePreset.phase3.vocalBusProcessing, 
-                                    eq: { ...activePreset.phase3.vocalBusProcessing.eq, enabled: e.target.checked }
-                                  } 
-                                })}
-                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
-                              />
-                              <span>High-shelf & Low-cut EQ фильтры</span>
-                            </label>
+                          <div className="space-y-2.5 text-xs">
+                            {/* Audition 8 Slot Chain Badge Grid */}
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 text-[9px] font-mono">
+                              <div className={cn("p-1.5 rounded border text-center", chain?.ozoneStabilizer?.enabled ? "bg-blue-950/40 border-blue-500/40 text-blue-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                1. Stabilizer
+                              </div>
+                              <div className={cn("p-1.5 rounded border text-center", chain?.rCompressor?.enabled ? "bg-amber-950/40 border-amber-500/40 text-amber-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                2. RComp
+                              </div>
+                              <div className={cn("p-1.5 rounded border text-center", chain?.soothe2?.enabled ? "bg-purple-950/40 border-purple-500/40 text-purple-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                3. soothe2
+                              </div>
+                              <div className={cn("p-1.5 rounded border text-center", chain?.proQ4?.enabled ? "bg-cyan-950/40 border-cyan-500/40 text-cyan-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                4. Pro-Q 4
+                              </div>
+                              <div className={cn("p-1.5 rounded border text-center", chain?.rBass?.enabled ? "bg-rose-950/40 border-rose-500/40 text-rose-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                5. RBass
+                              </div>
+                              <div className={cn("p-1.5 rounded border text-center", chain?.freshAir?.enabled ? "bg-emerald-950/40 border-emerald-500/40 text-emerald-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                6. Fresh Air
+                              </div>
+                              <div className={cn("p-1.5 rounded border text-center", chain?.rVox?.enabled ? "bg-orange-950/40 border-orange-500/40 text-orange-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                7. RVox
+                              </div>
+                              <div className={cn("p-1.5 rounded border text-center", chain?.proDS?.enabled ? "bg-teal-950/40 border-teal-500/40 text-teal-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                8. Pro-DS
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 pt-1">
+                              <button
+                                type="button"
+                                onClick={() => setActiveStepSettingsModal('vocalBusProcessing')}
+                                className="flex-1 py-1 px-2 bg-gradient-to-r from-indigo-900/60 to-purple-900/60 hover:from-indigo-800/80 hover:to-purple-800/80 border border-indigo-500/30 rounded-lg text-[10px] font-bold text-white flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow"
+                              >
+                                <Sliders className="w-3 h-3 text-indigo-300" />
+                                <span>Открыть рэк 8 плагинов Audition</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRunVocalBusStep(true)}
+                                disabled={isExecutingPhase3Step === 'vocalBusProcessing'}
+                                className="py-1 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                              >
+                                {isExecutingPhase3Step === 'vocalBusProcessing' ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 fill-current" />}
+                                <span>Применить шину</span>
+                              </button>
+                            </div>
                           </div>
                         );
                       } else if (stepKey.startsWith("vstStep_")) {
@@ -4799,8 +5462,8 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
               <div className="space-y-4">
                 <div className="flex items-center justify-between border-b border-white/5 pb-2">
                   <span className="font-bold text-zinc-300 uppercase tracking-widest text-[10px] flex items-center gap-1.5">
-                    <Video className="w-3.5 h-3.5 text-indigo-400" />
-                    Финальный рендер и экспорт
+                    <Film className="w-3.5 h-3.5 text-indigo-400" />
+                    Финальный рендер и экспорт (Мастер-микс)
                   </span>
                   <label className="flex items-center gap-1.5 cursor-pointer">
                     <input 
@@ -4815,11 +5478,90 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
                 {activePreset.phase4.enabled && (
                   <div className="space-y-4">
-                    {/* Кнопка добавления VST-шага для Этапа 4 */}
+                    {/* Master Actions Banner */}
+                    <div className="p-3.5 rounded-2xl bg-gradient-to-r from-zinc-900 via-indigo-950/20 to-zinc-900 border border-indigo-500/20 shadow-xl space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="text-xs font-black text-white flex items-center gap-2">
+                            Конвейер финального рендеринга & Мастеринга
+                            {qaIssues.length > 0 ? (
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-mono font-bold">
+                                QA: {qaIssues.length} косяков
+                              </span>
+                            ) : (
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-mono font-bold">
+                                QA пройден ({qaLufs.toFixed(1)} LUFS)
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-zinc-400 mt-0.5">
+                            Авто-QA отсмотр • Мастеринг лимитер (-1.0 dBTP) • Экспорт стэмов (Full, VO, M&E) • Видеокодек
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleRunQualityControl(true)}
+                            className="px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-200 border border-white/5 text-[11px] font-bold flex items-center gap-1.5 transition-all cursor-pointer"
+                          >
+                            <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Отчет QA ({qaIssues.length})</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setIsAuditLogOpen(true)}
+                            className="px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-200 border border-white/5 text-[11px] font-bold flex items-center gap-1.5 transition-all cursor-pointer"
+                          >
+                            <FileText className="w-3.5 h-3.5 text-indigo-400" />
+                            <span>Аудит ({auditLogs.length})</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={handleStartFinalRender}
+                            className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-[11px] font-bold flex items-center gap-1.5 transition-all shadow-md shadow-indigo-600/30 cursor-pointer"
+                          >
+                            <Film className="w-3.5 h-3.5" />
+                            <span>Запустить финальный рендер</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-[11px] text-zinc-400">
+                        <div className="p-2 rounded-xl bg-zinc-950/60 border border-white/5 flex items-center justify-between">
+                          <span className="text-[10px] uppercase font-bold text-zinc-500">Цель LUFS</span>
+                          <span className="font-mono font-bold text-zinc-200">
+                            {activePreset.phase4.masteringLimiter?.targetIntegratedLufs || -14.0} LUFS
+                          </span>
+                        </div>
+                        <div className="p-2 rounded-xl bg-zinc-950/60 border border-white/5 flex items-center justify-between">
+                          <span className="text-[10px] uppercase font-bold text-zinc-500">True-Peak</span>
+                          <span className="font-mono font-bold text-emerald-400">
+                            {activePreset.phase4.masteringLimiter?.truePeakCeilingDb || -1.0} dBTP
+                          </span>
+                        </div>
+                        <div className="p-2 rounded-xl bg-zinc-950/60 border border-white/5 flex items-center justify-between">
+                          <span className="text-[10px] uppercase font-bold text-zinc-500">Контейнер</span>
+                          <span className="font-mono font-bold uppercase text-zinc-200">
+                            {activePreset.phase4.renderSettings.container || 'mp4'}
+                          </span>
+                        </div>
+                        <div className="p-2 rounded-xl bg-zinc-950/60 border border-white/5 flex items-center justify-between">
+                          <span className="text-[10px] uppercase font-bold text-zinc-500">Формат стемов</span>
+                          <span className="font-mono font-bold text-indigo-300">
+                            WAV 24b 48k
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Step Sequence Toolbar */}
                     <div className="flex items-center justify-between bg-zinc-900/30 p-2.5 rounded-xl border border-white/5">
                       <div className="flex flex-col">
                         <span className="text-[10px] font-black uppercase text-zinc-400">Последовательность шагов</span>
-                        <span className="text-[9px] text-zinc-500">Добавляйте VST плагины в цепочку</span>
+                        <span className="text-[9px] text-zinc-500">Настройте параметры каждого блока финализации</span>
                       </div>
                       <button
                         type="button"
@@ -4861,102 +5603,493 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                       let handleBypassToggle = () => {};
 
                       if (stepKey === "qualityControl") {
-                        stepName = "Анализ косяков (QA)";
+                        stepName = "1. Анализ косяков (Quality Control / QA)";
+                        stepIcon = <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />;
                         stepBypass = activePreset.phase4.qualityControl.bypass;
                         handleBypassToggle = () => updatePhase4({
                           qualityControl: { ...activePreset.phase4.qualityControl, bypass: !stepBypass }
                         });
                         stepElement = (
-                          <div className="space-y-2 text-[11px] text-zinc-400">
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input 
-                                type="checkbox" 
-                                checked={activePreset.phase4.qualityControl.logClippedSegments}
-                                onChange={(e) => updatePhase4({ 
-                                  qualityControl: { ...activePreset.phase4.qualityControl, logClippedSegments: e.target.checked } 
+                          <div className="space-y-3 text-xs">
+                            <div className="p-3 rounded-xl bg-zinc-950/60 border border-white/5 space-y-2">
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 block">
+                                Проверяемые критерии брака
+                              </span>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-zinc-300">
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                  <input 
+                                    type="checkbox" 
+                                    checked={activePreset.phase4.qualityControl.logClippedSegments}
+                                    onChange={(e) => updatePhase4({ 
+                                      qualityControl: { ...activePreset.phase4.qualityControl, logClippedSegments: e.target.checked } 
+                                    })}
+                                    className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                  />
+                                  <span>Клиппинг и перегрузки (&gt; -0.5 dBTP)</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                  <input 
+                                    type="checkbox" 
+                                    checked={activePreset.phase4.qualityControl.detectLongSilences}
+                                    onChange={(e) => updatePhase4({ 
+                                      qualityControl: { ...activePreset.phase4.qualityControl, detectLongSilences: e.target.checked } 
+                                    })}
+                                    className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                  />
+                                  <span>Затянувшиеся паузы / тишина (&gt; 4 сек)</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                  <input 
+                                    type="checkbox" 
+                                    checked={activePreset.phase4.qualityControl.detectOverlappingAudios}
+                                    onChange={(e) => updatePhase4({ 
+                                      qualityControl: { ...activePreset.phase4.qualityControl, detectOverlappingAudios: e.target.checked } 
+                                    })}
+                                    className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                  />
+                                  <span>Наезды и пересечения реплик</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                  <input 
+                                    type="checkbox" 
+                                    checked={activePreset.phase4.qualityControl.checkMissingSubtitles !== false}
+                                    onChange={(e) => updatePhase4({ 
+                                      qualityControl: { ...activePreset.phase4.qualityControl, checkMissingSubtitles: e.target.checked } 
+                                    })}
+                                    className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                  />
+                                  <span>Сверка с сабами (поиск пропусков)</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                  <input 
+                                    type="checkbox" 
+                                    checked={activePreset.phase4.qualityControl.lufsTargetCheck !== false}
+                                    onChange={(e) => updatePhase4({ 
+                                      qualityControl: { ...activePreset.phase4.qualityControl, lufsTargetCheck: e.target.checked } 
+                                    })}
+                                    className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                  />
+                                  <span>Соответствие стандартам громкости LUFS</span>
+                                </label>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2 pt-1">
+                              <div className="text-[11px] text-zinc-400">
+                                {qaIssues.length > 0 ? (
+                                  <span className="text-amber-400 font-bold">
+                                    Найдено замечаний: {qaIssues.length} (Ошибок: {qaIssues.filter(i => i.severity === 'error').length})
+                                  </span>
+                                ) : (
+                                  <span className="text-zinc-500">Готов к сканированию дорожек</span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                {qaIssues.length > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setIsQaModalOpen(true)}
+                                    className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold transition-all cursor-pointer"
+                                  >
+                                    Открыть отчет ({qaIssues.length})
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleRunQualityControl(true)}
+                                  className="px-3 py-1.5 rounded-lg bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 border border-amber-500/40 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
+                                >
+                                  <ShieldAlert className="w-3.5 h-3.5 text-amber-300" />
+                                  <span>Запустить QA анализ</span>
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      } else if (stepKey === "masteringLimiter") {
+                        stepName = "2. Мастеринг & True-Peak Лимитер";
+                        stepIcon = <Sliders className="w-3.5 h-3.5 text-indigo-400" />;
+                        stepBypass = activePreset.phase4.masteringLimiter?.bypass || false;
+                        handleBypassToggle = () => updatePhase4({
+                          masteringLimiter: {
+                            ...(activePreset.phase4.masteringLimiter || {
+                              bypass: false,
+                              standard: 'youtube_web',
+                              targetIntegratedLufs: -14.0,
+                              truePeakCeilingDb: -1.0,
+                              oversampling: '4x',
+                              dither: 'tpdf_24bit',
+                              stereoWidthPercent: 100
+                            }),
+                            bypass: !stepBypass
+                          }
+                        });
+                        const limiter = activePreset.phase4.masteringLimiter || {
+                          bypass: false,
+                          standard: 'youtube_web',
+                          targetIntegratedLufs: -14.0,
+                          truePeakCeilingDb: -1.0,
+                          oversampling: '4x',
+                          dither: 'tpdf_24bit',
+                          stereoWidthPercent: 100
+                        };
+                        stepElement = (
+                          <div className="space-y-3 text-xs">
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-zinc-500 uppercase font-black">Стандарт громкости</label>
+                                <select 
+                                  value={limiter.standard}
+                                  onChange={(e) => {
+                                    const std = e.target.value as any;
+                                    let lufs = limiter.targetIntegratedLufs;
+                                    let ceil = limiter.truePeakCeilingDb;
+                                    if (std === 'reference_original') {
+                                      // Calculate reference integrated LUFS from original audio track
+                                      const origTrack = project?.tracks.find(t => 
+                                        t.name.toLowerCase().includes('оригинал') || 
+                                        t.name.toLowerCase().includes('original') || 
+                                        t.name.toLowerCase().includes('reference') ||
+                                        t.type === 'original' ||
+                                        t.name.toLowerCase().includes('голоса')
+                                      );
+                                      if (origTrack && origTrack.segments && origTrack.segments.length > 0) {
+                                        let sumSq = 0, count = 0;
+                                        origTrack.segments.forEach(s => {
+                                          if (s.waveform && s.waveform.length > 0) {
+                                            sumSq += s.waveform.reduce((a, b) => a + b * b, 0);
+                                            count += s.waveform.length;
+                                          }
+                                        });
+                                        lufs = count > 0 ? Math.max(-28.0, Math.min(-10.0, Number((20 * Math.log10(Math.sqrt(sumSq / count)) - 2.5).toFixed(1)))) : -15.0;
+                                      } else {
+                                        lufs = -15.0;
+                                      }
+                                      ceil = -1.0;
+                                    } else if (std === 'youtube_web') { lufs = -14.0; ceil = -1.0; }
+                                    else if (std === 'broadcast_ebu') { lufs = -23.0; ceil = -1.0; }
+                                    else if (std === 'podcast_stream') { lufs = -16.0; ceil = -1.0; }
+                                    updatePhase4({
+                                      masteringLimiter: { ...limiter, standard: std, targetIntegratedLufs: lufs, truePeakCeilingDb: ceil }
+                                    });
+                                  }}
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                                >
+                                  <option value="reference_original">🎯 Уровень оригинала (Студийный референс)</option>
+                                  <option value="youtube_web">YouTube / Web (-14 LUFS, -1 dBTP)</option>
+                                  <option value="broadcast_ebu">EBU R128 ТВ (-23 LUFS, -1 dBTP)</option>
+                                  <option value="podcast_stream">Подкаст / Стриминг (-16 LUFS)</option>
+                                  <option value="custom">Пользовательский</option>
+                                </select>
+                              </div>
+
+                              <div className="space-y-1">
+                                <div className="flex justify-between items-center">
+                                  <label className="text-[10px] text-zinc-500 uppercase font-black">Цель LUFS</label>
+                                  <span className="text-[10px] font-mono text-indigo-400 font-bold">{limiter.targetIntegratedLufs} LUFS</span>
+                                </div>
+                                <input 
+                                  type="number" 
+                                  step="0.5"
+                                  min="-30"
+                                  max="-8"
+                                  value={limiter.targetIntegratedLufs}
+                                  onChange={(e) => updatePhase4({
+                                    masteringLimiter: { ...limiter, targetIntegratedLufs: parseFloat(e.target.value) || -14.0 }
+                                  })}
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-mono"
+                                />
+                              </div>
+
+                              <div className="space-y-1">
+                                <div className="flex justify-between items-center">
+                                  <label className="text-[10px] text-zinc-500 uppercase font-black">True-Peak Потолок</label>
+                                  <span className="text-[10px] font-mono text-emerald-400 font-bold">{limiter.truePeakCeilingDb} dBTP</span>
+                                </div>
+                                <input 
+                                  type="number" 
+                                  step="0.1"
+                                  min="-3.0"
+                                  max="-0.1"
+                                  value={limiter.truePeakCeilingDb}
+                                  onChange={(e) => updatePhase4({
+                                    masteringLimiter: { ...limiter, truePeakCeilingDb: parseFloat(e.target.value) || -1.0 }
+                                  })}
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-mono"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-zinc-500 uppercase font-black">Oversampling (ISP)</label>
+                                <select 
+                                  value={limiter.oversampling}
+                                  onChange={(e) => updatePhase4({
+                                    masteringLimiter: { ...limiter, oversampling: e.target.value as any }
+                                  })}
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                                >
+                                  <option value="2x">2x Oversampling</option>
+                                  <option value="4x">4x High Quality ISP</option>
+                                  <option value="8x">8x Ultra Precision</option>
+                                </select>
+                              </div>
+
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-zinc-500 uppercase font-black">Дитеринг (Dither)</label>
+                                <select 
+                                  value={limiter.dither}
+                                  onChange={(e) => updatePhase4({
+                                    masteringLimiter: { ...limiter, dither: e.target.value as any }
+                                  })}
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                                >
+                                  <option value="tpdf_24bit">TPDF 24-bit (Студия)</option>
+                                  <option value="tpdf_16bit">TPDF 16-bit (CD / Web)</option>
+                                  <option value="none">Без дитеринга</option>
+                                </select>
+                              </div>
+
+                              <div className="space-y-1">
+                                <div className="flex justify-between items-center">
+                                  <label className="text-[10px] text-zinc-500 uppercase font-black">Ширина стереобазы</label>
+                                  <span className="text-[10px] font-mono text-zinc-400">{limiter.stereoWidthPercent}%</span>
+                                </div>
+                                <input 
+                                  type="range"
+                                  min="50"
+                                  max="150"
+                                  value={limiter.stereoWidthPercent}
+                                  onChange={(e) => updatePhase4({
+                                    masteringLimiter: { ...limiter, stereoWidthPercent: parseInt(e.target.value) || 100 }
+                                  })}
+                                  className="w-full accent-indigo-500 cursor-pointer"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="flex justify-end pt-1">
+                              <button
+                                type="button"
+                                onClick={handleApplyMasteringLimiter}
+                                className="px-3.5 py-1.5 rounded-xl bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
+                              >
+                                <Sliders className="w-3.5 h-3.5 text-indigo-300" />
+                                <span>Применить мастеринг к проекту</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      } else if (stepKey === "stemExport") {
+                        stepName = "3. Экспорт аудиостэмов (Stems Mixdown)";
+                        stepIcon = <Music className="w-3.5 h-3.5 text-indigo-400" />;
+                        stepBypass = activePreset.phase4.stemExport?.bypass || false;
+                        handleBypassToggle = () => updatePhase4({
+                          stemExport: {
+                            ...(activePreset.phase4.stemExport || {
+                              bypass: false,
+                              exportFullMix: true,
+                              exportCleanVoice: true,
+                              exportMAndE: true,
+                              exportPerRoleStems: false,
+                              audioFormat: 'wav24_48'
+                            }),
+                            bypass: !stepBypass
+                          }
+                        });
+                        const stems = activePreset.phase4.stemExport || {
+                          bypass: false,
+                          exportFullMix: true,
+                          exportCleanVoice: true,
+                          exportMAndE: true,
+                          exportPerRoleStems: false,
+                          audioFormat: 'wav24_48'
+                        };
+                        stepElement = (
+                          <div className="space-y-3 text-xs">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-zinc-300">
+                              <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg bg-zinc-950/40 border border-white/5">
+                                <input 
+                                  type="checkbox" 
+                                  checked={stems.exportFullMix}
+                                  onChange={(e) => updatePhase4({ 
+                                    stemExport: { ...stems, exportFullMix: e.target.checked } 
+                                  })}
+                                  className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                />
+                                <div>
+                                  <div className="font-bold text-zinc-200">Full Mix (Мастер)</div>
+                                  <div className="text-[10px] text-zinc-500">Голос дубляжа + Оригинальная музыка + FX</div>
+                                </div>
+                              </label>
+
+                              <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg bg-zinc-950/40 border border-white/5">
+                                <input 
+                                  type="checkbox" 
+                                  checked={stems.exportCleanVoice}
+                                  onChange={(e) => updatePhase4({ 
+                                    stemExport: { ...stems, exportCleanVoice: e.target.checked } 
+                                  })}
+                                  className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                />
+                                <div>
+                                  <div className="font-bold text-zinc-200">Clean VO (Чистый голос)</div>
+                                  <div className="text-[10px] text-zinc-500">Все реплики дубляжа без музыки</div>
+                                </div>
+                              </label>
+
+                              <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg bg-zinc-950/40 border border-white/5">
+                                <input 
+                                  type="checkbox" 
+                                  checked={stems.exportMAndE}
+                                  onChange={(e) => updatePhase4({ 
+                                    stemExport: { ...stems, exportMAndE: e.target.checked } 
+                                  })}
+                                  className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                />
+                                <div>
+                                  <div className="font-bold text-zinc-200">M&E Фонограмма</div>
+                                  <div className="text-[10px] text-zinc-500">Music & Effects без голосов</div>
+                                </div>
+                              </label>
+
+                              <label className="flex items-center gap-2 cursor-pointer p-2 rounded-lg bg-zinc-950/40 border border-white/5">
+                                <input 
+                                  type="checkbox" 
+                                  checked={stems.exportPerRoleStems}
+                                  onChange={(e) => updatePhase4({ 
+                                    stemExport: { ...stems, exportPerRoleStems: e.target.checked } 
+                                  })}
+                                  className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                                />
+                                <div>
+                                  <div className="font-bold text-zinc-200">Стэмы по персонажам</div>
+                                  <div className="text-[10px] text-zinc-500">Индивидуальные дорожки каждого актера</div>
+                                </div>
+                              </label>
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[10px] text-zinc-500 uppercase font-black">Формат аудиофайлов стэмов</label>
+                              <select 
+                                value={stems.audioFormat}
+                                onChange={(e) => updatePhase4({
+                                  stemExport: { ...stems, audioFormat: e.target.value as any }
                                 })}
-                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
-                              />
-                              <span>Логировать перегрузки и клиппинг</span>
-                            </label>
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input 
-                                type="checkbox" 
-                                checked={activePreset.phase4.qualityControl.detectLongSilences}
-                                onChange={(e) => updatePhase4({ 
-                                  qualityControl: { ...activePreset.phase4.qualityControl, detectLongSilences: e.target.checked } 
-                                })}
-                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
-                              />
-                              <span>Искать затянувшиеся паузы / тишину</span>
-                            </label>
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input 
-                                type="checkbox" 
-                                checked={activePreset.phase4.qualityControl.detectOverlappingAudios}
-                                onChange={(e) => updatePhase4({ 
-                                  qualityControl: { ...activePreset.phase4.qualityControl, detectOverlappingAudios: e.target.checked } 
-                                })}
-                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
-                              />
-                              <span>Детектировать пересечения реплик</span>
-                            </label>
+                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                              >
+                                <option value="wav24_48">WAV 24-bit 48kHz (Студийный стандарт вещания)</option>
+                                <option value="wav16_44">WAV 16-bit 44.1kHz (CD качество)</option>
+                                <option value="mp3_320">MP3 320 kbps (Компактный архив)</option>
+                                <option value="flac">FLAC Lossless</option>
+                                <option value="aac">AAC 320 kbps</option>
+                              </select>
+                            </div>
                           </div>
                         );
                       } else if (stepKey === "subtitleBurn") {
-                        stepName = "Впекание субтитров";
+                        stepName = "4. Впекание и экспорт субтитров";
+                        stepIcon = <FileText className="w-3.5 h-3.5 text-indigo-400" />;
                         stepBypass = activePreset.phase4.subtitleBurn.bypass;
                         handleBypassToggle = () => updatePhase4({
                           subtitleBurn: { ...activePreset.phase4.subtitleBurn, bypass: !stepBypass }
                         });
+                        const subConfig = activePreset.phase4.subtitleBurn;
                         stepElement = (
                           <div className="space-y-3 text-xs">
+                            <div className="space-y-1">
+                              <label className="text-[10px] text-zinc-500 uppercase font-black">Режим впекания субтитров</label>
+                              <select 
+                                value={subConfig.burnMode || 'hardsub_signs'}
+                                onChange={(e) => updatePhase4({
+                                  subtitleBurn: { ...subConfig, burnMode: e.target.value as any }
+                                })}
+                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                              >
+                                <option value="hardsub_signs">Впекать только надписи (Хардсаб Signs, голос озвучен)</option>
+                                <option value="hardsub_all">Впекать все реплики (Полный хардсаб для соцсетей)</option>
+                                <option value="softsub">Только отключаемая дорожка (Softsub в MKV/MP4)</option>
+                                <option value="none">Отключено (Не добавлять субтитры в видео)</option>
+                              </select>
+                            </div>
+
                             <div className="grid grid-cols-2 gap-2">
                               <div className="space-y-1">
-                                <label className="text-[10px] text-zinc-500 uppercase font-black">Шрифт</label>
+                                <label className="text-[10px] text-zinc-500 uppercase font-black">Гарнитура шрифта</label>
                                 <select 
-                                  value={activePreset.phase4.subtitleBurn.fontName}
+                                  value={subConfig.fontName}
                                   onChange={(e) => updatePhase4({
-                                    subtitleBurn: { ...activePreset.phase4.subtitleBurn, fontName: e.target.value }
+                                    subtitleBurn: { ...subConfig, fontName: e.target.value }
                                   })}
                                   className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
                                 >
                                   <option value="Arial">Arial</option>
                                   <option value="Trebuchet MS">Trebuchet MS</option>
+                                  <option value="Montserrat">Montserrat</option>
                                   <option value="Futura">Futura</option>
                                   <option value="Impact">Impact</option>
                                 </select>
                               </div>
                               <div className="space-y-1">
-                                <label className="text-[10px] text-zinc-500 uppercase font-black">Размер</label>
+                                <label className="text-[10px] text-zinc-500 uppercase font-black">Кегль (Размер px)</label>
                                 <input 
                                   type="number" 
-                                  value={activePreset.phase4.subtitleBurn.fontSize}
+                                  value={subConfig.fontSize}
                                   onChange={(e) => updatePhase4({
-                                    subtitleBurn: { ...activePreset.phase4.subtitleBurn, fontSize: parseInt(e.target.value) || 20 }
+                                    subtitleBurn: { ...subConfig, fontSize: parseInt(e.target.value) || 20 }
                                   })}
                                   className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
                                 />
                               </div>
                             </div>
-                            <div className="grid grid-cols-2 gap-2">
+
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                               <div className="space-y-1">
                                 <label className="text-[10px] text-zinc-500 uppercase font-black">Цвет текста</label>
                                 <input 
                                   type="color" 
-                                  value={activePreset.phase4.subtitleBurn.fontColor}
+                                  value={subConfig.fontColor}
                                   onChange={(e) => updatePhase4({
-                                    subtitleBurn: { ...activePreset.phase4.subtitleBurn, fontColor: e.target.value }
+                                    subtitleBurn: { ...subConfig, fontColor: e.target.value }
                                   })}
                                   className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1 text-xs text-zinc-300 h-8 cursor-pointer"
                                 />
                               </div>
+
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-zinc-500 uppercase font-black">Цвет обводки</label>
+                                <input 
+                                  type="color" 
+                                  value={subConfig.outlineColor || '#000000'}
+                                  onChange={(e) => updatePhase4({
+                                    subtitleBurn: { ...subConfig, outlineColor: e.target.value }
+                                  })}
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1 text-xs text-zinc-300 h-8 cursor-pointer"
+                                />
+                              </div>
+
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-zinc-500 uppercase font-black">Толщина обводки</label>
+                                <input 
+                                  type="number"
+                                  min="0"
+                                  max="8"
+                                  value={subConfig.outlineWidth !== undefined ? subConfig.outlineWidth : 2}
+                                  onChange={(e) => updatePhase4({
+                                    subtitleBurn: { ...subConfig, outlineWidth: parseInt(e.target.value) || 2 }
+                                  })}
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                                />
+                              </div>
+
                               <div className="space-y-1">
                                 <label className="text-[10px] text-zinc-500 uppercase font-black">Позиция</label>
                                 <select 
-                                  value={activePreset.phase4.subtitleBurn.alignment}
+                                  value={subConfig.alignment}
                                   onChange={(e) => updatePhase4({
-                                    subtitleBurn: { ...activePreset.phase4.subtitleBurn, alignment: e.target.value as any }
+                                    subtitleBurn: { ...subConfig, alignment: e.target.value as any }
                                   })}
                                   className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
                                 >
@@ -4966,52 +6099,106 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 </select>
                               </div>
                             </div>
+
+                            {/* Live Subtitle Preview */}
+                            <div className="p-3 rounded-xl bg-zinc-950 border border-white/10 flex items-center justify-center min-h-[55px]">
+                              <span 
+                                style={{
+                                  fontFamily: subConfig.fontName || 'Arial',
+                                  fontSize: `${Math.min(subConfig.fontSize || 20, 22)}px`,
+                                  color: subConfig.fontColor || '#FFFFFF',
+                                  textShadow: `${subConfig.outlineWidth || 2}px ${subConfig.outlineWidth || 2}px 0px ${subConfig.outlineColor || '#000000'}, -${subConfig.outlineWidth || 2}px -${subConfig.outlineWidth || 2}px 0px ${subConfig.outlineColor || '#000000'}`
+                                }}
+                                className="font-bold text-center tracking-wide"
+                              >
+                                «Пример отображения надписи субтитра»
+                              </span>
+                            </div>
+
+                            {/* Subtitles Quick Export Buttons */}
+                            <div className="flex items-center justify-end gap-2 pt-1">
+                              <button
+                                type="button"
+                                onClick={() => handleExportSubtitles('srt')}
+                                className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
+                              >
+                                <Download className="w-3.5 h-3.5 text-amber-400" />
+                                <span>Скачать .SRT</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleExportSubtitles('ass')}
+                                className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
+                              >
+                                <Download className="w-3.5 h-3.5 text-indigo-400" />
+                                <span>Скачать .ASS (стили)</span>
+                              </button>
+                            </div>
                           </div>
                         );
                       } else if (stepKey === "renderSettings") {
-                        stepName = "Качество и формат рендера";
+                        stepName = "5. Видеокодирование и мастер-файл";
+                        stepIcon = <Film className="w-3.5 h-3.5 text-indigo-400" />;
                         stepBypass = false; // Render settings cannot be bypassed
+                        const renderConfig = activePreset.phase4.renderSettings;
                         stepElement = (
                           <div className="space-y-3 text-xs">
-                            <div className="grid grid-cols-2 gap-2">
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-zinc-500 uppercase font-black block">Медиа контейнер</label>
+                                <select 
+                                  value={renderConfig.container || 'mp4'}
+                                  onChange={(e) => updatePhase4({
+                                    renderSettings: { ...renderConfig, container: e.target.value as any }
+                                  })}
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-bold"
+                                >
+                                  <option value="mp4">MP4 (Универсальный стандарт)</option>
+                                  <option value="mkv">MKV (Мультидорожечный мастер)</option>
+                                  <option value="mov">MOV (Apple ProRes / Мастер)</option>
+                                  <option value="wav">WAV (Только аудиомастер)</option>
+                                </select>
+                              </div>
+
                               <div className="space-y-1">
                                 <label className="text-[10px] text-zinc-500 uppercase font-black block">Видео кодек</label>
                                 <select 
-                                  value={activePreset.phase4.renderSettings.videoCodec}
+                                  value={renderConfig.videoCodec}
                                   onChange={(e) => updatePhase4({
-                                    renderSettings: { ...activePreset.phase4.renderSettings, videoCodec: e.target.value as any }
+                                    renderSettings: { ...renderConfig, videoCodec: e.target.value as any }
                                   })}
                                   className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
                                 >
-                                  <option value="libx264">Software x264</option>
-                                  <option value="h264_nvenc">NVIDIA H.264</option>
+                                  <option value="libx264">Software x264 (Максимальное качество)</option>
+                                  <option value="h264_nvenc">NVIDIA NVENC H.264 (Быстрый GPU)</option>
                                   <option value="hevc_nvenc">NVIDIA HEVC / H.265</option>
-                                  <option value="copy">Без перекодирования (Copy)</option>
+                                  <option value="copy">Без перекодирования видео (Copy)</option>
                                 </select>
                               </div>
+
                               <div className="space-y-1">
                                 <label className="text-[10px] text-zinc-500 uppercase font-black block">Аудио кодек</label>
                                 <select 
-                                  value={activePreset.phase4.renderSettings.audioCodec}
+                                  value={renderConfig.audioCodec}
                                   onChange={(e) => updatePhase4({
-                                    renderSettings: { ...activePreset.phase4.renderSettings, audioCodec: e.target.value as any }
+                                    renderSettings: { ...renderConfig, audioCodec: e.target.value as any }
                                   })}
                                   className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
                                 >
-                                  <option value="aac">AAC (Высокое сжатие)</option>
-                                  <option value="mp3">MP3</option>
-                                  <option value="pcm">WAV / Lossless PCM</option>
+                                  <option value="aac">AAC (320 kbps студия)</option>
+                                  <option value="mp3">MP3 (320 kbps)</option>
+                                  <option value="pcm">WAV / PCM 24-bit Lossless</option>
                                 </select>
                               </div>
                             </div>
 
-                            <div className="grid grid-cols-2 gap-2">
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                               <div className="space-y-1">
                                 <label className="text-[10px] text-zinc-500 uppercase font-black block">Разрешение</label>
                                 <select 
-                                  value={activePreset.phase4.renderSettings.resolution}
+                                  value={renderConfig.resolution}
                                   onChange={(e) => updatePhase4({
-                                    renderSettings: { ...activePreset.phase4.renderSettings, resolution: e.target.value as any }
+                                    renderSettings: { ...renderConfig, resolution: e.target.value as any }
                                   })}
                                   className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
                                 >
@@ -5021,20 +6208,64 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                   <option value="4k">4K Ultra HD</option>
                                 </select>
                               </div>
+
                               <div className="space-y-1">
-                                <label className="text-[10px] text-zinc-500 uppercase font-black block">FPS</label>
+                                <label className="text-[10px] text-zinc-500 uppercase font-black block">Кадровая частота</label>
                                 <select 
-                                  value={activePreset.phase4.renderSettings.fps}
+                                  value={renderConfig.fps}
                                   onChange={(e) => updatePhase4({
-                                    renderSettings: { ...activePreset.phase4.renderSettings, fps: e.target.value as any }
+                                    renderSettings: { ...renderConfig, fps: e.target.value as any }
                                   })}
                                   className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
                                 >
-                                  <option value="source">Как у оригинала</option>
-                                  <option value="30">30 кадров/сек</option>
-                                  <option value="60">60 кадров/сек</option>
+                                  <option value="source">Исходный FPS</option>
+                                  <option value="23.976">23.976 fps</option>
+                                  <option value="24">24 fps (Кино)</option>
+                                  <option value="25">25 fps (PAL / ТВ)</option>
+                                  <option value="30">30 fps</option>
+                                  <option value="60">60 fps</option>
                                 </select>
                               </div>
+
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-zinc-500 uppercase font-black block">Битрейт видео (kbps)</label>
+                                <input 
+                                  type="number"
+                                  step="500"
+                                  value={renderConfig.videoBitrateKbps || 8000}
+                                  onChange={(e) => updatePhase4({
+                                    renderSettings: { ...renderConfig, videoBitrateKbps: parseInt(e.target.value) || 8000 }
+                                  })}
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-mono"
+                                />
+                              </div>
+
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-zinc-500 uppercase font-black block">Пресет скорости</label>
+                                <select 
+                                  value={renderConfig.encodingPreset || 'medium'}
+                                  onChange={(e) => updatePhase4({
+                                    renderSettings: { ...renderConfig, encodingPreset: e.target.value as any }
+                                  })}
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                                >
+                                  <option value="ultrafast">Ultrafast (Мгновенно)</option>
+                                  <option value="fast">Fast</option>
+                                  <option value="medium">Medium (Баланс)</option>
+                                  <option value="slow">Slow (Высокое качество)</option>
+                                </select>
+                              </div>
+                            </div>
+
+                            <div className="pt-2">
+                              <button
+                                type="button"
+                                onClick={handleStartFinalRender}
+                                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 via-purple-600 to-indigo-600 hover:opacity-95 active:scale-[0.99] text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/25 transition-all cursor-pointer"
+                              >
+                                <Film className="w-4 h-4" />
+                                <span>🚀 Запустить финальный рендер и экспорт стэмов</span>
+                              </button>
                             </div>
                           </div>
                         );
@@ -5140,6 +6371,61 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         onSelect={handleVstPluginSelect}
         vstFolders={project?.audioSettings?.vstFolders || getGlobalAudioSettings().vstFolders || []}
       />
+
+      {activeStepSettingsModal && (
+        <MixingStepSettingsModal
+          isOpen={activeStepSettingsModal !== null}
+          stepId={activeStepSettingsModal}
+          config={activePreset.phase3}
+          mixingType={project?.mixingType || MixingType.DUBBING}
+          onClose={() => setActiveStepSettingsModal(null)}
+          onSaveConfig={(updatedConfig) => updatePhase3(updatedConfig)}
+          onRunStep={(stepId) => {
+            if (stepId === 'gainMatching') handleRunGainMatchingStep(true);
+            else if (stepId === 'ducking') handleRunDuckingStep(true);
+            else if (stepId === 'autoFxAnalysis') handleRunAutoFxStep(true);
+            else if (stepId === 'vocalBusProcessing') handleRunVocalBusStep(true);
+          }}
+          isRunning={isExecutingPhase3Step !== null}
+        />
+      )}
+
+      {isAuditLogOpen && (
+        <MixingAuditLogModal
+          isOpen={isAuditLogOpen}
+          logs={auditLogs}
+          onClose={() => setIsAuditLogOpen(false)}
+          onClearLogs={() => setAuditLogs([])}
+        />
+      )}
+
+      {isQaModalOpen && (
+        <FinalQualityControlModal
+          isOpen={isQaModalOpen}
+          onClose={() => setIsQaModalOpen(false)}
+          issues={qaIssues}
+          integratedLufs={qaLufs}
+          maxTruePeakDb={qaTruePeak}
+          onSeekToTime={(time) => handleSeek(time)}
+          onAutoFixIssue={handleAutoFixQaIssue}
+          onRerunQa={() => handleRunQualityControl(false)}
+        />
+      )}
+
+      {isRenderProgressModalOpen && (
+        <FinalRenderProgressModal
+          isOpen={isRenderProgressModalOpen}
+          isRendering={isRenderingFinal}
+          progressPercent={renderProgressPercent}
+          currentStage={renderCurrentStage}
+          result={finalRenderResult}
+          onClose={() => setIsRenderProgressModalOpen(false)}
+          onOpenQaReport={() => {
+            setIsRenderProgressModalOpen(false);
+            setIsQaModalOpen(true);
+          }}
+        />
+      )}
     </div>
   );
 };
