@@ -283,38 +283,39 @@ export class FinalRenderService {
     let targetLufs = mastering.targetIntegratedLufs || -14.0;
     const ceilingDb = mastering.truePeakCeilingDb || -1.0;
 
-    // If matching original reference track (подогнать мастер-экспорт под уровень оригинала)
-    if (mastering.loudnessStandard === 'reference_original') {
-      const origTrack = tracks.find(t => 
-        t.name.toLowerCase().includes('оригинал') || 
-        t.name.toLowerCase().includes('original') || 
-        t.name.toLowerCase().includes('reference') ||
-        t.type === 'original' ||
-        t.name.toLowerCase().includes('голоса')
-      );
-      if (origTrack && origTrack.segments && origTrack.segments.length > 0) {
-        let origSumSq = 0;
-        let origSamples = 0;
-        origTrack.segments.forEach(s => {
+    // Detect loudness of original reference tracks ("Оригинал", "Original", "Звуки (Музыка)")
+    let origSumSq = 0;
+    let origSampleCount = 0;
+    tracks.forEach(track => {
+      const name = track.name.toLowerCase();
+      const isOriginal = track.type === 'original' || name.includes('оригинал') || name.includes('original') || name.includes('reference') || name.includes('звуки');
+      if (isOriginal) {
+        track.segments.forEach(s => {
           if (s.waveform && s.waveform.length > 0) {
             origSumSq += s.waveform.reduce((acc, v) => acc + v * v, 0);
-            origSamples += s.waveform.length;
+            origSampleCount += s.waveform.length;
           }
         });
-        if (origSamples > 0) {
-          const origRms = Math.sqrt(origSumSq / origSamples);
-          targetLufs = Math.max(-28.0, Math.min(-10.0, Number((20 * Math.log10(origRms) - 2.5).toFixed(1))));
-        } else {
-          targetLufs = -15.0; // Professional broadcast target
-        }
       }
+    });
+
+    let detectedOriginalLufs: number | null = null;
+    if (origSampleCount > 0) {
+      const origRms = Math.sqrt(origSumSq / origSampleCount);
+      detectedOriginalLufs = Math.max(-50, Math.min(-6, 20 * Math.log10(Math.max(0.001, origRms)) - 2.5));
+    }
+
+    if (mastering.loudnessStandard === 'original_match' && detectedOriginalLufs !== null) {
+      targetLufs = Math.round(detectedOriginalLufs * 10) / 10;
     }
 
     // Calculate current RMS average of dub tracks
     let sumSq = 0;
     let sampleCount = 0;
     tracks.forEach(track => {
-      if (!track.name.toLowerCase().includes('оригинал') && !track.name.toLowerCase().includes('reference')) {
+      const name = track.name.toLowerCase();
+      const isOriginal = track.type === 'original' || name.includes('оригинал') || name.includes('original') || name.includes('reference') || name.includes('звуки');
+      if (!isOriginal) {
         track.segments.forEach(s => {
           if (s.waveform && s.waveform.length > 0) {
             sumSq += s.waveform.reduce((acc, v) => acc + v * v, 0);
@@ -329,21 +330,24 @@ export class FinalRenderService {
     const neededGainDb = Math.min(6.0, Math.max(-12.0, targetLufs - currentEstLufs));
     const gainFactor = Math.pow(10, neededGainDb / 20);
 
+    const standardDesc = mastering.loudnessStandard === 'original_match'
+      ? `ПО УРОВНЮ ОРИГИНАЛА (${detectedOriginalLufs !== null ? detectedOriginalLufs.toFixed(1) : '-14.0'} LUFS)`
+      : mastering.loudnessStandard.toUpperCase();
+
     logs.push({
       id: `mastering-calc-${Date.now()}`,
       timestamp: Date.now(),
       stageName: '4. Финал',
       stepId: 'masteringLimiter',
       status: 'info',
-      title: mastering.loudnessStandard === 'reference_original' ? 'Мастеринг под уровень оригинала (Reference Match)' : 'Расчет мастеринг-нормализации',
-      message: mastering.loudnessStandard === 'reference_original'
-        ? `Подгонка под профессиональный уровень оригинала: целевой уровень ${targetLufs.toFixed(1)} LUFS. Текущий микс: ${currentEstLufs.toFixed(1)} LUFS (Поправка: ${neededGainDb >= 0 ? '+' : ''}${neededGainDb.toFixed(1)} dB). True-Peak Ceiling: ${ceilingDb.toFixed(1)} dBTP.`
-        : `Стандарт: ${mastering.loudnessStandard.toUpperCase()}. Текущий уровень: ${currentEstLufs.toFixed(1)} LUFS -> Целевой: ${targetLufs.toFixed(1)} LUFS (Подгонка: ${neededGainDb >= 0 ? '+' : ''}${neededGainDb.toFixed(1)} dB). True-Peak Ceiling: ${ceilingDb.toFixed(1)} dBTP.`
+      title: 'Расчет мастеринг-нормализации',
+      message: `Стандарт: ${standardDesc}. Текущий уровень дубляжа: ${currentEstLufs.toFixed(1)} LUFS -> Целевой: ${targetLufs.toFixed(1)} LUFS (Подгонка: ${neededGainDb >= 0 ? '+' : ''}${neededGainDb.toFixed(1)} dB). True-Peak Ceiling: ${ceilingDb.toFixed(1)} dBTP.`
     });
 
     // Apply soft ceiling limiter and target gain to tracks
     const updatedTracks = tracks.map(track => {
-      const isOriginal = track.name.toLowerCase().includes('оригинал') || track.name.toLowerCase().includes('reference');
+      const name = track.name.toLowerCase();
+      const isOriginal = track.type === 'original' || name.includes('оригинал') || name.includes('original') || name.includes('reference') || name.includes('звуки');
       if (isOriginal) return track;
 
       const updatedSegments = track.segments.map(seg => {

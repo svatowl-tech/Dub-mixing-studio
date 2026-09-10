@@ -249,27 +249,18 @@ export class MixingService {
       message: `Тип проекта: ${mixingType}. Глубина дакинга: ${targetDuckingDb.toFixed(1)} dB. Найдено ${dubIntervals.length} активных интервалов речи дубляжа.`
     });
 
-    // Apply ducking attenuation ONLY to original dialogue/vocals tracks (never duck music & effects)
+    // Apply ducking attenuation to original / reference tracks
     const duckingGainFactor = Math.pow(10, targetDuckingDb / 20); // e.g. -16dB -> 0.158
 
     const updatedTracks = tracks.map(track => {
-      const lowerName = track.name.toLowerCase();
-      // Never duck Music, Instruments or SFX/M&E
-      const isMusicOrSound = lowerName.includes('звуки') || lowerName.includes('музыка') || lowerName.includes('instrument') || lowerName.includes('m&e') || lowerName.includes('sfx');
-      if (isMusicOrSound) {
-        return track;
-      }
-
-      // Target original voice / vocal track or unseparated original
-      const isOrigVoice = lowerName.includes('голоса') || lowerName.includes('vocal') || lowerName.includes('voice') || lowerName.includes('оригинал') || lowerName.includes('original') || lowerName.includes('reference');
-      if (!isOrigVoice) return track;
+      const isOrig = track.name.toLowerCase().includes('оригинал') || track.name.toLowerCase().includes('original') || track.name.toLowerCase().includes('reference');
+      if (!isOrig) return track;
 
       const updatedSegments = track.segments.map(seg => {
         const segStart = seg.startTime;
         const segEnd = seg.startTime + seg.duration;
 
-        // Check if this original voice segment overlaps any of our dub speech intervals.
-        // In OP/ED (Openings/Endings with songs), dubIntervals has no speech, so Japanese song vocals remain untouched!
+        // Check if this original segment overlaps any of our dub intervals
         const hasOverlap = dubIntervals.some(interval => {
           return Math.max(segStart, interval.start) < Math.min(segEnd, interval.end);
         });

@@ -117,6 +117,7 @@ export interface Project {
 export interface AudioTrack {
   id: string;
   name: string;
+  type?: 'original' | 'voice' | 'music' | 'effects';
   segments: AudioSegment[];
   volume: number;
   isMuted: boolean;
@@ -125,9 +126,6 @@ export interface AudioTrack {
   isProcessingEnabled?: boolean;
   processing?: TrackProcessing;
   height?: number;
-  type?: 'original' | 'dub' | 'instrumental' | string;
-  color?: string;
-  pan?: number;
 }
 
 export interface TrackProcessing {
@@ -701,7 +699,7 @@ export interface FinalMixConfig {
     enabled: boolean;
     truePeakCeilingDb: number; // -1.0 dBTP (стандарт)
     targetIntegratedLufs: number; // -14.0 LUFS (YouTube/Web), -23.0 (EBU R128), -16.0 (Podcast)
-    loudnessStandard: 'youtube_web' | 'ebu_r128' | 'broadcast_ebu' | 'streaming_podcast' | 'podcast_stream' | 'reference_original' | 'custom';
+    loudnessStandard: 'original_match' | 'youtube_web' | 'ebu_r128' | 'streaming_podcast' | 'custom';
     oversampling: '2x' | '4x' | '8x';
     dither: 'none' | 'tpdf_16bit' | 'tpdf_24bit';
     stereoWidth: number; // 100%
