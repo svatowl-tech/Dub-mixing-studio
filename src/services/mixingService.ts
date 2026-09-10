@@ -37,6 +37,7 @@ export interface FxDetectionResult {
 }
 
 export interface MasterBusResult {
+  updatedTracks: AudioTrack[];
   chainConfig: AuditionVocalBusChainConfig;
   activePluginsCount: number;
   logs: MixingAuditEntry[];
@@ -117,7 +118,16 @@ export class MixingService {
           estimatedCurrentLufs = -22.0;
         }
 
-        const category: 'dialogue' | 'physics' = hasMatchingSub ? 'dialogue' : 'physics';
+        const hasSubtitlesInProject = subtitles && subtitles.length > 0;
+        const isExplicitPhysics = /\[(крик|стон|охает|кряхтит|кашель|sigh|gasp|groan|screams|yells|grunt)\]/i.test(seg.text || '');
+
+        let category: 'dialogue' | 'physics' = 'dialogue';
+        if (hasSubtitlesInProject) {
+          category = (hasMatchingSub && !isExplicitPhysics) ? 'dialogue' : 'physics';
+        } else {
+          // If no subtitles imported yet, default to dialogue unless explicitly tagged as physics or shorter than 0.35s
+          category = (isExplicitPhysics || seg.duration < 0.35) ? 'physics' : 'dialogue';
+        }
         const targetDb = category === 'dialogue' ? targetDialogueDb : targetPhysicsDb;
         const requiredGainAdjustmentDb = targetDb - estimatedCurrentLufs;
         
@@ -566,6 +576,55 @@ export class MixingService {
       });
     });
 
+    // Apply the 8-slot master bus DSP chain parameters to all vocal/dub tracks
+    const isMasterBusActive = !chainConfig.bypass;
+    const isCompActive = chainConfig.rCompressor.enabled && !chainConfig.rCompressor.bypass;
+    const isDeessActive = chainConfig.proDS.enabled && !chainConfig.proDS.bypass;
+    const isEqActive = chainConfig.proQ4.enabled && !chainConfig.proQ4.bypass;
+    const isGateActive = chainConfig.rVox.enabled && !chainConfig.rVox.bypass;
+
+    const updatedTracks = tracks.map(track => {
+      const isOriginal = track.name.toLowerCase().includes('оригинал') || 
+                         track.name.toLowerCase().includes('original') || 
+                         track.name.toLowerCase().includes('reference') ||
+                         track.type === 'original';
+      if (isOriginal) return track;
+
+      const currentProcessing = track.processing || { enabled: false };
+
+      const updatedProcessing: any = {
+        ...currentProcessing,
+        enabled: isMasterBusActive,
+        compressor: isCompActive ? {
+          enabled: true,
+          threshold: chainConfig.rCompressor.threshold,
+          ratio: chainConfig.rCompressor.ratio,
+          attack: (chainConfig.rCompressor.attackMs || 150) / 1000,
+          release: (chainConfig.rCompressor.releaseMs || 120) / 1000
+        } : currentProcessing.compressor,
+        deesser: isDeessActive ? {
+          enabled: true,
+          threshold: chainConfig.proDS.threshold,
+          frequency: chainConfig.proDS.frequency
+        } : currentProcessing.deesser,
+        noiseGate: isGateActive ? {
+          enabled: true,
+          threshold: chainConfig.rVox.gateThreshold
+        } : currentProcessing.noiseGate,
+        eq: isEqActive ? {
+          enabled: true,
+          lowCut: chainConfig.proQ4.highPassFreq,
+          highShelf: chainConfig.proQ4.airShelfFreq,
+          highGain: chainConfig.proQ4.airShelfGain
+        } : currentProcessing.eq
+      };
+
+      return {
+        ...track,
+        processing: updatedProcessing
+      };
+    });
+
     logs.push({
       id: `mb-end-${Date.now()}`,
       timestamp: Date.now(),
@@ -577,6 +636,7 @@ export class MixingService {
     });
 
     return {
+      updatedTracks,
       chainConfig,
       activePluginsCount: activeCount,
       logs

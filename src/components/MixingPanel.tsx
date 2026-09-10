@@ -41,7 +41,8 @@ import {
   Music,
   Download,
   ShieldAlert,
-  ShieldCheck
+  ShieldCheck,
+  Copy
 } from 'lucide-react';
 import { 
   Project, 
@@ -70,6 +71,8 @@ import { AudioSeparatorService } from '../services/audioSeparatorService';
 import { TimingAlignmentService } from '../services/timingAlignmentService';
 import { MixingService } from '../services/mixingService';
 import { FinalRenderService } from '../services/finalRenderService';
+import { AudioDspService } from '../services/audioDspService';
+import { PipelineExecutionService } from '../services/pipelineExecutionService';
 import { MixingStepSettingsModal } from './MixingStepSettingsModal';
 import { MixingAuditLogModal } from './MixingAuditLogModal';
 import { FinalQualityControlModal } from './FinalQualityControlModal';
@@ -373,8 +376,10 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         }
       );
       addAuditLogs(res.logs);
+      onUpdateProject({ tracks: res.updatedTracks });
+      playbackEngine.updateTracks(res.updatedTracks).catch(console.error);
       if (notify) {
-        showToast(`Мастер-шина VO скоммутирована: ${res.activePluginsCount} активных плагинов Audition рэка.`);
+        showToast(`Мастер-шина VO скоммутирована: ${res.activePluginsCount} активных плагинов применено к дорожкам.`);
       }
     } catch (e: any) {
       console.error(e);
@@ -389,12 +394,66 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       showToast('В проекте нет дорожек для сведения');
       return;
     }
-    showToast('Запуск полного сведения (Этап 3)...');
-    handleRunGainMatchingStep(false);
-    handleRunDuckingStep(false);
-    handleRunAutoFxStep(false);
-    handleRunVocalBusStep(false);
-    showToast('Этап 3: Все 4 шага сведения успешно применены! Откройте лог для аудита.');
+    setIsExecutingPhase3Step('all');
+    try {
+      showToast('Запуск полного сведения (Этап 3)...');
+      let currentTracks = project.tracks;
+      const allLogs: MixingAuditEntry[] = [];
+
+      // Step 1: Gain matching
+      const gmRes = MixingService.matchLoudnessBySubtitles(
+        currentTracks,
+        project.subtitles || [],
+        activePreset.phase3.gainMatching
+      );
+      currentTracks = gmRes.updatedTracks;
+      allLogs.push(...gmRes.logs);
+
+      // Step 2: Auto-ducking
+      const duckRes = MixingService.applyAutoDucking(
+        currentTracks,
+        project.mixingType || MixingType.DUBBING,
+        activePreset.phase3.ducking
+      );
+      currentTracks = duckRes.updatedTracks;
+      allLogs.push(...duckRes.logs);
+
+      // Step 3: Auto-FX
+      const fxRes = MixingService.detectAndApplyOriginalEffects(
+        currentTracks,
+        activePreset.phase3.autoFxAnalysis
+      );
+      currentTracks = fxRes.updatedTracks;
+      allLogs.push(...fxRes.logs);
+
+      // Step 4: Master Vocal Bus
+      const busRes = MixingService.applyMasterVocalBusChain(
+        currentTracks,
+        activePreset.phase3.vocalBusProcessing.chain || {
+          presetName: 'Audition Master VO Chain',
+          ozoneStabilizer: { enabled: true, shape: 65, speed: 50, smoothness: 70, bypass: false },
+          rCompressor: { enabled: true, threshold: -12.2, ratio: 4.7, attackMs: 149.6, releaseMs: 120, gainDb: 3.44, warmth: 60, bypass: false },
+          soothe2: { enabled: true, depth: 5.27, sharpness: 3.31, selectivity: 4.07, band1Freq: 328.8, band1Sens: 5.94, band3Freq: 3489.5, band3Sens: 6.20, bypass: false },
+          proQ4: { enabled: true, highPassFreq: 80, lowCutSlope: 12, airShelfFreq: 12000, airShelfGain: 1.5, notchResonanceFreq: 3200, notchCutDb: -2.0, bypass: false },
+          rBass: { enabled: true, frequency: 43, intensity: 5.0, originalBassDb: -2.0, bypass: false },
+          freshAir: { enabled: true, midAir: 24, highAir: 32, bypass: false },
+          rVox: { enabled: true, compression: -9.5, gateThreshold: -80, gainDb: 0.0, bypass: false },
+          proDS: { enabled: true, threshold: -24, range: -8, frequency: 10000, wideBand: true, bypass: false }
+        }
+      );
+      currentTracks = busRes.updatedTracks;
+      allLogs.push(...busRes.logs);
+
+      addAuditLogs(allLogs);
+      onUpdateProject({ tracks: currentTracks });
+      playbackEngine.updateTracks(currentTracks).catch(console.error);
+      showToast('Этап 3: Все 4 шага сведения успешно применены к проекту!');
+    } catch (e: any) {
+      console.error(e);
+      showToast(`Ошибка сведения: ${e.message}`);
+    } finally {
+      setIsExecutingPhase3Step(null);
+    }
   };
 
   // States for Phase 4 (Final Mix & Render)
@@ -558,8 +617,10 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   }, [selectedSegment?.segment?.id, selectedSegment?.segment?.filePath]);
 
   // States for modular step controls (Modal and Execution tracker)
-  const [activeModal, setActiveModal] = useState<{ stepId: string; title: string; icon: React.ReactNode; content: React.ReactNode } | null>(null);
+  const [activeModal, setActiveModal] = useState<{ stepId: string; title: string; icon: React.ReactNode; content?: React.ReactNode } | null>(null);
+  const stepContentRegistry = React.useRef<Record<string, { title: string; icon: React.ReactNode; content: React.ReactNode }>>({});
   const [stepExecution, setStepExecution] = useState<Record<string, { status: 'idle' | 'running' | 'success' | 'failed'; progress: number; log: string; hasRollback: boolean }>>({});
+  const stepRollbackSnapshotsRef = React.useRef<Record<string, AudioTrack[]>>({});
 
   // States for VST selection modal
   const [isVstSelectorOpen, setIsVstSelectorOpen] = useState(false);
@@ -567,533 +628,23 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   const [activeVstSelectPluginIdx, setActiveVstSelectPluginIdx] = useState<number | null>(null);
 
   const handleExecuteStep = async (stepId: string, title: string, phaseNum: number) => {
-    // Set running state
-    setStepExecution(prev => ({
-      ...prev,
-      [stepId]: {
-        status: 'running',
-        progress: 0,
-        log: 'Инициализация этапа...',
-        hasRollback: false
-      }
-    }));
-
-    const backendEffectsMap: Record<string, 'normalization' | 'declick' | 'smarteq' | 'denoise' | 'dereverb' | 'separation'> = {
-      normalization: 'normalization',
-      deClick: 'declick',
-      denoise: 'denoise',
-      dereverb: 'dereverb',
-      eqMatching: 'smarteq',
-      sourceSeparation: 'separation'
-    };
-
-    const hasBackend = phaseNum === 1 && backendEffectsMap[stepId] !== undefined;
-
-    if (hasBackend) {
-      const effectType = backendEffectsMap[stepId];
-      let progressTimer: any = null;
-      try {
-        setStepExecution(prev => ({
-          ...prev,
-          [stepId]: {
-            ...prev[stepId],
-            log: 'Подготовка файлов и отправка запроса на бэкенд...'
-          }
-        }));
-
-        let currentProgress = 0;
-        progressTimer = setInterval(() => {
-          currentProgress = Math.min(currentProgress + Math.floor(Math.random() * 15) + 5, 95);
-          setStepExecution(prev => {
-            if (!prev[stepId] || prev[stepId].status !== 'running') {
-              clearInterval(progressTimer);
-              return prev;
-            }
-            return {
-              ...prev,
-              [stepId]: {
-                ...prev[stepId],
-                progress: currentProgress,
-                log: `Обработка на стороне бэкенда... (${currentProgress}%)`
-              }
-            };
-          });
-        }, 300);
-
-        let config: any = { effect_type: effectType };
-        if (effectType === 'normalization') {
-          config = {
-            effect_type: 'normalization',
-            target_lufs: activePreset.phase1.normalization.targetLufs,
-            upward_threshold: activePreset.phase1.normalization.upwardThresholdDb,
-            upward_gain: activePreset.phase1.normalization.upwardGainDb,
-            upward_ratio: activePreset.phase1.normalization.upwardRatio,
-          };
-        } else if (effectType === 'declick') {
-          config = {
-            effect_type: 'declick',
-            sensitivity: activePreset.phase1.deClick.sensitivity,
-            max_click_width_ms: activePreset.phase1.deClick.maxClickWidthMs,
-          };
-        } else if (effectType === 'smarteq') {
-          config = {
-            effect_type: 'smarteq',
-            eq_profile: activePreset.phase1.eqMatching.profileModel,
-          };
-        } else if (effectType === 'denoise') {
-          config = {
-            effect_type: 'denoise',
-            denoise_model: activePreset.phase1.denoise.model,
-            denoise_strength: activePreset.phase1.denoise.strength,
-          };
-        } else if (effectType === 'dereverb') {
-          config = {
-            effect_type: 'dereverb',
-            dereverb_model: activePreset.phase1.dereverb.model,
-            dereverb_strength: activePreset.phase1.dereverb.strength,
-          };
-        } else if (effectType === 'separation') {
-          config = {
-            effect_type: 'separation',
-            separation_model: activePreset.phase1.sourceSeparation.model,
-          };
-        }
-
-        if (effectType === 'separation') {
-          // Находим оригинал
-          const originalTrack = project.tracks.find(t => t.name === 'Оригинал');
-          const originalFile = originalTrack?.segments?.[0]?.filePath || project.referenceAudioPath || project.videoPath;
-          if (!originalFile) {
-            throw new Error('Оригинальный аудиофайл не найден в проекте для разделения');
-          }
-
-          playbackEngine.stop();
-          playbackEngine.clearCache();
-
-          const pathParts = originalFile.split(/[\\/]/);
-          const fileName = pathParts.pop() || '';
-          const dirPath = pathParts.join('/');
-          const extMatch = fileName.match(/\.([^.]+)$/);
-          const ext = extMatch ? extMatch[1] : 'wav';
-          const nameWithoutExt = fileName.replace(/\.[^.]+$/, '');
-
-          const vocalPath = `${dirPath}/${nameWithoutExt}_vocals.${ext}`;
-          const instrumentalPath = `${dirPath}/${nameWithoutExt}_instruments.${ext}`;
-
-          setStepExecution(prev => ({
-            ...prev,
-            [stepId]: {
-              ...prev[stepId],
-              log: 'Извлечение вокала/голоса из оригинальной дорожки...'
-            }
-          }));
-
-          await invoke<string>('apply_audio_effect', {
-            inputPath: originalFile,
-            outputPath: vocalPath,
-            config: {
-              effect_type: 'separation',
-              separation_model: activePreset.phase1.sourceSeparation.model || 'htdemucs'
-            }
-          });
-
-          setStepExecution(prev => ({
-            ...prev,
-            [stepId]: {
-              ...prev[stepId],
-              progress: 50,
-              log: 'Извлечение фоновых звуков/музыки из оригинальной дорожки...'
-            }
-          }));
-
-          await invoke<string>('apply_audio_effect', {
-            inputPath: originalFile,
-            outputPath: instrumentalPath,
-            config: {
-              effect_type: 'separation_instruments',
-              separation_model: activePreset.phase1.sourceSeparation.model || 'htdemucs'
-            }
-          });
-
-          const duration = project.duration || 60;
-
-          const soundsTrackId = 'track-' + Math.random().toString(36).substring(2, 11);
-          const voicesTrackId = 'track-' + Math.random().toString(36).substring(2, 11);
-
-          const soundsSegment = {
-            id: 'seg-' + Math.random().toString(36).substring(2, 11),
-            startTime: 0,
-            duration: duration,
-            fileOffset: 0,
-            fileDuration: duration,
-            blobUrl: '',
-            filePath: instrumentalPath,
-            gain: 1.0,
-            playbackRate: 1.0,
-            originalFileName: `${nameWithoutExt}_instruments.${ext}`,
-            waveform: []
-          };
-
-          const voicesSegment = {
-            id: 'seg-' + Math.random().toString(36).substring(2, 11),
-            startTime: 0,
-            duration: duration,
-            fileOffset: 0,
-            fileDuration: duration,
-            blobUrl: '',
-            filePath: vocalPath,
-            gain: 1.0,
-            playbackRate: 1.0,
-            originalFileName: `${nameWithoutExt}_vocals.${ext}`,
-            waveform: []
-          };
-
-          const soundsTrack: AudioTrack = {
-            id: soundsTrackId,
-            name: 'Звуки (Музыка)',
-            segments: [soundsSegment],
-            volume: 1.0,
-            isMuted: false,
-            isSolo: false,
-            isArmed: false,
-            isProcessingEnabled: false,
-            height: 80
-          };
-
-          const voicesTrack: AudioTrack = {
-            id: voicesTrackId,
-            name: 'Голоса (Вокал)',
-            segments: [voicesSegment],
-            volume: 1.0,
-            isMuted: false,
-            isSolo: false,
-            isArmed: false,
-            isProcessingEnabled: false,
-            height: 80
-          };
-
-          const updatedTracks = project.tracks.map(t => {
-            if (t.name === 'Оригинал') {
-              return { ...t, isMuted: true };
-            }
-            return t;
-          });
-
-          updatedTracks.push(soundsTrack, voicesTrack);
-
-          onUpdateProject({ tracks: updatedTracks });
-          playbackEngine.updateTracks(updatedTracks).catch(console.error);
-
-          clearInterval(progressTimer);
-          setStepExecution(prev => ({
-            ...prev,
-            [stepId]: {
-              status: 'success',
-              progress: 100,
-              log: 'Успешно завершено! Созданы новые дорожки "Звуки" и "Голоса".',
-              hasRollback: true
-            }
-          }));
-          showToast(`Этап "${title}" успешно выполнен!`);
-        } else {
-          playbackEngine.stop();
-          playbackEngine.clearCache();
-
-          let updatedTracks = JSON.parse(JSON.stringify(project.tracks)) as AudioTrack[];
-          let processedCount = 0;
-
-          // Фильтруем дорожки для обработки (не Оригинал, не Звуки, не Голоса, и чекбокс включен)
-          const targetTracks = updatedTracks.filter(t => t.name !== 'Оригинал' && t.name !== 'Звуки (Музыка)' && t.name !== 'Голоса (Вокал)' && t.isProcessingEnabled !== false);
-          const totalSegments = targetTracks.reduce((sum, t) => sum + (t.segments?.length || 0), 0);
-
-          if (totalSegments === 0) {
-            throw new Error('Нет активных дорожек или сегментов для обработки (проверьте чекбоксы)');
-          }
-
-          let processedSegmentsCount = 0;
-
-          for (let track of updatedTracks) {
-            const isOriginal = track.name === 'Оригинал';
-            const isExcluded = track.name === 'Оригинал' || track.name === 'Звуки (Музыка)' || track.name === 'Голоса (Вокал)';
-            const isEnabled = track.isProcessingEnabled !== false;
-            if (!isExcluded && isEnabled && track.segments && track.segments.length > 0) {
-              for (let seg of track.segments) {
-                if (!seg.filePath) continue;
-
-                setStepExecution(prev => ({
-                  ...prev,
-                  [stepId]: {
-                    ...prev[stepId],
-                    log: `Обработка фрагмента "${seg.originalFileName || 'audio'}" (${processedSegmentsCount + 1}/${totalSegments})...`
-                  }
-                }));
-
-                const pathParts = seg.filePath.split(/[\\/]/);
-                const fileName = pathParts.pop() || '';
-                const dirPath = pathParts.join('/');
-                const extMatch = fileName.match(/\.([^.]+)$/);
-                const ext = extMatch ? extMatch[1] : 'wav';
-                const nameWithoutExt = fileName.replace(/\.[^.]+$/, '');
-                const outFileName = `${nameWithoutExt}_${effectType}.${ext}`;
-                const outputPath = `${dirPath}/${outFileName}`;
-
-                try {
-                  console.log(`[EFFECT-RUNNER] Запуск обработки аудиоэффекта:\n  Метод: apply_audio_effect\n  Входной файл: ${seg.filePath}\n  Выходной файл: ${outputPath}\n  Параметры:`, config);
-                  const result = await invoke<string>('apply_audio_effect', {
-                    inputPath: seg.filePath,
-                    outputPath: outputPath,
-                    config: config
-                  });
-
-                  console.log(`[EFFECT-RUNNER] Эффект успешно применен! Новый путь файла: ${result}`);
-                  seg.filePath = result;
-                  seg.originalFileName = outFileName;
-                  // Меняем id и сбрасываем waveform в [] для автоматической перерисовки
-                  console.log(`[EFFECT-RUNNER] Сброс волновой формы для сегмента ${seg.id} (установка waveform=[]) для триггера автоматической перерисовки.`);
-                  seg.id = 'seg-' + Math.random().toString(36).substring(2, 11);
-                  seg.waveform = [];
-                  processedCount++;
-                } catch (err) {
-                  console.error(`Ошибка обработки сегмента ${seg.id}:`, err);
-                }
-                
-                processedSegmentsCount++;
-                const progressPct = Math.round((processedSegmentsCount / totalSegments) * 100);
-                setStepExecution(prev => ({
-                  ...prev,
-                  [stepId]: {
-                    ...prev[stepId],
-                    progress: progressPct
-                  }
-                }));
-              }
-            }
-          }
-
-          if (processedCount === 0) {
-            throw new Error('Не удалось обработать ни один фрагмент');
-          }
-
-          onUpdateProject({ tracks: updatedTracks });
-          playbackEngine.updateTracks(updatedTracks).catch(console.error);
-
-          clearInterval(progressTimer);
-          setStepExecution(prev => ({
-            ...prev,
-            [stepId]: {
-              status: 'success',
-              progress: 100,
-              log: `Успешно завершено! Обработано фрагментов: ${processedCount}`,
-              hasRollback: true
-            }
-          }));
-          showToast(`Этап "${title}" успешно выполнен для ${processedCount} фрагментов!`);
-        }
-      } catch (err: any) {
-        if (progressTimer) clearInterval(progressTimer);
-        setStepExecution(prev => ({
-          ...prev,
-          [stepId]: {
-            status: 'failed',
-            progress: 100,
-            log: `Ошибка выполнения: ${err.message || String(err)}`,
-            hasRollback: false
-          }
-        }));
-        showToast(`Ошибка на этапе "${title}"`);
-      }
-    } else {
-      // Simulation logs
-      const simulationLogs: Record<string, string[]> = {
-        normalization: [
-          'Инициализация аудиодетектора...',
-          'Анализ пиковых значений громкости по дорожкам...',
-          'Расчет целевого уровня громкости (LUFS)...',
-          'Поиск порога фонового шума...',
-          'Применение апвард-компрессии для тихих звуков...',
-          'Финальная нормализация пиков...',
-          'Завершено! Звук выровнен по стандарту.'
-        ],
-        deClick: [
-          'Построение высокочастотной спектрограммы...',
-          'Анализ крутизны фронта сигнала (вторая производная)...',
-          'Обнаружение слюнных щелчков и губного треска...',
-          'Применение кубической Smoothstep-интерполяции для щелчков...',
-          'Очистка артефактов без деформации полезного сигнала...',
-          'Завершено! Голос очищен от микро-помех.'
-        ],
-        denoise: [
-          'Загрузка нейросети Deep Denoise AI...',
-          'Сканирование профиля статического шума...',
-          'Спектральное вычитание шума из полезного сигнала...',
-          'Подавление фонового гула и вентиляторов...',
-          'Восстановление потерянных гармоник голоса...',
-          'Завершено! Фоновый шум полностью убран.'
-        ],
-        dereverb: [
-          'Анализ импульсной характеристики реверберации помещения...',
-          'Моделирование отражений стен комнат...',
-          'Применение алгоритма де-реверберации RT_Dereverb...',
-          'Ослабление хвостов эха и ранних отражений...',
-          'Сужение акустической сцены вокруг спикера...',
-          'Завершено! Комнатное эхо успешно подавлено.'
-        ],
-        eqMatching: [
-          'Анализ текущего тембра дорожки...',
-          'Сопоставление спектрального профиля с целевым шаблоном...',
-          'Расчет компенсационной кривой эквалайзера...',
-          'Применение Умного EQ для устранения резонансов...',
-          'Тембральное приведение к эталонному звучанию...',
-          'Завершено! АЧХ выровнена по референсу.'
-        ],
-        sourceSeparation: [
-          'Инициализация ИИ-службы UVR5...',
-          'Разделение на вокальный и инструментальный компоненты...',
-          'Спектральное маскирование перекрестных помех...',
-          'Сохранение изолированных стемов голоса и музыки...',
-          'Завершено! Дорожки успешно разделены на стемы.'
-        ],
-        dePlosive: [
-          'Поиск низкочастотных взрывных звуков (ударов воздуха)...',
-          'Определение частотной границы среза...',
-          'Применение динамического Low-cut фильтра...',
-          'Сглаживание пиков согласных Б, П, Т...',
-          'Завершено! Взрывные согласные сглажены.'
-        ],
-        deEsser: [
-          'Поиск сибилянтов в полосе 5000-8000 Гц...',
-          'Детектирование резких согласных С, Ц, Ш, Щ...',
-          'Динамическое ослабление полосы сибилянтов...',
-          'Смягчение свистящих звуков...',
-          'Завершено! Сибилянты звучат мягко и естественно.'
-        ],
-        volumeLeveler: [
-          'Измерение кратковременного RMS сигнала...',
-          'Расчет кривой автоматического регулирования уровня...',
-          'Сглаживание перепадов между словами спикера...',
-          'Компенсация отдаления актера от микрофона...',
-          'Завершено! Уровень громкости голоса выровнен.'
-        ],
-        silenceSplit: [
-          'Анализ огибающей амплитуды...',
-          'Маркировка участков тишины ниже порога...',
-          'Определение оптимальных точек разреза сегментов...',
-          'Разбиение единой дорожки на отдельные клипы...',
-          'Завершено! Дорожка нарезана на фразы.'
-        ],
-        smartAlign: [
-          'Выравнивание временной шкалы по субтитрам...',
-          'Анализ темпоритма оригинальной речи...',
-          'Расчет коэффициентов деформации Smart Stretch...',
-          'Применение алгоритма растяжения без изменения тона...',
-          'Идеальная синхронизация реплик дубляжа (липсинг)...',
-          'Завершено! Аудио выровнено по оригинальному таймингу.'
-        ],
-        subtitleCompliance: [
-          'Чтение таймкодов субтитров...',
-          'Проверка пересечений временных интервалов...',
-          'Анализ пропущенных фраз и немых сцен...',
-          'Маркировка проблемных зон для контроля...',
-          'Завершено! Расхождений и пропусков не обнаружено.'
-        ],
-        gainMatching: [
-          'Измерение интегрального уровня LUFS реплик...',
-          'Измерение уровня оригинальной фоновой дорожки...',
-          'Коррекция громкости записанных фраз...',
-          'Обеспечение заданного превышения речи над бэком...',
-          'Завершено! Громкость голоса согласована с бэкграундом.'
-        ],
-        ducking: [
-          'Детектирование активности голоса на шине...',
-          'Расчет огибающей компрессии фонового звука...',
-          'Применение плавного снижения громкости музыки во время речи...',
-          'Восстановление громкости музыки во время пауз...',
-          'Завершено! Авто-дакинг музыки настроен.'
-        ],
-        autoFxAnalysis: [
-          'Анализ стереопанорамы оригинального файла...',
-          'Измерение пространственного коэффициента реверберации...',
-          'Обнаружение эффектов эквалайзера (радио, телефон)...',
-          'Копирование параметров автоматизации на новые дубли...',
-          'Завершено! Пространство оригинала успешно перенесено.'
-        ],
-        vocalBusProcessing: [
-          'Суммирование всех вокальных треков на шину...',
-          'Применение мягкого сжатия Glue Compressor...',
-          'Срез суббасовых шумов ниже 80 Гц...',
-          'Включение пикового лимитера для предотвращения клиппинга...',
-          'Завершено! Общая шина голосов склеена и защищена.'
-        ],
-        qualityControl: [
-          'Сканирование мастер-выхода проекта...',
-          'Поиск межсэмпловых пиков и клиппинга...',
-          'Проверка на наличие нежелательных долгих пауз...',
-          'Проверка наложения реплик разных актеров...',
-          'Завершено! Микс прошел проверку качества.'
-        ],
-        subtitleBurn: [
-          'Отрисовка текстовых слоев субтитров...',
-          'Наложение стилей шрифтов и позиционирование...',
-          'Впекание текста в видеопоток с помощью FFmpeg...',
-          'Завершено! Субтитры вшиты в видео.'
-        ],
-        renderSettings: [
-          'Подготовка аудио- и видеопотоков к рендерингу...',
-          'Кодирование видеокодеком H.264...',
-          'Кодирование аудиокодеком AAC...',
-          'Упаковка потоков в MP4 контейнер...',
-          'Сохранение готового файла проекта...',
-          'Завершено! Финальный рендер успешно экспортирован.'
-        ]
-      };
-
-      const logs = simulationLogs[stepId] || [
-        'Инициализация этапа обработки...',
-        'Анализ структуры проекта...',
-        'Применение настроек пресета...',
-        'Выполнение математических расчетов...',
-        'Завершено! Изменения применены.'
-      ];
-
-      let currentLogIdx = 0;
-      const totalSteps = logs.length;
-      const durationPerSubStep = Math.max(1200 / totalSteps, 200);
-
-      const interval = setInterval(() => {
-        setStepExecution(prev => {
-          if (!prev[stepId] || prev[stepId].status !== 'running') {
-            clearInterval(interval);
-            return prev;
-          }
-
-          if (currentLogIdx < totalSteps) {
-            const currentProgress = Math.floor(((currentLogIdx + 1) / totalSteps) * 100);
-            const currentLog = logs[currentLogIdx];
-            currentLogIdx++;
-            return {
-              ...prev,
-              [stepId]: {
-                status: 'running',
-                progress: currentProgress,
-                log: currentLog,
-                hasRollback: false
-              }
-            };
-          } else {
-            clearInterval(interval);
-            return {
-              ...prev,
-              [stepId]: {
-                status: 'success',
-                progress: 100,
-                log: 'Успешно завершено!',
-                hasRollback: true
-              }
-            };
-          }
-        });
-      }, durationPerSubStep);
-    }
+    await PipelineExecutionService.executeStep({
+      stepId,
+      title,
+      phaseNum,
+      project,
+      activePreset,
+      playbackEngine,
+      onUpdateProject,
+      addAuditLogs,
+      setTimingIssues,
+      setQaIssues,
+      setStepExecution,
+      showToast,
+      stepRollbackSnapshotsRef,
+      handleRunSeparation,
+      handleStartFinalRender
+    });
   };
 
   const handleCancelStep = (stepId: string, title: string) => {
@@ -1110,16 +661,22 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   };
 
   const handleRollbackStep = (stepId: string, title: string) => {
+    const snapshot = stepRollbackSnapshotsRef.current[stepId];
+    if (snapshot && snapshot.length > 0) {
+      onUpdateProject({ tracks: snapshot });
+      playbackEngine.updateTracks(snapshot).catch(console.error);
+      delete stepRollbackSnapshotsRef.current[stepId];
+    }
     setStepExecution(prev => ({
       ...prev,
       [stepId]: {
         status: 'idle',
         progress: 0,
-        log: '',
+        log: 'Откат выполнен. Исходное состояние дорожек восстановлено.',
         hasRollback: false
       }
     }));
-    showToast(`Результат этапа "${title}" успешно откатчен!`);
+    showToast(`Результат этапа "${title}" успешно откатан! Исходные дорожки восстановлены.`);
   };
 
   const handleSelectEffectFile = async () => {
@@ -1135,332 +692,104 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     }
   };
 
-  const handleApplyEffect = async (effectType: 'normalization' | 'declick' | 'smarteq' | 'denoise' | 'dereverb' | 'separation' | string) => {
+  const handleApplyEffect = async (effectType: 'normalization' | 'declick' | 'smarteq' | 'denoise' | 'dereverb' | 'separation' | 'deplosive' | 'deesser' | 'volumeleveler' | string) => {
+    if (isApplyingEffect || !project || !project.tracks) return;
     setIsApplyingEffect(true);
-    setProcessedEffectFile('');
-    
+
     try {
-      let config: any = { effect_type: effectType };
-      let effectLabel = effectType;
-
       if (effectType === 'normalization') {
-        effectLabel = 'Нормализация';
-        config = {
-          effect_type: 'normalization',
-          target_lufs: activePreset.phase1.normalization.targetLufs,
-          upward_threshold: activePreset.phase1.normalization.upwardThresholdDb,
-          upward_gain: activePreset.phase1.normalization.upwardGainDb,
-          upward_ratio: activePreset.phase1.normalization.upwardRatio,
-        };
+        const res = AudioDspService.applyNormalizationAndUpwardCompression(
+          project.tracks,
+          activePreset.phase1.normalization,
+          selectedSegment?.trackId,
+          selectedSegment?.segment?.id
+        );
+        onUpdateProject({ tracks: res.updatedTracks });
+        await playbackEngine.updateTracks(res.updatedTracks);
+        addAuditLogs(res.detailedLogs.map((msg, i) => ({
+          id: `audit-norm-${Date.now()}-${i}`,
+          timestamp: Date.now(),
+          stageName: '1. Предобработка',
+          stepId: 'normalization',
+          status: 'success',
+          title: 'Нормализация и апвард-компрессия',
+          message: msg
+        })));
+        showToast(res.logSummary);
       } else if (effectType === 'declick') {
-        effectLabel = 'De-Click';
-        config = {
-          effect_type: 'declick',
-          sensitivity: activePreset.phase1.deClick.sensitivity,
-          max_click_width_ms: activePreset.phase1.deClick.maxClickWidthMs,
-        };
+        const res = AudioDspService.applyDeClick(
+          project.tracks,
+          activePreset.phase1.deClick,
+          selectedSegment?.trackId,
+          selectedSegment?.segment?.id
+        );
+        onUpdateProject({ tracks: res.updatedTracks });
+        await playbackEngine.updateTracks(res.updatedTracks);
+        showToast(res.logSummary);
       } else if (effectType === 'smarteq') {
-        effectLabel = 'Smart EQ';
-        config = {
-          effect_type: 'smarteq',
-          eq_profile: activePreset.phase1.eqMatching.profileModel,
-        };
+        const res = AudioDspService.applyEqMatching(
+          project.tracks,
+          activePreset.phase1.eqMatching,
+          selectedSegment?.trackId,
+          selectedSegment?.segment?.id
+        );
+        onUpdateProject({ tracks: res.updatedTracks });
+        await playbackEngine.updateTracks(res.updatedTracks);
+        showToast(res.logSummary);
+      } else if (effectType === 'deplosive') {
+        const res = AudioDspService.applyDePlosive(
+          project.tracks,
+          activePreset.phase1.dePlosive,
+          selectedSegment?.trackId,
+          selectedSegment?.segment?.id
+        );
+        onUpdateProject({ tracks: res.updatedTracks });
+        await playbackEngine.updateTracks(res.updatedTracks);
+        showToast(res.logSummary);
+      } else if (effectType === 'deesser') {
+        const res = AudioDspService.applyDeEsser(
+          project.tracks,
+          activePreset.phase1.deEsser,
+          selectedSegment?.trackId,
+          selectedSegment?.segment?.id
+        );
+        onUpdateProject({ tracks: res.updatedTracks });
+        await playbackEngine.updateTracks(res.updatedTracks);
+        showToast(res.logSummary);
       } else if (effectType === 'denoise') {
-        const isVr = activePreset.phase1.denoise.model.startsWith('uvr_');
-        effectLabel = isVr ? 'VR Denoise' : 'Denoise';
-        config = {
-          effect_type: 'denoise',
-          denoise_model: activePreset.phase1.denoise.model,
-          denoise_strength: activePreset.phase1.denoise.strength,
-        };
+        const res = AudioDspService.applyDenoise(
+          project.tracks,
+          activePreset.phase1.denoise,
+          selectedSegment?.trackId,
+          selectedSegment?.segment?.id
+        );
+        onUpdateProject({ tracks: res.updatedTracks });
+        await playbackEngine.updateTracks(res.updatedTracks);
+        showToast(res.logSummary);
       } else if (effectType === 'dereverb') {
-        const isVr = activePreset.phase1.dereverb.model.startsWith('uvr_');
-        effectLabel = isVr ? 'VR De-Echo' : 'Dereverb';
-        config = {
-          effect_type: 'dereverb',
-          dereverb_model: activePreset.phase1.dereverb.model,
-          dereverb_strength: activePreset.phase1.dereverb.strength,
-        };
+        const res = AudioDspService.applyDeReverb(
+          project.tracks,
+          activePreset.phase1.dereverb,
+          selectedSegment?.trackId,
+          selectedSegment?.segment?.id
+        );
+        onUpdateProject({ tracks: res.updatedTracks });
+        await playbackEngine.updateTracks(res.updatedTracks);
+        showToast(res.logSummary);
+      } else if (effectType === 'volumeleveler') {
+        const res = AudioDspService.applyVolumeLeveler(
+          project.tracks,
+          activePreset.phase1.volumeLeveler,
+          selectedSegment?.trackId,
+          selectedSegment?.segment?.id
+        );
+        onUpdateProject({ tracks: res.updatedTracks });
+        await playbackEngine.updateTracks(res.updatedTracks);
+        showToast(res.logSummary);
       } else if (effectType === 'separation') {
-        effectLabel = 'Separation';
-        config = {
-          effect_type: 'separation',
-          separation_model: activePreset.phase1.sourceSeparation.model,
-        };
-      }
-
-      // Helper to execute single file through VR service or FFmpeg fallback
-      const processSingleAudioFile = async (inPath: string, outPath: string, eff: string, cfg: any): Promise<string> => {
-        const isVrDenoise = eff === 'denoise' && (cfg.denoise_model?.startsWith('uvr_') || cfg.denoise_model?.includes('.onnx'));
-        const isVrDereverb = eff === 'dereverb' && (cfg.dereverb_model?.startsWith('uvr_') || cfg.dereverb_model?.includes('.onnx'));
-
-        if (isVrDenoise || isVrDereverb) {
-          let modelFilename = 'UVR-DeNoise-Lite.onnx';
-          if (isVrDenoise) {
-            if (cfg.denoise_model === 'uvr_denoise_foxjoy') modelFilename = 'UVR-DeNoise-By-FoxJoy.onnx';
-            else if (cfg.denoise_model === 'uvr_denoise_full') modelFilename = 'UVR-DeNoise.onnx';
-            else modelFilename = 'UVR-DeNoise-Lite.onnx';
-          } else if (isVrDereverb) {
-            if (cfg.dereverb_model === 'uvr_deecho_aggressive') modelFilename = 'UVR-De-Echo-Aggressive.onnx';
-            else modelFilename = 'UVR-De-Echo-Normal.onnx';
-          }
-
-          try {
-            const outDir = outPath.substring(0, Math.max(outPath.lastIndexOf('/'), outPath.lastIndexOf('\\')));
-            const vrResult = await AudioSeparatorService.runSeparation(
-              inPath,
-              modelFilename,
-              outDir || undefined,
-              useGpuForSeparator,
-              false
-            );
-            if (vrResult) return vrResult;
-          } catch (vrErr) {
-            console.warn("VR separator model execution fallback to high-speed DSP filter:", vrErr);
-          }
-        }
-
-        return await invoke<string>('apply_audio_effect', {
-          inputPath: inPath,
-          outputPath: outPath,
-          config: cfg
-        });
-      };
-
-      if (effectType === 'separation') {
-        // Находим оригинал
-        const originalTrack = project.tracks.find(t => t.name === 'Оригинал');
-        const originalFile = originalTrack?.segments?.[0]?.filePath || project.referenceAudioPath || project.videoPath;
-        if (!originalFile) {
-          showToast('Оригинальный файл не найден в проекте для разделения');
-          return;
-        }
-
-        playbackEngine.stop();
-        playbackEngine.clearCache();
-
-        const pathParts = originalFile.split(/[\\/]/);
-        const fileName = pathParts.pop() || '';
-        const dirPath = pathParts.join('/');
-        const extMatch = fileName.match(/\.([^.]+)$/);
-        const ext = extMatch ? extMatch[1] : 'wav';
-        const nameWithoutExt = fileName.replace(/\.[^.]+$/, '');
-
-        const vocalPath = `${dirPath}/${nameWithoutExt}_vocals.${ext}`;
-        const instrumentalPath = `${dirPath}/${nameWithoutExt}_instruments.${ext}`;
-
-        const sepModel = activePreset.phase1.sourceSeparation.model || 'htdemucs_vocals_bgm';
-        const isVrSep = sepModel.includes('.onnx') || sepModel === 'htdemucs_vocals_bgm' || sepModel === 'uvr_v5_vocal' || sepModel === 'mdx_net_karaoke';
-
-        let voiceResult = vocalPath;
-        let soundResult = instrumentalPath;
-
-        if (isVrSep && sepModel !== 'fast_dsp_splitter') {
-          let modelFilename = 'htdemucs';
-          if (sepModel === 'MDX23C-8Step-VocFT.onnx') modelFilename = 'MDX23C-8Step-VocFT.onnx';
-          else if (sepModel === '5_HP-Karaoke-UVR.onnx' || sepModel === 'mdx_net_karaoke') modelFilename = '5_HP-Karaoke-UVR.onnx';
-          else if (sepModel === 'UVR-MDX-NET-Voc_FT.onnx' || sepModel === 'uvr_v5_vocal') modelFilename = 'UVR-MDX-NET-Voc_FT.onnx';
-          else modelFilename = 'htdemucs';
-
-          try {
-            voiceResult = await AudioSeparatorService.runSeparation(
-              originalFile,
-              modelFilename,
-              dirPath,
-              useGpuForSeparator,
-              false
-            ) || vocalPath;
-          } catch (vrErr) {
-            console.warn("VR isolation fallback to DSP:", vrErr);
-            voiceResult = await invoke<string>('apply_audio_effect', {
-              inputPath: originalFile,
-              outputPath: vocalPath,
-              config: { effect_type: 'separation', separation_model: sepModel }
-            });
-          }
-        } else {
-          voiceResult = await invoke<string>('apply_audio_effect', {
-            inputPath: originalFile,
-            outputPath: vocalPath,
-            config: { effect_type: 'separation', separation_model: sepModel }
-          });
-        }
-
-        soundResult = await invoke<string>('apply_audio_effect', {
-          inputPath: originalFile,
-          outputPath: instrumentalPath,
-          config: { effect_type: 'separation_instruments', separation_model: sepModel }
-        });
-
-        const duration = project.duration || 60;
-        const soundsTrackId = 'track-' + Math.random().toString(36).substring(2, 11);
-        const voicesTrackId = 'track-' + Math.random().toString(36).substring(2, 11);
-
-        const soundsSegment = {
-          id: 'seg-' + Math.random().toString(36).substring(2, 11),
-          startTime: 0,
-          duration: duration,
-          fileOffset: 0,
-          fileDuration: duration,
-          blobUrl: '',
-          filePath: soundResult,
-          sourceFilePath: originalFile,
-          gain: 1.0,
-          playbackRate: 1.0,
-          originalFileName: `${nameWithoutExt}_instruments.${ext}`,
-          waveform: undefined,
-          isExtractingWaveform: false
-        };
-
-        const voicesSegment = {
-          id: 'seg-' + Math.random().toString(36).substring(2, 11),
-          startTime: 0,
-          duration: duration,
-          fileOffset: 0,
-          fileDuration: duration,
-          blobUrl: '',
-          filePath: voiceResult,
-          sourceFilePath: originalFile,
-          gain: 1.0,
-          playbackRate: 1.0,
-          originalFileName: `${nameWithoutExt}_vocals.${ext}`,
-          waveform: undefined,
-          isExtractingWaveform: false
-        };
-
-        const soundsTrack: AudioTrack = {
-          id: soundsTrackId,
-          name: 'Звуки (Музыка)',
-          segments: [soundsSegment],
-          volume: 1.0,
-          isMuted: false,
-          isSolo: false,
-          isArmed: false,
-          isProcessingEnabled: false,
-          height: 80
-        };
-
-        const voicesTrack: AudioTrack = {
-          id: voicesTrackId,
-          name: 'Голоса (Вокал)',
-          segments: [voicesSegment],
-          volume: 1.0,
-          isMuted: false,
-          isSolo: false,
-          isArmed: false,
-          isProcessingEnabled: false,
-          height: 80
-        };
-
-        const updatedTracks = project.tracks.map(t => {
-          if (t.name === 'Оригинал') {
-            return { ...t, isMuted: true };
-          }
-          return t;
-        });
-
-        updatedTracks.push(soundsTrack, voicesTrack);
-
-        onUpdateProject({ tracks: updatedTracks });
-        playbackEngine.updateTracks(updatedTracks).catch(console.error);
-        showToast('Разделение оригинала завершено! Добавлены дорожки "Звуки" и "Голоса".');
-      } else if (selectedEffectFile) {
-        // Обработка внешнего выбранного файла
-        const pathParts = selectedEffectFile.split(/[\\/]/);
-        const fileName = pathParts.pop() || '';
-        const dirPath = pathParts.join('/');
-        const extMatch = fileName.match(/\.([^.]+)$/);
-        const ext = extMatch ? extMatch[1] : 'wav';
-        const nameWithoutExt = fileName.replace(/\.[^.]+$/, '');
-        const outFileName = `${nameWithoutExt}_${effectType}.${ext}`;
-        const outputPath = `${dirPath}/${outFileName}`;
-
-        const result = await processSingleAudioFile(selectedEffectFile, outputPath, effectType, config);
-        setProcessedEffectFile(result);
-        showToast(`Файл успешно обработан: ${outFileName}`);
-      } else if (selectedSegment) {
-        // Обработка конкретного выбранного сегмента на таймлайне
-        const { segment } = selectedSegment;
-        if (!segment.filePath) {
-          showToast('У выбранного сегмента отсутствует аудиофайл');
-          return;
-        }
-
-        playbackEngine.stop();
-        playbackEngine.clearCache();
-
-        const pathParts = segment.filePath.split(/[\\/]/);
-        const fileName = pathParts.pop() || '';
-        const dirPath = pathParts.join('/');
-        const extMatch = fileName.match(/\.([^.]+)$/);
-        const ext = extMatch ? extMatch[1] : 'wav';
-        const nameWithoutExt = fileName.replace(/\.[^.]+$/, '').replace(/_(denoise|dereverb|normalization|declick|smarteq|vr_denoise|vr_deecho)/gi, '');
-        const outFileName = `${nameWithoutExt}_${effectType}.${ext}`;
-        const outputPath = `${dirPath}/${outFileName}`;
-
-        const result = await processSingleAudioFile(segment.filePath, outputPath, effectType, config);
-        updateSegmentWithProcessedFile(result, effectLabel);
-        showToast(`Эффект "${effectLabel}" успешно применен к выбранному фрагменту!`);
+        await handleRunSeparation();
       } else {
-        // Обработка всех активных дорожек дубляжа
-        playbackEngine.stop();
-        playbackEngine.clearCache();
-
-        let updatedTracks = JSON.parse(JSON.stringify(project.tracks)) as AudioTrack[];
-        let processedCount = 0;
-
-        const targetTracks = updatedTracks.filter(t => t.name !== 'Оригинал' && t.name !== 'Звуки (Музыка)' && t.name !== 'Голоса (Вокал)' && t.isProcessingEnabled !== false);
-        const totalSegments = targetTracks.reduce((sum, t) => sum + (t.segments?.length || 0), 0);
-
-        if (totalSegments === 0) {
-          showToast('Нет выбранных дорожек или сегментов для обработки');
-          setIsApplyingEffect(false);
-          return;
-        }
-
-        for (let track of updatedTracks) {
-          const isExcluded = track.name === 'Оригинал' || track.name === 'Звуки (Музыка)' || track.name === 'Голоса (Вокал)';
-          const isEnabled = track.isProcessingEnabled !== false;
-          if (!isExcluded && isEnabled && track.segments && track.segments.length > 0) {
-            for (let seg of track.segments) {
-              if (!seg.filePath) continue;
-
-              const pathParts = seg.filePath.split(/[\\/]/);
-              const fileName = pathParts.pop() || '';
-              const dirPath = pathParts.join('/');
-              const extMatch = fileName.match(/\.([^.]+)$/);
-              const ext = extMatch ? extMatch[1] : 'wav';
-              const nameWithoutExt = fileName.replace(/\.[^.]+$/, '').replace(/_(denoise|dereverb|normalization|declick|smarteq|vr_denoise|vr_deecho)/gi, '');
-              const outFileName = `${nameWithoutExt}_${effectType}.${ext}`;
-              const outputPath = `${dirPath}/${outFileName}`;
-
-              try {
-                const result = await processSingleAudioFile(seg.filePath, outputPath, effectType, config);
-
-                seg.sourceFilePath = seg.sourceFilePath || seg.filePath;
-                seg.backupFilePath = seg.filePath;
-                seg.processedEffectName = effectLabel;
-                seg.filePath = result;
-                seg.originalFileName = outFileName;
-                seg.waveform = undefined;
-                seg.isExtractingWaveform = false;
-                processedCount++;
-              } catch (err) {
-                console.error(`Ошибка обработки сегмента ${seg.id}:`, err);
-              }
-            }
-          }
-        }
-
-        if (processedCount === 0) {
-          showToast('Не удалось обработать ни один фрагмент');
-          setIsApplyingEffect(false);
-          return;
-        }
-
-        onUpdateProject({ tracks: updatedTracks });
-        playbackEngine.updateTracks(updatedTracks).catch(console.error);
-        showToast(`Эффект "${effectLabel}" успешно применен к ${processedCount} фрагментам на активных дорожках!`);
+        showToast(`Эффект "${effectType}" применен к проекту.`);
       }
     } catch (e: any) {
       console.error(e);
@@ -1570,7 +899,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         modelToUse,
         project?.projectPath || '',
         useGpuForSeparator,
-        false, // can be custom
+        Boolean(activePreset.phase1.sourceSeparation.denoise),
         (prog) => {
           setSeparatorProgress(prog);
         }
@@ -1980,6 +1309,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   ) => {
     const isDragged = draggedItem?.phase === phaseNum && draggedItem?.index === index;
     const exec = stepExecution[stepId] || { status: 'idle', progress: 0, log: '', hasRollback: false };
+    stepContentRegistry.current[stepId] = { title, icon, content: children };
 
     return (
       <div 
@@ -2720,37 +2050,32 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
             [stepId]: { status: 'running', progress: 50, log: `Обработка дорожек дубляжа (${stepId})...`, hasRollback: false }
           }));
 
-          currentTracks = currentTracks.map(track => {
-            const isExcluded = track.name === 'Оригинал' || track.name === 'Звуки (Музыка)' || track.name === 'Голоса (Вокал)';
-            if (isExcluded || track.isProcessingEnabled === false) return track;
-
-            return {
-              ...track,
-              segments: track.segments.map(seg => {
-                let updatedGain = seg.gain !== undefined ? seg.gain : 1.0;
-                let updatedWaveform = seg.waveform ? [...seg.waveform] : [];
-
-                if (stepId === 'normalization') {
-                  const targetLufs = activePreset.phase1.normalization.targetLufs || -16.0;
-                  const factor = Math.pow(10, (targetLufs + 18.0) / 20);
-                  updatedGain = Math.round(updatedGain * factor * 100) / 100;
-                  updatedWaveform = updatedWaveform.map(v => Math.min(1.0, v * factor));
-                } else if (stepId === 'deClick' || stepId === 'dePlosive') {
-                  updatedWaveform = updatedWaveform.map(v => v > 0.92 ? 0.85 : v);
-                } else if (stepId === 'denoise') {
-                  updatedWaveform = updatedWaveform.map(v => v < 0.05 ? 0 : v);
-                }
-
-                return {
-                  ...seg,
-                  gain: updatedGain,
-                  waveform: updatedWaveform
-                };
-              })
-            };
-          });
-
-          setStepExecution(prev => ({
+                    if (stepId === 'normalization') {
+            const dspRes = AudioDspService.applyNormalizationAndUpwardCompression(currentTracks, activePreset.phase1.normalization);
+            currentTracks = dspRes.updatedTracks;
+          } else if (stepId === 'eqMatching') {
+            const dspRes = AudioDspService.applyEqMatching(currentTracks, activePreset.phase1.eqMatching);
+            currentTracks = dspRes.updatedTracks;
+          } else if (stepId === 'deClick') {
+            const dspRes = AudioDspService.applyDeClick(currentTracks, activePreset.phase1.deClick);
+            currentTracks = dspRes.updatedTracks;
+          } else if (stepId === 'dePlosive') {
+            const dspRes = AudioDspService.applyDePlosive(currentTracks, activePreset.phase1.dePlosive);
+            currentTracks = dspRes.updatedTracks;
+          } else if (stepId === 'deEsser') {
+            const dspRes = AudioDspService.applyDeEsser(currentTracks, activePreset.phase1.deEsser);
+            currentTracks = dspRes.updatedTracks;
+          } else if (stepId === 'denoise') {
+            const dspRes = AudioDspService.applyDenoise(currentTracks, activePreset.phase1.denoise);
+            currentTracks = dspRes.updatedTracks;
+          } else if (stepId === 'dereverb') {
+            const dspRes = AudioDspService.applyDeReverb(currentTracks, activePreset.phase1.dereverb);
+            currentTracks = dspRes.updatedTracks;
+          } else if (stepId === 'volumeLeveler') {
+            const dspRes = AudioDspService.applyVolumeLeveler(currentTracks, activePreset.phase1.volumeLeveler);
+            currentTracks = dspRes.updatedTracks;
+          }
+setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: `Обработка завершена успешно.`, hasRollback: true }
           }));
@@ -3020,21 +2345,34 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       const originalTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
       
       const updatedTracks: AudioTrack[] = [];
+      let totalSegmentsBefore = 0;
+      let totalSegmentsAfter = 0;
+      let processedTracksCount = 0;
+
       for (const track of project.tracks) {
-        if (track.type === 'original' || (originalTrack && track.id === originalTrack.id)) {
+        // Only skip genuine original/reference stems, never dub/user tracks
+        const isOrigStem = (track.type === 'original' || (originalTrack && track.id === originalTrack.id)) && !TimingAlignmentService.isDubTrack(track);
+        if (isOrigStem) {
           updatedTracks.push(track);
         } else {
+          processedTracksCount++;
+          const segCountBefore = track.segments?.length || 0;
+          totalSegmentsBefore += segCountBefore;
           const res = await TimingAlignmentService.splitTrackBySilence(track, {
             thresholdDb: cfg.thresholdDb,
-            minSilenceDurationMs: cfg.minSilenceDurationMs
+            minSilenceDurationMs: cfg.minSilenceDurationMs,
+            minSegmentDurationMs: cfg.minSegmentDurationMs,
+            padSilenceMs: cfg.padSilenceMs
           });
+          const segCountAfter = res.segments?.length || 0;
+          totalSegmentsAfter += segCountAfter;
           updatedTracks.push(res);
         }
       }
 
       onUpdateProject({ tracks: updatedTracks });
       playbackEngine.updateTracks(updatedTracks).catch(console.error);
-      showToast('Разрез по тишине выполнен: тишина удалена, каждая фраза выделена в отдельный клип!');
+      showToast(`Разрез по тишине выполнен: обработано дорожек: ${processedTracksCount}, создано клипов: ${totalSegmentsAfter} (было ${totalSegmentsBefore}).`);
     } catch (err: any) {
       console.error(err);
       showToast('Ошибка при нарезке по тишине: ' + err.message);
@@ -3053,12 +2391,16 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       const originalTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
       const allIssues: TimingIssue[] = [];
       const updatedTracks: AudioTrack[] = [];
+      let totalPhrasesAligned = 0;
+      let totalTracksProcessed = 0;
 
       for (const track of project.tracks) {
-        if (track.type === 'original' || (originalTrack && track.id === originalTrack.id)) {
+        const isOrigStem = (track.type === 'original' || (originalTrack && track.id === originalTrack.id)) && !TimingAlignmentService.isDubTrack(track);
+        if (isOrigStem) {
           updatedTracks.push(track);
           continue;
         }
+        totalTracksProcessed++;
         const res = await TimingAlignmentService.alignTrackPhrases(
           track,
           originalTrack,
@@ -3067,19 +2409,21 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           activePreset.phase2
         );
         allIssues.push(...res.issues);
+        totalPhrasesAligned += (res.alignedCount || 0);
         updatedTracks.push(res.updatedTrack);
       }
 
       onUpdateProject({ tracks: updatedTracks });
+      playbackEngine.updateTracks(updatedTracks).catch(console.error);
       setTimingIssues(allIssues);
       setTimingInspectionDone(true);
 
       const overlapCount = allIssues.filter(i => i.type === 'overlap').length;
       const shortCount = allIssues.filter(i => i.type === 'too_short').length;
       
-      let msg = 'Выравнивание по оригиналу завершено: старт фраз синхронизирован!';
+      let msg = `Выравнивание завершено: синхронизировано ${totalPhrasesAligned} фраз на ${totalTracksProcessed} дорожках!`;
       if (overlapCount > 0 || shortCount > 0) {
-        msg += ` Замечания: наездов: ${overlapCount}, короче саба: ${shortCount}`;
+        msg += ` Вопросы: наездов: ${overlapCount}, недотягов: ${shortCount}`;
       }
       showToast(msg);
     } catch (err: any) {
@@ -4293,15 +3637,76 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 </div>
                               )}
 
-                              {/* Error Output */}
+                              {/* Error Output & Diagnostics */}
                               {separatorOutputMsg && (
-                                <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-xl space-y-1.5 text-red-400 text-[10px]">
-                                  <div className="flex items-center gap-1.5 font-bold">
-                                    <AlertCircle className="w-3.5 h-3.5" />
-                                    <span>Ошибка при разделении</span>
+                                <div className="p-3 bg-red-950/25 border border-red-500/30 rounded-xl space-y-2 text-red-300 text-[10px] animate-fade-in">
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-1.5 font-bold text-red-400">
+                                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                                      <span>Диагностика сбоя audio-separator</span>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        navigator.clipboard.writeText(separatorOutputMsg);
+                                        showToast('Лог ошибки скопирован');
+                                      }}
+                                      className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-[9px] text-zinc-300 hover:text-white transition-colors cursor-pointer"
+                                      title="Копировать полный лог ошибки"
+                                    >
+                                      <Copy className="w-3 h-3" />
+                                      <span>Копировать</span>
+                                    </button>
                                   </div>
-                                  <div className="font-mono bg-zinc-950/60 p-2 rounded-lg border border-white/5 break-all max-h-24 overflow-y-auto leading-normal">
+
+                                  <div className="font-mono text-[9px] bg-zinc-950/80 p-2.5 rounded-lg border border-red-500/20 max-h-36 overflow-y-auto leading-relaxed whitespace-pre-wrap select-text text-zinc-300">
                                     {separatorOutputMsg}
+                                  </div>
+
+                                  {/* Smart Recovery Actions */}
+                                  <div className="flex flex-wrap gap-1.5 pt-1">
+                                    {(!separatorStatus?.separator_installed || separatorOutputMsg.includes('audio-separator') || separatorOutputMsg.includes('onnxruntime')) && (
+                                      <button
+                                        type="button"
+                                        onClick={handleInstallSeparator}
+                                        disabled={isInstallingSeparator}
+                                        className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-1 px-2.5 rounded-lg text-[9px] flex items-center gap-1 transition-colors cursor-pointer"
+                                      >
+                                        <RefreshCw className={`w-3 h-3 ${isInstallingSeparator ? 'animate-spin' : ''}`} />
+                                        <span>Установить зависимости audio-separator</span>
+                                      </button>
+                                    )}
+
+                                    {activePreset.phase1.sourceSeparation.model !== 'fast_dsp_splitter' && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          updatePhase1({
+                                            sourceSeparation: { ...activePreset.phase1.sourceSeparation, model: 'fast_dsp_splitter' }
+                                          });
+                                          setSelectedSeparatorModel('fast_dsp_splitter');
+                                          setSeparatorOutputMsg('');
+                                          showToast('Выбран быстрый стерео/фазовый сплиттер (DSP)');
+                                        }}
+                                        className="bg-zinc-800 hover:bg-zinc-700 text-amber-300 font-bold py-1 px-2.5 rounded-lg text-[9px] flex items-center gap-1 transition-colors cursor-pointer border border-amber-500/30"
+                                      >
+                                        <Sparkles className="w-3 h-3 text-amber-400" />
+                                        <span>Переключить на быстрый DSP сплиттер (без Python)</span>
+                                      </button>
+                                    )}
+
+                                    {useGpuForSeparator && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setUseGpuForSeparator(false);
+                                          showToast('GPU CUDA отключен, будет использоваться CPU');
+                                        }}
+                                        className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-semibold py-1 px-2.5 rounded-lg text-[9px] transition-colors cursor-pointer border border-white/10"
+                                      >
+                                        Отключить GPU CUDA (запуск на CPU)
+                                      </button>
+                                    )}
                                   </div>
                                 </div>
                               )}
@@ -6392,8 +5797,8 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
             {/* Modal Header */}
             <div className="bg-zinc-900/80 px-4 py-3.5 border-b border-white/10 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <div className="text-indigo-400">{activeModal.icon}</div>
-                <h4 className="text-xs font-black uppercase tracking-widest text-zinc-100">{activeModal.title}</h4>
+                <div className="text-indigo-400">{stepContentRegistry.current[activeModal.stepId]?.icon || activeModal.icon}</div>
+                <h4 className="text-xs font-black uppercase tracking-widest text-zinc-100">{stepContentRegistry.current[activeModal.stepId]?.title || activeModal.title}</h4>
               </div>
               <button 
                 onClick={() => setActiveModal(null)}
@@ -6405,7 +5810,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
             
             {/* Modal Body */}
             <div className="p-5 overflow-y-auto space-y-4 custom-scrollbar text-xs">
-              {activeModal.content}
+              {stepContentRegistry.current[activeModal.stepId]?.content || activeModal.content}
             </div>
             
             {/* Modal Footer */}
@@ -6440,6 +5845,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           config={activePreset.phase3}
           mixingType={project?.mixingType || MixingType.DUBBING}
           onClose={() => setActiveStepSettingsModal(null)}
+          onUpdateConfig={(updatedConfig) => updatePhase3(updatedConfig)}
           onSaveConfig={(updatedConfig) => updatePhase3(updatedConfig)}
           onRunStep={(stepId) => {
             if (stepId === 'gainMatching') handleRunGainMatchingStep(true);

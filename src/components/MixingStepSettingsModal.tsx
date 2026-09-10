@@ -187,17 +187,33 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                 <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-4 space-y-3">
                   <div className="flex justify-between items-center">
                     <label className="text-xs font-semibold text-zinc-200">Целевая громкость реплик (Сабы)</label>
-                    <span className="text-xs font-mono font-bold text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded border border-purple-500/20">
-                      {gm.targetDialogueLufs.toFixed(1)} dBFS
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        min="-28"
+                        max="-12"
+                        step="0.1"
+                        value={gm.targetDialogueLufs}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          if (!isNaN(val)) {
+                            handleUpdate({
+                              gainMatching: { ...gm, targetDialogueLufs: val }
+                            });
+                          }
+                        }}
+                        className="w-16 px-1.5 py-0.5 bg-zinc-950 border border-purple-500/30 rounded text-right text-purple-400 font-mono font-bold text-xs focus:outline-none focus:border-purple-500"
+                      />
+                      <span className="text-[10px] text-zinc-400 font-mono">dBFS</span>
+                    </div>
                   </div>
                   <input
                     type="range"
                     min="-28"
                     max="-12"
-                    step="0.5"
+                    step="0.1"
                     value={gm.targetDialogueLufs}
-                    onChange={(e) => onUpdateConfig({
+                    onChange={(e) => handleUpdate({
                       gainMatching: { ...gm, targetDialogueLufs: parseFloat(e.target.value) }
                     })}
                     className="w-full accent-purple-500 cursor-pointer"
@@ -213,17 +229,33 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                 <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-4 space-y-3">
                   <div className="flex justify-between items-center">
                     <label className="text-xs font-semibold text-zinc-200">Ослабление физики/криков (Без сабов)</label>
-                    <span className="text-xs font-mono font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
-                      {gm.physicsOffsetDb.toFixed(1)} dB
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        min="-24"
+                        max="-3"
+                        step="0.1"
+                        value={gm.physicsOffsetDb}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          if (!isNaN(val)) {
+                            handleUpdate({
+                              gainMatching: { ...gm, physicsOffsetDb: val }
+                            });
+                          }
+                        }}
+                        className="w-16 px-1.5 py-0.5 bg-zinc-950 border border-amber-500/30 rounded text-right text-amber-400 font-mono font-bold text-xs focus:outline-none focus:border-amber-500"
+                      />
+                      <span className="text-[10px] text-zinc-400 font-mono">dB</span>
+                    </div>
                   </div>
                   <input
                     type="range"
                     min="-24"
                     max="-3"
-                    step="0.5"
+                    step="0.1"
                     value={gm.physicsOffsetDb}
-                    onChange={(e) => onUpdateConfig({
+                    onChange={(e) => handleUpdate({
                       gainMatching: { ...gm, physicsOffsetDb: parseFloat(e.target.value) }
                     })}
                     className="w-full accent-amber-500 cursor-pointer"
@@ -246,7 +278,7 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                   <input
                     type="checkbox"
                     checked={gm.autoTagCategories}
-                    onChange={(e) => onUpdateConfig({
+                    onChange={(e) => handleUpdate({
                       gainMatching: { ...gm, autoTagCategories: e.target.checked }
                     })}
                     className="w-4 h-4 rounded bg-zinc-800 border-zinc-700 text-purple-600 focus:ring-0 cursor-pointer"
@@ -260,7 +292,7 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                   </div>
                   <select
                     value={gm.measurementMethod}
-                    onChange={(e) => onUpdateConfig({
+                    onChange={(e) => handleUpdate({
                       gainMatching: { ...gm, measurementMethod: e.target.value as any }
                     })}
                     className="bg-zinc-800 border border-zinc-700 text-xs text-zinc-200 rounded-lg px-2.5 py-1 focus:outline-none"
@@ -293,18 +325,34 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                 <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-4 space-y-3">
                   <div className="flex justify-between items-center">
                     <label className="text-xs font-semibold text-zinc-200">Глубина дакинга для Дубляжа (Dubbing)</label>
-                    <span className="text-xs font-mono font-bold text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20">
-                      {duck.dubbingDuckingDb} dB
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        min="-30"
+                        max="-6"
+                        step="0.5"
+                        value={duck.dubbingDuckingDb}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          if (!isNaN(val)) {
+                            handleUpdate({
+                              ducking: { ...duck, dubbingDuckingDb: val }
+                            });
+                          }
+                        }}
+                        className="w-16 px-1.5 py-0.5 bg-zinc-950 border border-indigo-500/30 rounded text-right text-indigo-400 font-mono font-bold text-xs focus:outline-none focus:border-indigo-500"
+                      />
+                      <span className="text-[10px] text-zinc-400 font-mono">dB</span>
+                    </div>
                   </div>
                   <input
                     type="range"
                     min="-30"
                     max="-6"
-                    step="1"
+                    step="0.5"
                     value={duck.dubbingDuckingDb}
-                    onChange={(e) => onUpdateConfig({
-                      ducking: { ...duck, dubbingDuckingDb: parseInt(e.target.value) }
+                    onChange={(e) => handleUpdate({
+                      ducking: { ...duck, dubbingDuckingDb: parseFloat(e.target.value) }
                     })}
                     className="w-full accent-indigo-500 cursor-pointer"
                   />
@@ -318,18 +366,34 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                 <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-4 space-y-3">
                   <div className="flex justify-between items-center">
                     <label className="text-xs font-semibold text-zinc-200">Глубина дакинга для Рекаста (Recast)</label>
-                    <span className="text-xs font-mono font-bold text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20">
-                      {duck.recastDuckingDb} dB
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        min="-26"
+                        max="-6"
+                        step="0.5"
+                        value={duck.recastDuckingDb}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          if (!isNaN(val)) {
+                            handleUpdate({
+                              ducking: { ...duck, recastDuckingDb: val }
+                            });
+                          }
+                        }}
+                        className="w-16 px-1.5 py-0.5 bg-zinc-950 border border-indigo-500/30 rounded text-right text-indigo-400 font-mono font-bold text-xs focus:outline-none focus:border-indigo-500"
+                      />
+                      <span className="text-[10px] text-zinc-400 font-mono">dB</span>
+                    </div>
                   </div>
                   <input
                     type="range"
                     min="-26"
                     max="-6"
-                    step="1"
+                    step="0.5"
                     value={duck.recastDuckingDb}
-                    onChange={(e) => onUpdateConfig({
-                      ducking: { ...duck, recastDuckingDb: parseInt(e.target.value) }
+                    onChange={(e) => handleUpdate({
+                      ducking: { ...duck, recastDuckingDb: parseFloat(e.target.value) }
                     })}
                     className="w-full accent-indigo-500 cursor-pointer"
                   />
@@ -351,7 +415,7 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                     <input
                       type="number"
                       value={duck.attackMs}
-                      onChange={(e) => onUpdateConfig({
+                      onChange={(e) => handleUpdate({
                         ducking: { ...duck, attackMs: Math.max(5, parseInt(e.target.value) || 40) }
                       })}
                       className="w-full bg-zinc-800 border border-zinc-700 text-xs font-mono text-zinc-200 rounded-lg p-2 focus:outline-none"
@@ -363,7 +427,7 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                     <input
                       type="number"
                       value={duck.holdMs}
-                      onChange={(e) => onUpdateConfig({
+                      onChange={(e) => handleUpdate({
                         ducking: { ...duck, holdMs: Math.max(0, parseInt(e.target.value) || 250) }
                       })}
                       className="w-full bg-zinc-800 border border-zinc-700 text-xs font-mono text-zinc-200 rounded-lg p-2 focus:outline-none"
@@ -375,7 +439,7 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                     <input
                       type="number"
                       value={duck.releaseMs}
-                      onChange={(e) => onUpdateConfig({
+                      onChange={(e) => handleUpdate({
                         ducking: { ...duck, releaseMs: Math.max(50, parseInt(e.target.value) || 300) }
                       })}
                       className="w-full bg-zinc-800 border border-zinc-700 text-xs font-mono text-zinc-200 rounded-lg p-2 focus:outline-none"
@@ -412,10 +476,10 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                   <input
                     type="checkbox"
                     checked={fx.detectReverb}
-                    onChange={(e) => onUpdateConfig({
+                    onChange={(e) => handleUpdate({
                       autoFxAnalysis: { ...fx, detectReverb: e.target.checked }
                     })}
-                    className="w-4 h-4 rounded bg-zinc-800 border-zinc-700 text-emerald-600 focus:ring-0"
+                    className="w-4 h-4 rounded bg-zinc-800 border-zinc-700 text-emerald-600 focus:ring-0 cursor-pointer"
                   />
                 </label>
 
@@ -430,10 +494,10 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                   <input
                     type="checkbox"
                     checked={fx.detectDelay}
-                    onChange={(e) => onUpdateConfig({
+                    onChange={(e) => handleUpdate({
                       autoFxAnalysis: { ...fx, detectDelay: e.target.checked }
                     })}
-                    className="w-4 h-4 rounded bg-zinc-800 border-zinc-700 text-emerald-600 focus:ring-0"
+                    className="w-4 h-4 rounded bg-zinc-800 border-zinc-700 text-emerald-600 focus:ring-0 cursor-pointer"
                   />
                 </label>
 
@@ -448,10 +512,10 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                   <input
                     type="checkbox"
                     checked={fx.detectSpecialFx}
-                    onChange={(e) => onUpdateConfig({
+                    onChange={(e) => handleUpdate({
                       autoFxAnalysis: { ...fx, detectSpecialFx: e.target.checked }
                     })}
-                    className="w-4 h-4 rounded bg-zinc-800 border-zinc-700 text-emerald-600 focus:ring-0"
+                    className="w-4 h-4 rounded bg-zinc-800 border-zinc-700 text-emerald-600 focus:ring-0 cursor-pointer"
                   />
                 </label>
 
@@ -466,10 +530,10 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                   <input
                     type="checkbox"
                     checked={fx.detectPanning}
-                    onChange={(e) => onUpdateConfig({
+                    onChange={(e) => handleUpdate({
                       autoFxAnalysis: { ...fx, detectPanning: e.target.checked }
                     })}
-                    className="w-4 h-4 rounded bg-zinc-800 border-zinc-700 text-emerald-600 focus:ring-0"
+                    className="w-4 h-4 rounded bg-zinc-800 border-zinc-700 text-emerald-600 focus:ring-0 cursor-pointer"
                   />
                 </label>
               </div>
@@ -479,14 +543,32 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                 <div className="space-y-2">
                   <div className="flex justify-between items-center">
                     <label className="text-xs font-semibold text-zinc-200">Чувствительность детектора эффектов</label>
-                    <span className="text-xs font-mono font-bold text-emerald-400">{fx.sensitivity}%</span>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        min="30"
+                        max="100"
+                        step="1"
+                        value={fx.sensitivity}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value);
+                          if (!isNaN(val)) {
+                            handleUpdate({
+                              autoFxAnalysis: { ...fx, sensitivity: val }
+                            });
+                          }
+                        }}
+                        className="w-16 px-1.5 py-0.5 bg-zinc-950 border border-emerald-500/30 rounded text-right text-emerald-400 font-mono font-bold text-xs focus:outline-none focus:border-emerald-500"
+                      />
+                      <span className="text-[10px] text-zinc-400 font-mono">%</span>
+                    </div>
                   </div>
                   <input
                     type="range"
                     min="30"
                     max="100"
                     value={fx.sensitivity}
-                    onChange={(e) => onUpdateConfig({
+                    onChange={(e) => handleUpdate({
                       autoFxAnalysis: { ...fx, sensitivity: parseInt(e.target.value) }
                     })}
                     className="w-full accent-emerald-500 cursor-pointer"
@@ -501,7 +583,7 @@ export const MixingStepSettingsModal: React.FC<MixingStepSettingsModalProps> = (
                   <input
                     type="checkbox"
                     checked={fx.applyToDub}
-                    onChange={(e) => onUpdateConfig({
+                    onChange={(e) => handleUpdate({
                       autoFxAnalysis: { ...fx, applyToDub: e.target.checked }
                     })}
                     className="w-4 h-4 rounded bg-zinc-800 border-zinc-700 text-emerald-600 focus:ring-0 cursor-pointer"

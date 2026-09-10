@@ -2,6 +2,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use std::process::Stdio;
 use std::path::Path;
 use std::time::SystemTime;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use serde::Serialize;
 
@@ -160,6 +162,7 @@ pub async fn install_audio_separator_pkg(app_handle: AppHandle, use_gpu: bool) -
             "-m".to_string(), 
             "pip".to_string(), 
             "install".to_string(),
+            "--upgrade".to_string(),
             "audio-separator[gpu]".to_string(),
             "onnxruntime-gpu".to_string()
         ]
@@ -168,6 +171,7 @@ pub async fn install_audio_separator_pkg(app_handle: AppHandle, use_gpu: bool) -
             "-m".to_string(), 
             "pip".to_string(), 
             "install".to_string(),
+            "--upgrade".to_string(),
             "audio-separator[cpu]".to_string()
         ]
     };
@@ -185,6 +189,7 @@ pub async fn install_audio_separator_pkg(app_handle: AppHandle, use_gpu: bool) -
             Ok(c) => c,
             Err(e) => {
                 let _ = app_handle_progress.emit("separator-install-log", format!("Ошибка запуска pip: {}", e));
+                let _ = app_handle_progress.emit("separator-install-complete", false);
                 return;
             }
         };
@@ -215,7 +220,9 @@ pub async fn install_audio_separator_pkg(app_handle: AppHandle, use_gpu: bool) -
                 }
             }
         }
-        let _ = app_handle_progress.emit("separator-install-complete", true);
+        let exit_status = child.wait().await;
+        let success = exit_status.map(|s| s.success()).unwrap_or(false);
+        let _ = app_handle_progress.emit("separator-install-complete", success);
     });
 
     Ok("Установка запущена в фоновом режиме".to_string())
@@ -243,47 +250,130 @@ pub async fn run_audio_separator_cmd(
         let _ = std::fs::create_dir_all(&norm_output_dir);
     }
 
+    // 1. Быстрый стерео/фазовый сплиттер (DSP) без необходимости установки Python / ONNX
+    if model_filename == "fast_dsp_splitter" {
+        let base_name = path_input.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
+        let vocals_out = Path::new(&norm_output_dir).join(format!("{}_(Vocals)_fast_dsp.wav", base_name));
+        let music_out = Path::new(&norm_output_dir).join(format!("{}_(Instrumental)_fast_dsp.wav", base_name));
+        
+        let vocals_str = vocals_out.to_string_lossy().to_string();
+        let music_str = music_out.to_string_lossy().to_string();
+
+        let _ = app_handle.emit("separator-progress", SeparatorProgress {
+            percent: 25.0,
+            stage: "DSP фазовое разделение...".to_string(),
+            log_line: "Выделение центрального голосового канала...".to_string(),
+        });
+
+        // Голос: центральный канал (M = L + R) с полосовым голосовым фильтром 160-7500 Гц
+        let _ = std::process::Command::new("ffmpeg")
+            .args(&[
+                "-y",
+                "-i", &norm_input,
+                "-af", "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1,highpass=f=160,lowpass=f=7500",
+                &vocals_str
+            ])
+            .output();
+
+        let _ = app_handle.emit("separator-progress", SeparatorProgress {
+            percent: 65.0,
+            stage: "DSP фазовое разделение...".to_string(),
+            log_line: "Подавление центрального канала (фонограмма/музыка)...".to_string(),
+        });
+
+        // Музыка / M&E: противофазное подавление центра (S = L - R)
+        let _ = std::process::Command::new("ffmpeg")
+            .args(&[
+                "-y",
+                "-i", &norm_input,
+                "-af", "pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0",
+                &music_str
+            ])
+            .output();
+
+        let _ = app_handle.emit("separator-progress", SeparatorProgress {
+            percent: 100.0,
+            stage: "Готово!".to_string(),
+            log_line: "DSP разделение успешно завершено".to_string(),
+        });
+
+        return Ok(vocals_str);
+    }
+
+    // 2. Проверка доступности Python и пакета audio-separator
     let status = check_audio_separator_status(app_handle.clone()).await?;
-    let python_cmd = if status.python_found { status.python_cmd } else { "python".to_string() };
-
-    // Будем запускать CLI через python -m audio_separator.cli
-    let mut args = vec![
-        "-m".to_string(),
-        "audio_separator.cli".to_string(),
-        norm_input.clone(),
-        "--model_filename".to_string(),
-        model_filename.clone(),
-        "--output_dir".to_string(),
-        norm_output_dir.clone(),
-        "--output_format".to_string(),
-        "WAV".to_string(),
-    ];
-
-    if use_gpu {
-        args.push("--use_gpu".to_string());
-    } else {
-        // Явно отключаем gpu если не просили
-        args.push("--cpu".to_string());
+    if !status.python_found {
+        return Err("Python 3 не обнаружен в вашей системе. Для использования ИИ моделей (UVR5/Demucs) установите Python 3.10+ и зависимости, либо переключитесь на 'Быстрый стерео/фазовый сплиттер (DSP)'.".to_string());
+    }
+    if !status.separator_installed {
+        return Err("Пакет audio-separator не установлен в среде Python. Нажмите кнопку 'Установить audio-separator' в панели UVR5 или выберите 'Быстрый стерео/фазовый сплиттер (DSP)'.".to_string());
     }
 
-    if denoise {
-        args.push("--denoise".to_string());
-        args.push("true".to_string());
-    }
+    let python_cmd = status.python_cmd;
 
     // Сохраним список файлов в выходной директории ДО запуска, чтобы найти новые файлы
     let pre_files = get_files_in_dir(&norm_output_dir);
 
-    let app_handle_prog = app_handle.clone();
-    let model_filename_clone = model_filename.clone();
+    // Python runner script: использует API audio_separator.separator.Separator напрямую
+    // Это исключает любые ошибки аргументов CLI (--cpu, --use_gpu, --denoise true)
+    let py_runner = r#"
+import sys, os, json, traceback
+
+input_file = sys.argv[1]
+model_filename = sys.argv[2]
+output_dir = sys.argv[3]
+use_gpu = sys.argv[4].lower() == 'true'
+denoise = sys.argv[5].lower() == 'true'
+
+if not use_gpu:
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''
+
+try:
+    from audio_separator.separator import Separator
+    os.makedirs(output_dir, exist_ok=True)
+    
+    kwargs = {
+        'output_dir': output_dir,
+        'output_format': 'WAV',
+    }
+    if denoise:
+        kwargs['mdx_params'] = {'denoise': True}
+        
+    try:
+        separator = Separator(**kwargs)
+    except Exception:
+        separator = Separator(output_dir=output_dir, output_format='WAV')
+
+    print(f'Loading model: {model_filename}...')
+    separator.load_model(model_filename)
+    print(f'Separating: {input_file}...')
+    outputs = separator.separate(input_file)
+    print('SUCCESS_OUTPUT_FILES:' + json.dumps(outputs))
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
+"#;
+
+    let mut cmd = tokio::process::Command::new(&python_cmd);
+    cmd.args(&[
+        "-c",
+        py_runner,
+        &norm_input,
+        &model_filename,
+        &norm_output_dir,
+        if use_gpu { "true" } else { "false" },
+        if denoise { "true" } else { "false" },
+    ]);
+    cmd.env("PYTHONIOENCODING", "utf-8");
+    if !use_gpu {
+        cmd.env("CUDA_VISIBLE_DEVICES", "");
+    }
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
 
     // Запуск процесса разделения
-    let mut child = tokio::process::Command::new(&python_cmd)
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Не удалось запустить audio-separator: {}", e))?;
+    let mut child = cmd.spawn()
+        .map_err(|e| format!("Не удалось запустить процесс Python audio-separator: {}", e))?;
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -291,14 +381,33 @@ pub async fn run_audio_separator_cmd(
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
 
-    // Прогресс бар и парсинг
-    tauri::async_runtime::spawn(async move {
+    let log_history = Arc::new(Mutex::new(Vec::<String>::new()));
+    let output_files_found = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let log_history_clone = log_history.clone();
+    let output_files_clone = output_files_found.clone();
+    let app_handle_prog = app_handle.clone();
+    let model_filename_clone = model_filename.clone();
+
+    // Прогресс бар, парсинг логов и сохранение вывода для отладки
+    let monitor_task = tokio::spawn(async move {
         loop {
             tokio::select! {
                 line_res = stdout_reader.next_line() => {
                     match line_res {
                         Ok(Some(line)) => {
-                            parse_and_emit_progress(&app_handle_prog, &line, &model_filename_clone);
+                            if line.starts_with("SUCCESS_OUTPUT_FILES:") {
+                                let json_part = &line["SUCCESS_OUTPUT_FILES:".len()..];
+                                if let Ok(parsed) = serde_json::from_str::<Vec<String>>(json_part) {
+                                    let mut out = output_files_clone.lock().await;
+                                    *out = parsed;
+                                }
+                            } else {
+                                parse_and_emit_progress(&app_handle_prog, &line, &model_filename_clone);
+                            }
+                            let mut history = log_history_clone.lock().await;
+                            if history.len() > 60 { history.remove(0); }
+                            history.push(line);
                         }
                         _ => break,
                     }
@@ -307,6 +416,9 @@ pub async fn run_audio_separator_cmd(
                     match line_res {
                         Ok(Some(line)) => {
                             parse_and_emit_progress(&app_handle_prog, &line, &model_filename_clone);
+                            let mut history = log_history_clone.lock().await;
+                            if history.len() > 60 { history.remove(0); }
+                            history.push(line);
                         }
                         _ => {}
                     }
@@ -315,35 +427,82 @@ pub async fn run_audio_separator_cmd(
         }
     });
 
-    // Ожидаем завершения (для синхронного таури-вызова, либо вернем промис)
-    // Так как это асинхронная команда Tauri, мы можем подождать окончание процесса здесь
     let status_code = child.wait().await.map_err(|e| e.to_string())?;
-    
+    let _ = monitor_task.await;
+
     if !status_code.success() {
-        return Err("Процесс audio-separator завершился с ошибкой. Проверьте установку зависимостей и ONNX моделей.".to_string());
+        let history = log_history.lock().await;
+        let last_logs = history.join("\n");
+        let diagnostic = if last_logs.contains("No module named 'audio_separator'") {
+            "Библиотека audio-separator не найдена в текущем Python окружении. Нажмите кнопку 'Установить audio-separator'.".to_string()
+        } else if last_logs.contains("No module named 'onnxruntime'") || last_logs.contains("onnxruntime") {
+            "Отсутствует библиотека onnxruntime или onnxruntime-gpu. Переустановите зависимости через кнопку 'Установить audio-separator'.".to_string()
+        } else if last_logs.contains("CUDA") || last_logs.contains("OutOfMemory") || last_logs.contains("out of memory") {
+            "Недостаточно видеопамяти GPU (CUDA). Отключите 'GPU CUDA' или выберите более компактную модель.".to_string()
+        } else if last_logs.contains("ConnectionError") || last_logs.contains("HTTPError") || last_logs.contains("huggingface") || last_logs.contains("download") {
+            "Ошибка загрузки модели с HuggingFace/GitHub. Проверьте подключение к сети интернет.".to_string()
+        } else if last_logs.contains("unrecognized arguments") {
+            "Несовместимые аргументы CLI audio-separator.".to_string()
+        } else {
+            format!("Процесс audio-separator завершился с кодом ошибки {}", status_code.code().unwrap_or(-1))
+        };
+
+        return Err(format!(
+            "{}\n\nПодробности ошибки:\n{}",
+            diagnostic,
+            if last_logs.trim().is_empty() { "Нет вывода от процесса" } else { &last_logs }
+        ));
     }
 
-    // Ищем получившийся файл в output_dir
+    // 1. Проверяем файлы из SUCCESS_OUTPUT_FILES
+    {
+        let parsed_files = output_files_found.lock().await;
+        if !parsed_files.is_empty() {
+            if let Some(vocal_file) = parsed_files.iter().find(|f| f.contains("Vocals") || f.contains("vocals") || f.contains("voice")) {
+                let full_path = if Path::new(vocal_file).is_absolute() {
+                    vocal_file.clone()
+                } else {
+                    Path::new(&norm_output_dir).join(vocal_file).to_string_lossy().to_string()
+                };
+                if Path::new(&full_path).exists() {
+                    return Ok(full_path);
+                }
+            }
+            if let Some(first_file) = parsed_files.first() {
+                let full_path = if Path::new(first_file).is_absolute() {
+                    first_file.clone()
+                } else {
+                    Path::new(&norm_output_dir).join(first_file).to_string_lossy().to_string()
+                };
+                if Path::new(&full_path).exists() {
+                    return Ok(full_path);
+                }
+            }
+        }
+    }
+
+    // 2. Ищем новые файлы в output_dir
     let post_files = get_files_in_dir(&norm_output_dir);
-    
-    // Ищем новые файлы, которые появились в процессе
     let mut new_files: Vec<String> = post_files.iter()
         .filter(|f| !pre_files.contains(*f))
         .cloned()
         .collect();
 
-    // Сортируем по времени модификации (самые новые первыми)
     new_files.sort_by(|a, b| {
         let meta_a = std::fs::metadata(a).map(|m| m.modified().unwrap_or(SystemTime::UNIX_EPOCH)).unwrap_or(SystemTime::UNIX_EPOCH);
         let meta_b = std::fs::metadata(b).map(|m| m.modified().unwrap_or(SystemTime::UNIX_EPOCH)).unwrap_or(SystemTime::UNIX_EPOCH);
         meta_b.cmp(&meta_a)
     });
 
+    if let Some(vocal_file) = new_files.iter().find(|f| f.contains("Vocals") || f.contains("vocals") || f.contains("voice")) {
+        return Ok(vocal_file.clone());
+    }
+
     if let Some(new_file) = new_files.first() {
         return Ok(new_file.clone());
     }
 
-    // Если новые файлы не найдены (например, файл перезаписался), ищем последний модифицированный файл с похожим именем
+    // 3. Ищем последний модифицированный файл с похожим именем
     let input_base_name = path_input.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let mut matched_files: Vec<String> = post_files.iter()
         .filter(|f| {
@@ -360,11 +519,15 @@ pub async fn run_audio_separator_cmd(
         meta_b.cmp(&meta_a)
     });
 
+    if let Some(vocal_file) = matched_files.iter().find(|f| f.contains("Vocals") || f.contains("vocals") || f.contains("voice")) {
+        return Ok(vocal_file.clone());
+    }
+
     if let Some(matched) = matched_files.first() {
         return Ok(matched.clone());
     }
 
-    Err("Не удалось локализовать выходной файл обработки audio-separator".to_string())
+    Err("Не удалось обнаружить результат разделения в выходной папке. Проверьте права доступа и свободное место на диске.".to_string())
 }
 
 fn get_files_in_dir(dir: &str) -> Vec<String> {

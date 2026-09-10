@@ -15,25 +15,38 @@ export interface SpeechRegion {
 }
 
 export class TimingAlignmentService {
+  static isDubTrack(track: AudioTrack): boolean {
+    const name = (track.name || '').toLowerCase().trim();
+    if (track.type === 'voice' || (track.type as string) === 'dub' || (track.type as string) === 'user') return true;
+    if (track.type === 'original') return false;
+    // Check if it matches voice/dub actor tracks like "Голос 1", "Голос дабера", "Дорожка 2", "Mic"
+    if (/^(голос|дорожка|дорога|актер|дабер|диктор|дубляж|dub|voice|mic|audio\s*\d+)/i.test(name)) {
+      return true;
+    }
+    return false;
+  }
+
   /**
    * Находит дорожку с изолированными оригинальными голосами (Вокал) с наивысшим приоритетом.
+   * Исключает дорожки записи даберов.
    */
   static findOriginalVoiceTrack(tracks: AudioTrack[]): AudioTrack | undefined {
-    // 1. Приоритет: дорожка, созданная разделением UVR5 / Demucs
+    // 1. Приоритет: явная дорожка изолированного вокала из стемов UVR5 / Demucs
     const vocalStem = tracks.find(t => 
       t.name === 'Голоса (Вокал)' || 
       t.name === 'Оригинал: Голоса' || 
       t.name === 'Vocals' || 
-      t.name === 'Вокал'
+      t.name === 'Оригинал: Вокал' ||
+      t.id === 'original-vocals'
     );
     if (vocalStem) return vocalStem;
 
-    // 2. Вторичный приоритет: дорожка с именем "Оригинал" или содержащая "голос" / "вокал"
-    const generalVocal = tracks.find(t => 
-      t.name.toLowerCase().includes('голос') || 
-      t.name.toLowerCase().includes('vocal') || 
-      t.name.toLowerCase().includes('оригинал')
-    );
+    // 2. Вторичный приоритет: дорожка с типом original или явным словом "оригинал"/"reference", исключая треки даберов
+    const generalVocal = tracks.find(t => {
+      const name = (t.name || '').toLowerCase();
+      const isOriginalName = name.includes('оригинал') || name.includes('original') || name.includes('reference');
+      return (t.type === 'original' || isOriginalName) && !this.isDubTrack(t);
+    });
     return generalVocal;
   }
 
@@ -53,20 +66,44 @@ export class TimingAlignmentService {
       return [{ start: 0, end: totalDuration, duration: totalDuration }];
     }
 
-    // Перевод dB порога в линейную амплитуду (0..1)
-    const linearThreshold = Math.max(0.015, Math.pow(10, thresholdDb / 20));
+    // Определяем максимальный размах для корректной нормализации
+    let maxAbs = 0;
+    for (let i = 0; i < peaks.length; i++) {
+      const abs = Math.abs(peaks[i]);
+      if (abs > maxAbs) maxAbs = abs;
+    }
+
+    if (maxAbs <= 0.00001) {
+      // Полная цифровая тишина во всем файле
+      return [];
+    }
+
+    // Если данные в шкале 0..255 (байты) или 0..100, нормируем
+    const scale = maxAbs > 1.5 ? (maxAbs > 100 ? 255.0 : 100.0) : Math.max(0.01, maxAbs);
+    
+    // Перевод dB порога в нормализованную линейную шкалу (0..1)
+    const targetLinearThreshold = Math.max(0.001, Math.pow(10, thresholdDb / 20));
     const secPerSample = totalDuration / peaks.length;
     const minSilenceSamples = Math.max(2, Math.round((minSilenceDurationMs / 1000) / secPerSample));
     const minSegmentSamples = Math.max(2, Math.round((minSegmentDurationMs / 1000) / secPerSample));
-    const padSamples = Math.round((padSilenceMs / 1000) / secPerSample);
+    const padSamples = Math.max(1, Math.round((padSilenceMs / 1000) / secPerSample));
+
+    // Сглаживание скользящим средним (3 сэмпла) для устранения микро-провалов
+    const smoothed: number[] = new Array(peaks.length);
+    for (let i = 0; i < peaks.length; i++) {
+      const prev = i > 0 ? Math.abs(peaks[i - 1]) : Math.abs(peaks[i]);
+      const curr = Math.abs(peaks[i]);
+      const next = i < peaks.length - 1 ? Math.abs(peaks[i + 1]) : curr;
+      smoothed[i] = ((prev + curr + next) / 3) / scale;
+    }
 
     const regions: SpeechRegion[] = [];
     let inSpeech = false;
     let speechStartIdx = 0;
     let silenceCounter = 0;
 
-    for (let i = 0; i < peaks.length; i++) {
-      const isAudible = peaks[i] >= linearThreshold;
+    for (let i = 0; i < smoothed.length; i++) {
+      const isAudible = smoothed[i] >= targetLinearThreshold;
 
       if (!inSpeech) {
         if (isAudible) {
@@ -77,9 +114,9 @@ export class TimingAlignmentService {
       } else {
         if (!isAudible) {
           silenceCounter++;
-          if (silenceCounter >= minSilenceSamples || i === peaks.length - 1) {
+          if (silenceCounter >= minSilenceSamples || i === smoothed.length - 1) {
             // Конец речевой фразы
-            const speechEndIdx = Math.min(peaks.length - 1, (i - silenceCounter) + padSamples);
+            const speechEndIdx = Math.min(smoothed.length - 1, (i - silenceCounter) + padSamples);
             const spanSamples = speechEndIdx - speechStartIdx;
 
             if (spanSamples >= minSegmentSamples) {
@@ -87,7 +124,7 @@ export class TimingAlignmentService {
               const endSec = Math.min(totalDuration, parseFloat((speechEndIdx * secPerSample).toFixed(3)));
               const durSec = parseFloat((endSec - startSec).toFixed(3));
 
-              if (durSec > 0.05) {
+              if (durSec >= 0.1) {
                 regions.push({ start: startSec, end: endSec, duration: durSec });
               }
             }
@@ -103,11 +140,14 @@ export class TimingAlignmentService {
 
     // Если речь была до самого конца дорожки
     if (inSpeech) {
-      const spanSamples = (peaks.length - 1) - speechStartIdx;
+      const spanSamples = (smoothed.length - 1) - speechStartIdx;
       if (spanSamples >= minSegmentSamples) {
         const startSec = parseFloat((speechStartIdx * secPerSample).toFixed(3));
         const endSec = parseFloat(totalDuration.toFixed(3));
-        regions.push({ start: startSec, end: endSec, duration: parseFloat((endSec - startSec).toFixed(3)) });
+        const durSec = parseFloat((endSec - startSec).toFixed(3));
+        if (durSec >= 0.1) {
+          regions.push({ start: startSec, end: endSec, duration: durSec });
+        }
       }
     }
 
@@ -298,9 +338,9 @@ export class TimingAlignmentService {
     subtitles: SubtitleLine[],
     mixingType: MixingType,
     config: TimingAlignmentConfig
-  ): Promise<{ updatedTrack: AudioTrack; issues: TimingIssue[] }> {
+  ): Promise<{ updatedTrack: AudioTrack; issues: TimingIssue[]; alignedCount: number; avgShiftMs: number }> {
     if (!track.segments || track.segments.length === 0) {
-      return { updatedTrack: track, issues: [] };
+      return { updatedTrack: track, issues: [], alignedCount: 0, avgShiftMs: 0 };
     }
 
     const leadSeconds = (config.voiceoverLeadMs || 0) / 1000;
@@ -313,71 +353,103 @@ export class TimingAlignmentService {
     const segments = [...track.segments].sort((a, b) => a.startTime - b.startTime);
     const updatedSegments: AudioSegment[] = [];
     const issues: TimingIssue[] = [];
+    let alignedCount = 0;
+    let totalShiftMs = 0;
 
-    // Извлекаем фразы оригинального вокального трека (если есть)
-    const originalVoiceSegments = originalVoiceTrack?.segments 
-      ? [...originalVoiceTrack.segments].sort((a, b) => a.startTime - b.startTime)
-      : [];
+    // 2. Извлекаем точные границы речевых фраз оригинала:
+    // Даже если оригинальный вокальный трек не нарезан и идет одним 20-минутным куском,
+    // мы детектируем VAD-регионы фраз оригинального диктора по огибающей!
+    const originalSpeechRegions: SpeechRegion[] = [];
+    if (originalVoiceTrack && originalVoiceTrack.segments) {
+      for (const origSeg of originalVoiceTrack.segments) {
+        if (origSeg.waveform && origSeg.waveform.length > 0) {
+          const regions = this.detectSpeechRegionsFromPeaks(origSeg.waveform, origSeg.duration, -42, 300, 150);
+          for (const r of regions) {
+            originalSpeechRegions.push({
+              start: parseFloat((origSeg.startTime + r.start).toFixed(3)),
+              end: parseFloat((origSeg.startTime + r.end).toFixed(3)),
+              duration: parseFloat(r.duration.toFixed(3))
+            });
+          }
+        } else {
+          // Если сегмент уже короткий (< 10 сек), считаем его отдельной фразой
+          originalSpeechRegions.push({
+            start: origSeg.startTime,
+            end: origSeg.startTime + origSeg.duration,
+            duration: origSeg.duration
+          });
+        }
+      }
+    }
+    originalSpeechRegions.sort((a, b) => a.start - b.start);
 
     for (let i = 0; i < segments.length; i++) {
       const seg = { ...segments[i] };
 
-      // 2. Распознаем фразу и связываем с субтитрами
+      // 3. Распознаем фразу и связываем с субтитрами (если есть)
       const { text, confidence, matchedSub } = await this.transcribePhraseWithWhisper(seg, subtitles, track.name);
       seg.text = seg.text || text;
       seg.whisperText = text;
       seg.whisperConfidence = confidence;
       seg.matchedSubId = matchedSub?.id;
 
-      // 3. ОПРЕДЕЛЕНИЕ ЦЕЛЕВОГО ТАЙМИНГА (ПРИОРИТЕТ: ОРИГИНАЛЬНАЯ ДОРОЖКА ГОЛОСОВ)
+      // 4. ОПРЕДЕЛЕНИЕ ЦЕЛЕВОГО ТАЙМИНГА
       let targetStartTime = seg.startTime;
-      let targetDuration = matchedSub ? (matchedSub.end - matchedSub.start) : seg.duration;
+      let targetDuration = seg.duration;
+      let hasTarget = false;
 
-      // Ищем соответствующий фрагмент на оригинальной дорожке голосов
-      let matchedOrigVoice: AudioSegment | undefined = undefined;
-      if (originalVoiceSegments.length > 0) {
-        matchedOrigVoice = originalVoiceSegments.find(origSeg => {
-          if (matchedSub) {
-            return Math.abs(origSeg.startTime - matchedSub.start) < 1.0;
+      // Приоритет A: Субтитр (если привязан или найден поблизости)
+      const directSub = matchedSub || this.findClosestSubtitle(seg.startTime, seg.duration, subtitles, track.name);
+      if (directSub) {
+        targetStartTime = directSub.start;
+        targetDuration = directSub.end - directSub.start;
+        hasTarget = true;
+      }
+
+      // Приоритет B: Речевой регион оригинального голоса (если включен приоритет оригинала)
+      if (originalSpeechRegions.length > 0) {
+        let bestRegion: SpeechRegion | undefined = undefined;
+        let minDiff = 12.0; // Ищем в окне 12 секунд вокруг фразы
+
+        for (const r of originalSpeechRegions) {
+          const diff = Math.abs(r.start - seg.startTime);
+          if (diff < minDiff) {
+            minDiff = diff;
+            bestRegion = r;
           }
-          return Math.abs(origSeg.startTime - seg.startTime) < 3.0;
-        });
+        }
+
+        if (bestRegion && (config.alignPriority === 'original_voice' || !hasTarget)) {
+          targetStartTime = bestRegion.start;
+          targetDuration = bestRegion.duration;
+          hasTarget = true;
+        }
       }
 
-      if (matchedOrigVoice && config.alignPriority === 'original_voice') {
-        // Высший приоритет: оригинальный голос из стемов UVR5
-        targetStartTime = matchedOrigVoice.startTime;
-        targetDuration = matchedOrigVoice.duration;
-      } else if (matchedSub) {
-        // Вторичный приоритет: субтитры
-        targetStartTime = matchedSub.start;
-        targetDuration = matchedSub.end - matchedSub.start;
-      }
-
-      // Применяем возможное опциональное смещение для закадра
-      if (isVoiceover && leadSeconds !== 0) {
+      // Применяем смещение для закадра (Voiceover lead, обычно 0.2 - 0.5с)
+      if (isVoiceover && leadSeconds !== 0 && hasTarget) {
         targetStartTime = Math.max(0, targetStartTime + leadSeconds);
       }
 
-      // 4. ГЛАВНОЕ ПРАВИЛО: СОВПАДЕНИЕ НАЧАЛА ФРАЗЫ
-      // Чтобы дабер и оригинал начинали говорить вместе!
-      if (config.alignToOriginalStart) {
+      // 5. ГЛАВНОЕ ПРАВИЛО: СОВПАДЕНИЕ НАЧАЛА ФРАЗЫ
+      if (config.alignToOriginalStart && hasTarget) {
+        const shiftMs = Math.round(Math.abs(targetStartTime - seg.startTime) * 1000);
+        if (shiftMs > 15) {
+          alignedCount++;
+          totalShiftMs += shiftMs;
+        }
         seg.startTime = parseFloat(targetStartTime.toFixed(3));
         seg.alignedWithOriginal = true;
         seg.targetStartTime = targetStartTime;
         seg.targetDuration = targetDuration;
       }
 
-      // 5. ПРАВИЛА ПО ТИПАМ ПРОЕКТОВ (Закадр, Рекаст, Редаб, Дубляж)
+      // 6. ПРАВИЛА ПО ТИПАМ ПРОЕКТОВ (Закадр, Рекаст, Редаб, Дубляж)
       seg.timingWarning = undefined;
       seg.timingWarningDetail = undefined;
 
       if (isVoiceover) {
-        // ЗАКАДР: Длительность не важна. Физика, охи/вздохи не озвучиваются
-        // Оставляем естественную скорость актера без принудительного стретча
         seg.playbackRate = 1.0;
-
-        // Если в тексте указана чисто физика [вздох], [кряхтит], [стон] - помечаем для звукорежиссера
         if (/\[(вздох|стон|кряхтит|охает|кашель|sigh|gasp|groan)\]/i.test(seg.text || '')) {
           if (config.projectTypeRules.ignoreBreathsAndSighsInVO) {
             seg.timingWarning = 'desync';
@@ -385,17 +457,12 @@ export class TimingAlignmentService {
           }
         }
       } else if (isRecast || isRedub) {
-        // РЕКАСТ / РЕДАБ:
-        // Охи-вздохи, влияющие на речь, озвучиваются.
-        // ВАЖНОЕ ПРАВИЛО ДЛИТЕЛЬНОСТИ: фраза должна быть НЕ МЕНЬШЕ, чем саб (больше - нормально, меньше - нет)
         seg.playbackRate = 1.0;
-
-        if (config.projectTypeRules.enforceMinSubDuration && matchedSub) {
-          const subDuration = matchedSub.end - matchedSub.start;
+        if (config.projectTypeRules.enforceMinSubDuration && directSub) {
+          const subDuration = directSub.end - directSub.start;
           const delta = subDuration - seg.duration;
 
           if (delta > 0.15) {
-            // Фраза короче саба! Это недопустимо для рекаста
             seg.timingWarning = 'too_short';
             seg.timingWarningDetail = `Фраза (${seg.duration.toFixed(2)} с) короче саба (${subDuration.toFixed(2)} с) на ${delta.toFixed(2)} с`;
             
@@ -412,25 +479,20 @@ export class TimingAlignmentService {
               title: 'Фраза короче субтитра',
               description: `Рекаст требует, чтобы фраза длилась не меньше саба. Недотяг: ${delta.toFixed(2)} с.`,
               severity: 'warning',
-              matchedSubText: matchedSub.text,
+              matchedSubText: directSub.text,
               canAutoFix: true
             });
           }
         }
       } else if (isDubbing) {
-        // ДУБЛЯЖ:
-        // Полное озвучание с полным липсинком.
-        // Синхронизируем и начало, и конец под артикуляцию рта через Smart Stretch
         if (config.projectTypeRules.fullLipSync && targetDuration > 0 && seg.duration > 0) {
-          const maxRatio = config.smartAlign.maxStretchRatio || 1.20;
+          const maxRatio = config.smartAlign.maxStretchRatio || 1.25;
           const optimalRate = parseFloat((targetDuration / seg.duration).toFixed(2));
 
           if (optimalRate >= (1 / maxRatio) && optimalRate <= maxRatio) {
-            // Вписывается в допустимый диапазон растяжения без изменения высоты тона
             seg.playbackRate = optimalRate;
             seg.duration = parseFloat(targetDuration.toFixed(3));
           } else {
-            // Превышает лимит естественного растяжения
             const diff = Math.abs(seg.duration - targetDuration);
             seg.timingWarning = 'desync';
             seg.timingWarningDetail = `Большое расхождение липсинга: разница ${diff.toFixed(2)} с (лимит растяжения превышен)`;
@@ -448,7 +510,7 @@ export class TimingAlignmentService {
               title: 'Нарушение липсинга',
               description: `Фраза дабера расходится с артикуляцией оригинала на ${diff.toFixed(2)} с.`,
               severity: 'error',
-              matchedSubText: matchedSub?.text,
+              matchedSubText: directSub?.text,
               canAutoFix: false
             });
           }
@@ -507,12 +569,16 @@ export class TimingAlignmentService {
       }
     }
 
+    const avgShiftMs = alignedCount > 0 ? Math.round(totalShiftMs / alignedCount) : 0;
+
     return {
       updatedTrack: {
         ...track,
         segments: updatedSegments
       },
-      issues
+      issues,
+      alignedCount,
+      avgShiftMs
     };
   }
 
@@ -690,8 +756,9 @@ export class TimingAlignmentService {
   private static generateSimulatedPeaks(count: number): number[] {
     const peaks: number[] = [];
     for (let i = 0; i < count; i++) {
-      const isWord = (i % 20 < 14);
-      const amp = isWord ? (0.2 + Math.random() * 0.7) : (0.01 + Math.random() * 0.02);
+      // Natural speech rhythm: 14 samples speech, 10 samples silence
+      const isWord = (i % 24 < 14);
+      const amp = isWord ? (0.2 + Math.random() * 0.7) : (0.0001 + Math.random() * 0.0004);
       peaks.push(amp);
     }
     return peaks;

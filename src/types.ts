@@ -112,12 +112,13 @@ export interface Project {
   masterVolume?: number;
   activePresetId?: string; // Активный ID пресета сведения
   customPresets?: MixingPreset[]; // Пользовательские пресеты сведения
+  mixingType?: MixingType;
 }
 
 export interface AudioTrack {
   id: string;
   name: string;
-  type?: 'original' | 'voice' | 'music' | 'effects';
+  type?: 'original' | 'voice' | 'music' | 'effects' | 'dub';
   segments: AudioSegment[];
   volume: number;
   isMuted: boolean;
@@ -461,6 +462,7 @@ export interface TimingAlignmentConfig {
 // Этап 3: Сведение и Авто-эффекты (Mixing & Effects)
 export interface AuditionVocalBusChainConfig {
   presetName: string; // 'Audition Master VO Chain'
+  bypass?: boolean;
   // Slot 1: Ozone 11 Stabilizer
   ozoneStabilizer: {
     enabled: boolean;
