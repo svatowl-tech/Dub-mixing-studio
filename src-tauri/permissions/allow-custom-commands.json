@@ -65,7 +65,17 @@
           "get_plugin_state",
           "set_plugin_state",
           "open_plugin_editor",
-          "close_plugin_editor"
+          "close_plugin_editor",
+          "normalize_audio",
+          "match_eq_profile",
+          "clean_clicks",
+          "apply_deplosive",
+          "process_deesser",
+          "process_denoise",
+          "process_uvr_dereverb",
+          "level_speech_volume",
+          "separate_audio_stems",
+          "cancel_source_separation"
         ],
         "deny": []
       }

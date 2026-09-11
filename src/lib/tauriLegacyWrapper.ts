@@ -1357,6 +1357,36 @@ export const tauriAPI = {
         return { success: false, error: String(err) };
     }
   },
+
+  normalizeAudio: async (inputPath: string, outputPath: string, targetLufs?: number): Promise<BridgeResponse<any>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        const result = await invoke('normalize_audio', { inputPath, outputPath, targetLufs });
+        return { success: true, data: result };
+    } catch(err) {
+        return { success: false, error: typeof err === 'object' ? JSON.stringify(err) : String(err) };
+    }
+  },
+
+  matchEqProfile: async (inputPath: string, outputPath: string, profileName: string): Promise<BridgeResponse<any>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        await invoke('match_eq_profile', { inputPath, outputPath, profileName });
+        return { success: true, data: null };
+    } catch(err) {
+        return { success: false, error: typeof err === 'object' ? JSON.stringify(err) : String(err) };
+    }
+  },
+
+  cleanClicks: async (inputWav: string, outputWav: string, sensitivity: number): Promise<BridgeResponse<any>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        const report = await invoke('clean_clicks', { inputWav, outputWav, sensitivity });
+        return { success: true, data: report };
+    } catch(err) {
+        return { success: false, error: typeof err === 'object' ? JSON.stringify(err) : String(err) };
+    }
+  },
 };
 
 export function setupTauriLegacyWrapper() {

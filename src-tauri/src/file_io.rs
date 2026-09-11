@@ -118,6 +118,40 @@ pub fn write_audio_file(path: String, data: Vec<u8>) -> Result<(), String> {
     fs::write(norm_path, data).map_err(|e| format!("Failed to write audio file: {}", e))
 }
 
+pub fn find_ffmpeg_path() -> String {
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let candidates = [
+                exe_dir.join("ffmpeg.exe"),
+                exe_dir.join("bin").join("ffmpeg.exe"),
+                exe_dir.join("bin").join("ffmpeg-x86_64-pc-windows-msvc.exe"),
+                exe_dir.join("ffmpeg"),
+                exe_dir.join("bin").join("ffmpeg"),
+            ];
+            for c in candidates {
+                if c.is_file() {
+                    return c.to_string_lossy().to_string();
+                }
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidates = [
+            cwd.join("src-tauri").join("bin").join("ffmpeg.exe"),
+            cwd.join("src-tauri").join("bin").join("ffmpeg-x86_64-pc-windows-msvc.exe"),
+            cwd.join("bin").join("ffmpeg.exe"),
+            cwd.join("src-tauri").join("bin").join("ffmpeg"),
+            cwd.join("bin").join("ffmpeg"),
+        ];
+        for c in candidates {
+            if c.is_file() {
+                return c.to_string_lossy().to_string();
+            }
+        }
+    }
+    "ffmpeg".to_string()
+}
+
 #[tauri::command]
 pub async fn save_media_recorder_take(project_path: String, role: String, data: Vec<u8>) -> Result<String, String> {
     let norm_project_path = normalize_windows_path(&project_path);
@@ -141,9 +175,8 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
     let target_path = takes_dir.join(&file_name);
 
     // Use FFmpeg to convert
-    // If backstage, convert to MP4 with consistent specs for later concatenation
-    // If not backstage (audio), convert to WAV
-    let mut command = std::process::Command::new("ffmpeg");
+    let ffmpeg_bin = find_ffmpeg_path();
+    let mut command = std::process::Command::new(&ffmpeg_bin);
     command.arg("-y").arg("-i").arg(temp_path.to_str().unwrap());
     
     if is_backstage {

@@ -1,4 +1,5 @@
 import { AudioTrack, AudioSegment, PrepProcessingConfig } from '../types';
+import { TimingAlignmentService } from './timingAlignmentService';
 
 export interface DspProcessResult {
   updatedTracks: AudioTrack[];
@@ -25,6 +26,13 @@ export interface DspProcessResult {
  * waveforms, gains, and dynamic envelopes based on exact preset configurations.
  */
 export class AudioDspService {
+  public static isDubActorTrack(track: AudioTrack): boolean {
+    if (TimingAlignmentService.isDubTrack(track)) return true;
+    const name = (track.name || '').toLowerCase();
+    const isOrig = track.type === 'original' || name.includes('оригинал') || name.includes('музыка') || name.includes('эффект');
+    if (isOrig) return false;
+    return true;
+  }
   /**
    * Helper: Convert linear amplitude to decibels (dBFS)
    */
@@ -101,8 +109,7 @@ export class AudioDspService {
     let totalAfterLufs = 0;
 
     const updatedTracks = tracks.map(track => {
-      const isExcluded = track.name === 'Оригинал' || track.name === 'Звуки (Музыка)' || track.name === 'Голоса (Вокал)';
-      if (isExcluded || track.isProcessingEnabled === false) return track;
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) return track;
       if (targetTrackId && track.id !== targetTrackId) return track;
 
       const updatedSegments = track.segments.map(seg => {
@@ -220,8 +227,7 @@ export class AudioDspService {
     let affectedCount = 0;
 
     const updatedTracks = tracks.map(track => {
-      const isExcluded = track.name === 'Оригинал' || track.name === 'Звуки (Музыка)' || track.name === 'Голоса (Вокал)';
-      if (isExcluded || track.isProcessingEnabled === false) return track;
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) return track;
       if (targetTrackId && track.id !== targetTrackId) return track;
 
       const updatedSegments = track.segments.map(seg => {
@@ -292,8 +298,7 @@ export class AudioDspService {
     let affectedCount = 0;
 
     const updatedTracks = tracks.map(track => {
-      const isExcluded = track.name === 'Оригинал' || track.name === 'Звуки (Музыка)' || track.name === 'Голоса (Вокал)';
-      if (isExcluded || track.isProcessingEnabled === false) return track;
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) return track;
       if (targetTrackId && track.id !== targetTrackId) return track;
 
       const updatedSegments = track.segments.map(seg => {
@@ -358,8 +363,7 @@ export class AudioDspService {
     let affectedCount = 0;
 
     const updatedTracks = tracks.map(track => {
-      const isExcluded = track.name === 'Оригинал' || track.name === 'Звуки (Музыка)' || track.name === 'Голоса (Вокал)';
-      if (isExcluded || track.isProcessingEnabled === false) return track;
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) return track;
       if (targetTrackId && track.id !== targetTrackId) return track;
 
       const updatedSegments = track.segments.map(seg => {
@@ -416,8 +420,7 @@ export class AudioDspService {
     let affectedCount = 0;
 
     const updatedTracks = tracks.map(track => {
-      const isExcluded = track.name === 'Оригинал' || track.name === 'Звуки (Музыка)' || track.name === 'Голоса (Вокал)';
-      if (isExcluded || track.isProcessingEnabled === false) return track;
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) return track;
       if (targetTrackId && track.id !== targetTrackId) return track;
 
       const updatedSegments = track.segments.map(seg => {
@@ -472,8 +475,7 @@ export class AudioDspService {
     let affectedCount = 0;
 
     const updatedTracks = tracks.map(track => {
-      const isExcluded = track.name === 'Оригинал' || track.name === 'Звуки (Музыка)' || track.name === 'Голоса (Вокал)';
-      if (isExcluded || track.isProcessingEnabled === false) return track;
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) return track;
       if (targetTrackId && track.id !== targetTrackId) return track;
 
       const updatedSegments = track.segments.map(seg => {
@@ -527,8 +529,7 @@ export class AudioDspService {
     let affectedCount = 0;
 
     const updatedTracks = tracks.map(track => {
-      const isExcluded = track.name === 'Оригинал' || track.name === 'Звуки (Музыка)' || track.name === 'Голоса (Вокал)';
-      if (isExcluded || track.isProcessingEnabled === false) return track;
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) return track;
       if (targetTrackId && track.id !== targetTrackId) return track;
 
       const updatedSegments = track.segments.map(seg => {
@@ -582,8 +583,7 @@ export class AudioDspService {
     let affectedCount = 0;
 
     const updatedTracks = tracks.map(track => {
-      const isExcluded = track.name === 'Оригинал' || track.name === 'Звуки (Музыка)' || track.name === 'Голоса (Вокал)';
-      if (isExcluded || track.isProcessingEnabled === false) return track;
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) return track;
       if (targetTrackId && track.id !== targetTrackId) return track;
 
       const updatedSegments = track.segments.map(seg => {

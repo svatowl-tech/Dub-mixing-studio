@@ -44,6 +44,10 @@ if (ffmpegStaticPath && fs.existsSync(ffmpegStaticPath)) {
     console.log(`Copying ffmpeg from ${ffmpegStaticPath} to ${ffmpegDest}`);
     fs.copyFileSync(ffmpegStaticPath, ffmpegDest);
     fs.chmodSync(ffmpegDest, 0o755);
+
+    const standardFfmpeg = path.join(binDir, `ffmpeg${ext}`);
+    fs.copyFileSync(ffmpegStaticPath, standardFfmpeg);
+    fs.chmodSync(standardFfmpeg, 0o755);
 }
 
 // Copy FFprobe
@@ -51,6 +55,10 @@ if (ffprobeStatic && ffprobeStatic.path && fs.existsSync(ffprobeStatic.path)) {
     console.log(`Copying ffprobe from ${ffprobeStatic.path} to ${ffprobeDest}`);
     fs.copyFileSync(ffprobeStatic.path, ffprobeDest);
     fs.chmodSync(ffprobeDest, 0o755);
+
+    const standardFfprobe = path.join(binDir, `ffprobe${ext}`);
+    fs.copyFileSync(ffprobeStatic.path, standardFfprobe);
+    fs.chmodSync(standardFfprobe, 0o755);
 }
 
 console.log('Successfully set up FFmpeg sidecars for Tauri.');

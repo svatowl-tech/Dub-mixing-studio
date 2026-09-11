@@ -32,7 +32,9 @@
     "active": true,
     "targets": ["nsis", "dmg", "deb"],
     "resources": [
-      "ai_env/**/*"
+      "ai_env/**/*",
+      "models/**/*",
+      "resources/**/*"
     ],
     "externalBin": [
       "bin/ffmpeg",

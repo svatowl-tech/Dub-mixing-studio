@@ -9,6 +9,15 @@ mod media_processor;
 mod logger;
 mod vst_host;
 mod audio_separator;
+mod normalization;
+mod eq_matching;
+mod declick;
+mod deplosive;
+mod deesser;
+mod uvr_denoise;
+mod uvr_dereverb;
+mod volume_leveler;
+mod source_separation;
 
 use audio_engine::{get_audio_devices, start_recording, stop_recording, force_stop_all, check_crashes, AudioState, AudioRecorder};
 use logger::log_debug;
@@ -18,6 +27,15 @@ use vst_host::{
     set_plugin_state, open_plugin_editor, close_plugin_editor,
     SharedVstHostState, VstHostState,
 };
+use normalization::{normalize_audio, process_normalization, NormalizationStats};
+use eq_matching::{match_eq_profile, process_match_eq_profile};
+use declick::{clean_clicks, process_clean_clicks, DeclickReport};
+use deplosive::{apply_deplosive, process_apply_deplosive, DeplosiveReport};
+use deesser::{process_deesser, DeEsser, DeEsserReport};
+use uvr_denoise::{process_denoise, DenoiseReport, ProgressPayload};
+use uvr_dereverb::{process_uvr_dereverb, DereverbResult, DereverbProgressPayload};
+use volume_leveler::{level_speech_volume, VolumeLevelerConfig, VolumeLevelerReport};
+use source_separation::{separate_audio_stems, cancel_source_separation};
 use audio_separator::{check_audio_separator_status, install_audio_separator_pkg, run_audio_separator_cmd};
 use export_engine::{export_audio, export_stems, export_all_stems, quick_preview_export, batch_export, export_audio_book, export_backstage_video};
 use db::{AppState, init_db, save_project_to_db, load_project_from_db, migrate_json_to_db, save_subtitles, generate_stress_test, load_segments_in_range, check_project_assets, verify_project_files, cleanup_orphaned_files, relink_segment_file, calculate_file_hash, find_file_by_hash};
@@ -294,7 +312,17 @@ fn main() {
             apply_audio_effect,
             check_audio_separator_status,
             install_audio_separator_pkg,
-            run_audio_separator_cmd
+            run_audio_separator_cmd,
+            normalize_audio,
+            match_eq_profile,
+            clean_clicks,
+            apply_deplosive,
+            process_deesser,
+            process_denoise,
+            process_uvr_dereverb,
+            level_speech_volume,
+            separate_audio_stems,
+            cancel_source_separation
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

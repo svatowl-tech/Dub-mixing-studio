@@ -144,6 +144,10 @@ jobs:
       - name: Setup FFmpeg & FFprobe Sidecars
         run: node scripts/setup-ffmpeg.js
 
+      # Download and bundle all required neural models (UVR, DeNoise, DeReverb)
+      - name: Download & Embed Neural Models
+        run: node scripts/download_models.js
+
       # Setup Embedded AI Python Environment (audio-separator)
       - name: Setup Embedded AI Python Environment
         run: node scripts/setup_embed_py.js
@@ -206,6 +210,9 @@ jobs:
             cp "src-tauri/target/release/dubstudio.exe" "$PORTABLE_DIR/Dub Mixing Studio.exe"
           fi
 
+          # Copy any runtime DLLs (e.g. onnxruntime.dll, DirectML.dll)
+          cp src-tauri/target/release/*.dll "$PORTABLE_DIR/" 2>/dev/null || true
+
           # Copy sidecars if present
           if [ -d "src-tauri/bin" ]; then
             cp -r src-tauri/bin/* "$PORTABLE_DIR/bin/" 2>/dev/null || true
@@ -214,6 +221,14 @@ jobs:
           # Copy embedded AI environment if present
           if [ -d "src-tauri/ai_env" ]; then
             cp -r src-tauri/ai_env "$PORTABLE_DIR/" 2>/dev/null || true
+          fi
+
+          # Copy neural models if present
+          if [ -d "src-tauri/models" ]; then
+            cp -r src-tauri/models "$PORTABLE_DIR/" 2>/dev/null || true
+          fi
+          if [ -d "src-tauri/resources" ]; then
+            cp -r src-tauri/resources "$PORTABLE_DIR/" 2>/dev/null || true
           fi
 
           # Create README for portable edition

@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { SeparationResult, SeparationProgressPayload } from '../types';
 
 export interface SeparatorStatus {
   python_found: boolean;
@@ -155,4 +156,71 @@ export class AudioSeparatorService {
       }
     }
   }
+
+  /**
+   * Разделение оригинала на стемы (vocals.wav и no_vocals.wav) через Rust оркестратор
+   */
+  static async separateStems(
+    inputPath: string,
+    outputDir?: string,
+    modelName?: string,
+    useGpu: boolean = true,
+    onProgress?: (percent: number, detail?: SeparationProgressPayload) => void
+  ): Promise<SeparationResult> {
+    if (!isTauriAvailable()) {
+      if (onProgress) {
+        onProgress(20, { percent: 20, stage: 'Загрузка весов модели...', logLine: 'Loading model weights...' });
+        await new Promise((r) => setTimeout(r, 200));
+        onProgress(60, { percent: 60, stage: 'Инференс UVR MDX-NET...', logLine: 'Separating audio...' });
+        await new Promise((r) => setTimeout(r, 200));
+        onProgress(100, { percent: 100, stage: 'Готово!', logLine: 'Created vocals.wav and no_vocals.wav' });
+      }
+      return {
+        vocalsPath: inputPath.replace(/\.[^.]+$/, '_vocals.wav'),
+        noVocalsPath: inputPath.replace(/\.[^.]+$/, '_no_vocals.wav'),
+        modelName: modelName || 'UVR-MDX-NET-Voc_FT',
+        durationSec: 120,
+      };
+    }
+
+    let unlistenProg: UnlistenFn | null = null;
+    let unlistenDetail: UnlistenFn | null = null;
+
+    if (onProgress) {
+      try {
+        unlistenProg = await listen<number | { percent: number }>('separation-progress', (event) => {
+          const pct = typeof event.payload === 'number' ? event.payload : event.payload.percent;
+          onProgress(pct);
+        });
+        unlistenDetail = await listen<SeparationProgressPayload>('separation-progress-detail', (event) => {
+          onProgress(event.payload.percent, event.payload);
+        });
+      } catch (e) {
+        console.warn('Cannot listen to separation progress:', e);
+      }
+    }
+
+    try {
+      return await invoke<SeparationResult>('separate_audio_stems', {
+        inputPath,
+        outputDir,
+        modelName: modelName || 'UVR-MDX-NET-Voc_FT',
+        useGpu,
+      });
+    } finally {
+      if (unlistenProg) unlistenProg();
+      if (unlistenDetail) unlistenDetail();
+    }
+  }
+
+  /**
+   * Отмена текущего процесса разделения аудио на стемы (kill child process)
+   */
+  static async cancelSeparation(): Promise<boolean> {
+    if (!isTauriAvailable()) {
+      return true;
+    }
+    return await invoke<boolean>('cancel_source_separation');
+  }
 }
+

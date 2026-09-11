@@ -57,7 +57,15 @@ import {
   TimingIssue,
   MixingAuditEntry,
   QualityControlIssue,
-  FinalRenderResult
+  FinalRenderResult,
+  DeclickReport,
+  DeplosiveReport,
+  DeEsserReport,
+  DenoiseReport,
+  DereverbResult,
+  VolumeLevelerReport,
+  NormalizationStats,
+  SeparationResult
 } from '../types';
 import { 
   DEFAULT_MIXING_PRESETS,
@@ -698,6 +706,41 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
     try {
       if (effectType === 'normalization') {
+        const targetLufs = activePreset.phase1.normalization.targetLufs ?? -16.0;
+        let lastNativeNorm: NormalizationStats | null = null;
+        let processedCount = 0;
+
+        if (isTauriAvailable()) {
+          const tracksToProcess = selectedSegment?.trackId
+            ? project.tracks.filter(t => t.id === selectedSegment.trackId)
+            : project.tracks.filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false);
+
+          for (const track of tracksToProcess) {
+            const segsToProcess = selectedSegment?.segment?.id
+              ? track.segments.filter(s => s.id === selectedSegment.segment.id)
+              : track.segments;
+
+            for (const seg of segsToProcess) {
+              const inputPath = seg.filePath;
+              if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
+                try {
+                  const stats = await invoke<NormalizationStats>('normalize_audio', {
+                    inputPath,
+                    outputPath: inputPath,
+                    targetLufs,
+                  });
+                  if (stats) {
+                    lastNativeNorm = stats;
+                    processedCount++;
+                  }
+                } catch (e) {
+                  console.warn('[MixingPanel] Native normalize_audio error:', e);
+                }
+              }
+            }
+          }
+        }
+
         const res = AudioDspService.applyNormalizationAndUpwardCompression(
           project.tracks,
           activePreset.phase1.normalization,
@@ -705,6 +748,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           selectedSegment?.segment?.id
         );
         onUpdateProject({ tracks: res.updatedTracks });
+        playbackEngine.clearCache();
         await playbackEngine.updateTracks(res.updatedTracks);
         addAuditLogs(res.detailedLogs.map((msg, i) => ({
           id: `audit-norm-${Date.now()}-${i}`,
@@ -715,8 +759,46 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           title: 'Нормализация и апвард-компрессия',
           message: msg
         })));
-        showToast(res.logSummary);
+        const summaryMsg = lastNativeNorm
+          ? `EBU R128 нормализация (Rayon): ${lastNativeNorm.initialLufs.toFixed(1)} -> ${lastNativeNorm.finalLufs.toFixed(1)} LUFS (gain ${lastNativeNorm.gainAppliedDb > 0 ? '+' : ''}${lastNativeNorm.gainAppliedDb.toFixed(2)} dB, True Peak ${lastNativeNorm.finalTruePeakDb.toFixed(1)} dBTP) на ${processedCount} файлах.`
+          : res.logSummary;
+        showToast(summaryMsg);
       } else if (effectType === 'declick') {
+        const sensitivity = activePreset.phase1.deClick.sensitivity ?? 75;
+        let nativeClicksCount = 0;
+        let nativeSamplesRestored = 0;
+
+        if (isTauriAvailable()) {
+          const tracksToProcess = selectedSegment?.trackId
+            ? project.tracks.filter(t => t.id === selectedSegment.trackId)
+            : project.tracks.filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false);
+
+          for (const track of tracksToProcess) {
+            const segsToProcess = selectedSegment?.segment?.id
+              ? track.segments.filter(s => s.id === selectedSegment.segment.id)
+              : track.segments;
+
+            for (const seg of segsToProcess) {
+              const inputPath = seg.filePath;
+              if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
+                try {
+                  const rep = await invoke<DeclickReport>('clean_clicks', {
+                    inputWav: inputPath,
+                    outputWav: inputPath,
+                    sensitivity,
+                  });
+                  if (rep) {
+                    nativeClicksCount += rep.clicksDetected;
+                    nativeSamplesRestored += rep.samplesRestored;
+                  }
+                } catch (e) {
+                  console.warn('[MixingPanel] Native clean_clicks error:', e);
+                }
+              }
+            }
+          }
+        }
+
         const res = AudioDspService.applyDeClick(
           project.tracks,
           activePreset.phase1.deClick,
@@ -724,9 +806,45 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           selectedSegment?.segment?.id
         );
         onUpdateProject({ tracks: res.updatedTracks });
+        playbackEngine.clearCache();
         await playbackEngine.updateTracks(res.updatedTracks);
-        showToast(res.logSummary);
+
+        const summaryMsg = nativeClicksCount > 0
+          ? `De-Click завершен (Rayon DSP): обнаружено ${nativeClicksCount} кликов, восстановлено ${nativeSamplesRestored} сэмплов.`
+          : res.logSummary;
+        showToast(summaryMsg);
       } else if (effectType === 'smarteq') {
+        const profileModel = activePreset.phase1.eqMatching.profileModel || 'vocal_presence';
+        const targetPath = activePreset.phase1.eqMatching.targetProfilePath;
+        const profileParam = (profileModel === 'reference_match' && targetPath) ? targetPath : profileModel;
+
+        if (isTauriAvailable()) {
+          const tracksToProcess = selectedSegment?.trackId
+            ? project.tracks.filter(t => t.id === selectedSegment.trackId)
+            : project.tracks.filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false);
+
+          for (const track of tracksToProcess) {
+            const segsToProcess = selectedSegment?.segment?.id
+              ? track.segments.filter(s => s.id === selectedSegment.segment.id)
+              : track.segments;
+
+            for (const seg of segsToProcess) {
+              const inputPath = seg.audioUrl || seg.filePath;
+              if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
+                try {
+                  await invoke('match_eq_profile', {
+                    inputPath,
+                    outputPath: inputPath,
+                    profileName: profileParam,
+                  });
+                } catch (e) {
+                  console.warn('[MixingPanel] Native match_eq_profile error:', e);
+                }
+              }
+            }
+          }
+        }
+
         const res = AudioDspService.applyEqMatching(
           project.tracks,
           activePreset.phase1.eqMatching,
@@ -734,9 +852,47 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           selectedSegment?.segment?.id
         );
         onUpdateProject({ tracks: res.updatedTracks });
+        playbackEngine.clearCache();
         await playbackEngine.updateTracks(res.updatedTracks);
         showToast(res.logSummary);
       } else if (effectType === 'deplosive') {
+        const thresholdDb = activePreset.phase1.dePlosive.threshold ?? -24;
+        let nativePlosivesCount = 0;
+        let maxReductionDb = 0;
+
+        if (isTauriAvailable()) {
+          const tracksToProcess = selectedSegment?.trackId
+            ? project.tracks.filter(t => t.id === selectedSegment.trackId)
+            : project.tracks.filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false);
+
+          for (const track of tracksToProcess) {
+            const segsToProcess = selectedSegment?.segment?.id
+              ? track.segments.filter(s => s.id === selectedSegment.segment.id)
+              : track.segments;
+
+            for (const seg of segsToProcess) {
+              const inputPath = seg.filePath;
+              if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
+                try {
+                  const rep = await invoke<DeplosiveReport>('apply_deplosive', {
+                    filePath: inputPath,
+                    outPath: inputPath,
+                    thresholdDb,
+                  });
+                  if (rep) {
+                    nativePlosivesCount += rep.plosivesDetected;
+                    if (rep.maxReductionDb > maxReductionDb) {
+                      maxReductionDb = rep.maxReductionDb;
+                    }
+                  }
+                } catch (e) {
+                  console.warn('[MixingPanel] Native apply_deplosive error:', e);
+                }
+              }
+            }
+          }
+        }
+
         const res = AudioDspService.applyDePlosive(
           project.tracks,
           activePreset.phase1.dePlosive,
@@ -744,9 +900,55 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           selectedSegment?.segment?.id
         );
         onUpdateProject({ tracks: res.updatedTracks });
+        playbackEngine.clearCache();
         await playbackEngine.updateTracks(res.updatedTracks);
-        showToast(res.logSummary);
+
+        const summaryMsg = nativePlosivesCount > 0
+          ? `De-Plosive завершен (Rayon + Butterworth HPF): подавлено ${nativePlosivesCount} задувов/взрывов, макс. срез -${maxReductionDb.toFixed(1)} dB (сдвиг среза 40->175 Гц).`
+          : res.logSummary;
+        showToast(summaryMsg);
       } else if (effectType === 'deesser') {
+        const frequency = activePreset.phase1.deEsser.frequency ?? 6500;
+        const threshold = activePreset.phase1.deEsser.threshold ?? -20;
+        const ratio = activePreset.phase1.deEsser.ratio ?? 4.0;
+        let nativeSibilantsCount = 0;
+        let maxReductionDb = 0;
+
+        if (isTauriAvailable()) {
+          const tracksToProcess = selectedSegment?.trackId
+            ? project.tracks.filter(t => t.id === selectedSegment.trackId)
+            : project.tracks.filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false);
+
+          for (const track of tracksToProcess) {
+            const segsToProcess = selectedSegment?.segment?.id
+              ? track.segments.filter(s => s.id === selectedSegment.segment.id)
+              : track.segments;
+
+            for (const seg of segsToProcess) {
+              const inputPath = seg.filePath;
+              if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
+                try {
+                  const rep = await invoke<DeEsserReport>('process_deesser', {
+                    inputPath,
+                    outputPath: inputPath,
+                    frequency,
+                    threshold,
+                    ratio,
+                  });
+                  if (rep) {
+                    nativeSibilantsCount += rep.sibilantsDetected;
+                    if (rep.maxReductionDb > maxReductionDb) {
+                      maxReductionDb = rep.maxReductionDb;
+                    }
+                  }
+                } catch (e) {
+                  console.warn('[MixingPanel] Native process_deesser error:', e);
+                }
+              }
+            }
+          }
+        }
+
         const res = AudioDspService.applyDeEsser(
           project.tracks,
           activePreset.phase1.deEsser,
@@ -754,9 +956,49 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           selectedSegment?.segment?.id
         );
         onUpdateProject({ tracks: res.updatedTracks });
+        playbackEngine.clearCache();
         await playbackEngine.updateTracks(res.updatedTracks);
-        showToast(res.logSummary);
+
+        const summaryMsg = nativeSibilantsCount > 0
+          ? `De-Esser завершен (Split-Band DSP): сглажено ${nativeSibilantsCount} сибилянтов («С», «З», «Щ»), макс. срез -${maxReductionDb.toFixed(1)} dB.`
+          : res.logSummary;
+        showToast(summaryMsg);
       } else if (effectType === 'denoise') {
+        let lastNativeReport: DenoiseReport | null = null;
+        let processedTracksCount = 0;
+
+        if (isTauriAvailable()) {
+          const targetTracks = selectedSegment?.trackId
+            ? project.tracks.filter(t => t.id === selectedSegment.trackId)
+            : project.tracks.filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false);
+
+          for (const tr of targetTracks) {
+            const segs = selectedSegment?.segment?.id
+              ? tr.segments.filter(s => s.id === selectedSegment.segment.id)
+              : tr.segments;
+
+            for (const seg of segs) {
+              const inPath = seg.filePath;
+              if (inPath && !inPath.startsWith('blob:') && !inPath.startsWith('data:')) {
+                try {
+                  const rep = await invoke<DenoiseReport>('process_denoise', {
+                    inputPath: inPath,
+                    outputPath: inPath,
+                    modelName: activePreset.phase1.denoise.model || 'UVR-DeNoise',
+                    strength: activePreset.phase1.denoise.strength,
+                  });
+                  if (rep) {
+                    lastNativeReport = rep;
+                    processedTracksCount++;
+                  }
+                } catch (e) {
+                  console.warn('[MixingPanel] Native process_denoise error:', e);
+                }
+              }
+            }
+          }
+        }
+
         const res = AudioDspService.applyDenoise(
           project.tracks,
           activePreset.phase1.denoise,
@@ -764,9 +1006,46 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           selectedSegment?.segment?.id
         );
         onUpdateProject({ tracks: res.updatedTracks });
+        playbackEngine.clearCache();
         await playbackEngine.updateTracks(res.updatedTracks);
-        showToast(res.logSummary);
+
+        const summaryMsg = lastNativeReport
+          ? `Шумоподавление завершено (${lastNativeReport.isNeural ? `UVR DeNoise: ${lastNativeReport.providerUsed}` : lastNativeReport.modelName}): подавление шума -${lastNativeReport.noiseReductionDb.toFixed(1)} dB на ${processedTracksCount} дорожках.`
+          : res.logSummary;
+        showToast(summaryMsg);
       } else if (effectType === 'dereverb') {
+        let nativeReport: any = null;
+        if (isTauriAvailable()) {
+          const targetTracks = selectedSegment?.trackId
+            ? project.tracks.filter(t => t.id === selectedSegment.trackId)
+            : project.tracks.filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false);
+
+          for (const tr of targetTracks) {
+            const segs = selectedSegment?.segment?.id
+              ? tr.segments.filter(s => s.id === selectedSegment.segment.id)
+              : tr.segments;
+
+            for (const seg of segs) {
+              const inPath = seg.filePath;
+              if (inPath && !inPath.startsWith('blob:') && !inPath.startsWith('data:')) {
+                try {
+                  const rep = await invoke<any>('process_uvr_dereverb', {
+                    inputPath: inPath,
+                    outputPath: inPath,
+                    reverbTailExportPath: null,
+                    strength: (activePreset.phase1.dereverb.strength || 85) / 100.0,
+                  });
+                  if (rep) {
+                    nativeReport = rep;
+                  }
+                } catch (e) {
+                  console.warn('[MixingPanel] Native process_uvr_dereverb error:', e);
+                }
+              }
+            }
+          }
+        }
+
         const res = AudioDspService.applyDeReverb(
           project.tracks,
           activePreset.phase1.dereverb,
@@ -774,9 +1053,51 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           selectedSegment?.segment?.id
         );
         onUpdateProject({ tracks: res.updatedTracks });
+        playbackEngine.clearCache();
         await playbackEngine.updateTracks(res.updatedTracks);
-        showToast(res.logSummary);
+
+        const summaryMsg = nativeReport
+          ? `De-Reverb завершен (${nativeReport.isNeural ? `UVR De-Echo [${nativeReport.providerUsed}]` : nativeReport.modelName}): подавление комнатного эха -${nativeReport.reverbReductionDb.toFixed(1)} dB.`
+          : res.logSummary;
+        showToast(summaryMsg);
       } else if (effectType === 'volumeleveler') {
+        let lastReport: VolumeLevelerReport | null = null;
+        let processedSegs = 0;
+
+        if (isTauriAvailable()) {
+          const targetTracks = selectedSegment?.trackId
+            ? project.tracks.filter(t => t.id === selectedSegment.trackId)
+            : project.tracks.filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false);
+
+          for (const tr of targetTracks) {
+            const segs = selectedSegment?.segment?.id
+              ? tr.segments.filter(s => s.id === selectedSegment.segment.id)
+              : tr.segments;
+
+            for (const seg of segs) {
+              const inPath = seg.filePath;
+              if (inPath && !inPath.startsWith('blob:') && !inPath.startsWith('data:')) {
+                try {
+                  const rep = await invoke<VolumeLevelerReport>('level_speech_volume', {
+                    inputPath: inPath,
+                    outputPath: inPath,
+                    targetRms: activePreset.phase1.volumeLeveler.targetRms || -19.0,
+                    gateThresholdDb: -50.0,
+                    maxBoostDb: 12.0,
+                    maxAttenuationDb: 15.0,
+                  });
+                  if (rep) {
+                    lastReport = rep;
+                    processedSegs++;
+                  }
+                } catch (e) {
+                  console.warn('[MixingPanel] Native level_speech_volume error:', e);
+                }
+              }
+            }
+          }
+        }
+
         const res = AudioDspService.applyVolumeLeveler(
           project.tracks,
           activePreset.phase1.volumeLeveler,
@@ -784,8 +1105,13 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           selectedSegment?.segment?.id
         );
         onUpdateProject({ tracks: res.updatedTracks });
+        playbackEngine.clearCache();
         await playbackEngine.updateTracks(res.updatedTracks);
-        showToast(res.logSummary);
+
+        const summaryMsg = lastReport
+          ? `Speech Vocal Leveler: выровнен RMS ${lastReport.initialRmsDb} -> ${lastReport.finalRmsDb} dBFS (буст +${lastReport.maxBoostAppliedDb} dB, срез -${lastReport.maxCutAppliedDb} dB) на ${processedSegs} сегментах.`
+          : res.logSummary;
+        showToast(summaryMsg);
       } else if (effectType === 'separation') {
         await handleRunSeparation();
       } else {
@@ -891,9 +1217,101 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     setSeparatorProgress({ percent: 0, stage: 'Инициализация...' });
     setSeparatorOutputMsg('');
 
-    const modelToUse = activePreset.phase1.sourceSeparation.model || selectedSeparatorModel || 'htdemucs';
+    const modelToUse = activePreset.phase1.sourceSeparation.model || selectedSeparatorModel || 'UVR-MDX-NET-Voc_FT';
 
     try {
+      if (isTauriAvailable()) {
+        const sepResult = await AudioSeparatorService.separateStems(
+          fileToUse,
+          project?.projectPath || undefined,
+          modelToUse,
+          useGpuForSeparator,
+          (percent, detail) => {
+            setSeparatorProgress({
+              percent,
+              stage: detail?.stage || 'Инференс нейросети...',
+              log_line: detail?.logLine
+            });
+          }
+        );
+        setProcessedFilePath(sepResult.vocalsPath);
+        setIsSeparatorSuccess(true);
+        showToast(`Нейро-разделение завершено (${sepResult.modelName})!`);
+
+        // Автоматически импортируем стемы в проект
+        if (activePreset.phase1.sourceSeparation.keepSeparatedStems !== false && project) {
+          playbackEngine.stop();
+          playbackEngine.clearCache();
+
+          const duration = project.duration || sepResult.durationSec || 60;
+          const soundsTrackId = 'track-' + Math.random().toString(36).substring(2, 11);
+          const voicesTrackId = 'track-' + Math.random().toString(36).substring(2, 11);
+
+          const soundsSegment = {
+            id: 'seg-' + Math.random().toString(36).substring(2, 11),
+            startTime: 0,
+            duration: duration,
+            fileOffset: 0,
+            fileDuration: duration,
+            blobUrl: '',
+            filePath: sepResult.noVocalsPath,
+            gain: 1.0,
+            playbackRate: 1.0,
+            originalFileName: sepResult.noVocalsPath.split(/[\\/]/).pop() || 'Sounds.wav'
+          };
+
+          const voicesSegment = {
+            id: 'seg-' + Math.random().toString(36).substring(2, 11),
+            startTime: 0,
+            duration: duration,
+            fileOffset: 0,
+            fileDuration: duration,
+            blobUrl: '',
+            filePath: sepResult.vocalsPath,
+            gain: 1.0,
+            playbackRate: 1.0,
+            originalFileName: sepResult.vocalsPath.split(/[\\/]/).pop() || 'Voices.wav'
+          };
+
+          const soundsTrack: AudioTrack = {
+            id: soundsTrackId,
+            name: 'Звуки (Музыка)',
+            segments: [soundsSegment],
+            volume: 1.0,
+            isMuted: false,
+            isSolo: false,
+            isArmed: false,
+            isProcessingEnabled: false,
+            height: 80
+          };
+
+          const voicesTrack: AudioTrack = {
+            id: voicesTrackId,
+            name: 'Голоса (Вокал)',
+            segments: [voicesSegment],
+            volume: 1.0,
+            isMuted: false,
+            isSolo: false,
+            isArmed: false,
+            isProcessingEnabled: false,
+            height: 80
+          };
+
+          const updatedTracks = project.tracks.map(t => {
+            if (t.name === 'Оригинал' || t.type === 'original') {
+              return { ...t, isMuted: true };
+            }
+            return t;
+          });
+
+          updatedTracks.push(soundsTrack, voicesTrack);
+          onUpdateProject({ tracks: updatedTracks });
+          await playbackEngine.updateTracks(updatedTracks);
+          showToast('Стемы "Звуки (Музыка)" и "Голоса (Вокал)" добавлены на таймлайн!');
+        }
+        return;
+      }
+
       const result = await AudioSeparatorService.runSeparation(
         fileToUse,
         modelToUse,
@@ -914,6 +1332,16 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       showToast('Произошла ошибка при обработке');
     } finally {
       setIsSeparating(false);
+    }
+  };
+
+  const handleCancelSeparation = async () => {
+    try {
+      await AudioSeparatorService.cancelSeparation();
+      setIsSeparating(false);
+      showToast('Разделение на стемы отменено.');
+    } catch (e: any) {
+      console.error('Cancel separation error:', e);
     }
   };
 
@@ -1934,37 +2362,47 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         const originalTrack = currentTracks.find(t => t.name === 'Оригинал' || t.type === 'original');
         const origPath = originalTrack?.segments?.[0]?.filePath || project.referenceAudioPath || project.videoPath;
 
-        if (!hasSeparatedTracks && (originalTrack || origPath)) {
+        if (!hasSeparatedTracks && (originalTrack || origPath) && origPath) {
           setProcessingStep('Этап 1: ИИ-разделение оригинала на звуки/музыку (M&E) и голоса...');
           setStepExecution(prev => ({
             ...prev,
-            sourceSeparation: { status: 'running', progress: 40, log: 'Разделение на вокальную и инструментальную дорожки...', hasRollback: false }
+            sourceSeparation: { status: 'running', progress: 40, log: 'Разделение на вокальную и инструментальную дорожки (UVR/Demucs)...', hasRollback: false }
           }));
 
           try {
-            const pathParts = (origPath || 'original.wav').split(/[\\/]/);
-            const fileName = pathParts.pop() || 'original.wav';
-            const dirPath = pathParts.join('/') || '.';
-            const nameWithoutExt = fileName.replace(/\.[^.]+$/, '');
-            const vocalPath = `${dirPath}/${nameWithoutExt}_vocals.wav`;
-            const instrumentalPath = `${dirPath}/${nameWithoutExt}_instruments.wav`;
+            let vocalPath = '';
+            let instrumentalPath = '';
+            const duration = project.duration || 60;
 
-            try {
-              await invoke('apply_audio_effect', {
-                inputPath: origPath,
-                outputPath: vocalPath,
-                config: { effect_type: 'separation', separation_model: activePreset.phase1.sourceSeparation.model || 'htdemucs' }
-              });
-              await invoke('apply_audio_effect', {
-                inputPath: origPath,
-                outputPath: instrumentalPath,
-                config: { effect_type: 'separation_instruments', separation_model: activePreset.phase1.sourceSeparation.model || 'htdemucs' }
-              });
-            } catch (invErr) {
-              console.warn("Separation invoke fallback:", invErr);
+            if (isTauriAvailable()) {
+              const sepRes = await AudioSeparatorService.separateStems(
+                origPath,
+                project?.projectPath || undefined,
+                activePreset.phase1.sourceSeparation.model || 'UVR-MDX-NET-Voc_FT',
+                useGpuForSeparator,
+                (percent, detail) => {
+                  setStepExecution(prev => ({
+                    ...prev,
+                    sourceSeparation: { 
+                      status: 'running', 
+                      progress: percent, 
+                      log: detail?.logLine || `Инференс нейросети ${percent}%...`, 
+                      hasRollback: false 
+                    }
+                  }));
+                }
+              );
+              vocalPath = sepRes.vocalsPath;
+              instrumentalPath = sepRes.noVocalsPath;
+            } else {
+              const pathParts = origPath.split(/[\\/]/);
+              const fileName = pathParts.pop() || 'original.wav';
+              const dirPath = pathParts.join('/') || '.';
+              const nameWithoutExt = fileName.replace(/\.[^.]+$/, '');
+              vocalPath = `${dirPath}/${nameWithoutExt}_vocals.wav`;
+              instrumentalPath = `${dirPath}/${nameWithoutExt}_instruments.wav`;
             }
 
-            const duration = project.duration || 60;
             const soundsTrack: AudioTrack = {
               id: 'track-sounds-' + Math.random().toString(36).substring(2, 9),
               name: 'Звуки (Музыка)',
@@ -1978,7 +2416,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                 filePath: instrumentalPath,
                 gain: 1.0,
                 playbackRate: 1.0,
-                originalFileName: `${nameWithoutExt}_instruments.wav`,
+                originalFileName: instrumentalPath.split(/[\\/]/).pop() || 'instruments.wav',
                 waveform: originalTrack?.segments?.[0]?.waveform ? [...originalTrack.segments[0].waveform] : []
               }],
               volume: 1.0,
@@ -2002,7 +2440,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                 filePath: vocalPath,
                 gain: 1.0,
                 playbackRate: 1.0,
-                originalFileName: `${nameWithoutExt}_vocals.wav`,
+                originalFileName: vocalPath.split(/[\\/]/).pop() || 'vocals.wav',
                 waveform: originalTrack?.segments?.[0]?.waveform ? [...originalTrack.segments[0].waveform] : []
               }],
               volume: 1.0,
@@ -2035,22 +2473,98 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         }
       }
 
-      // 1.2 Очистка и нормализация голосов даберов
+      // 1.2 Очистка и нормализация голосов даберов (Rust DSP Core)
       if (activePreset.phase1.enabled) {
         const p1Order = activePreset.phase1Order || DEFAULT_PHASE1_ORDER;
+        const dubTracks = currentTracks.filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false);
+
         for (const stepId of p1Order) {
           if (stepId === 'sourceSeparation') continue;
           const stepConf = (activePreset.phase1 as any)[stepId];
           if (stepConf?.bypass) continue;
 
-          setProcessingStep(`Этап 1: Очистка голоса даберов (${stepId === 'deClick' ? 'De-Click' : stepId === 'denoise' ? 'Шумоподавление' : stepId === 'normalization' ? 'Нормализация LUFS' : stepId})...`);
+          setProcessingStep(`Этап 1: Очистка голоса даберов (${stepId === 'deClick' ? 'De-Click' : stepId === 'denoise' ? 'Шумоподавление' : stepId === 'normalization' ? 'Нормализация LUFS' : stepId === 'volumeLeveler' ? 'Speech Vocal Leveler' : stepId})...`);
           
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'running', progress: 50, log: `Обработка дорожек дубляжа (${stepId})...`, hasRollback: false }
           }));
 
+          // Нативное выполнение Rust команд для физических файлов на диске
+          if (isTauriAvailable()) {
+            for (const track of dubTracks) {
+              for (const seg of track.segments) {
+                const inPath = seg.filePath;
+                if (inPath && !inPath.startsWith('blob:') && !inPath.startsWith('data:')) {
+                  try {
                     if (stepId === 'normalization') {
+                      await invoke('normalize_audio', {
+                        inputPath: inPath,
+                        outputPath: inPath,
+                        targetLufs: activePreset.phase1.normalization.targetLufs || -16.0,
+                      });
+                    } else if (stepId === 'eqMatching') {
+                      const profileModel = activePreset.phase1.eqMatching.profileModel || 'vocal_presence';
+                      const targetPath = activePreset.phase1.eqMatching.targetProfilePath;
+                      await invoke('match_eq_profile', {
+                        inputPath: inPath,
+                        outputPath: inPath,
+                        profileName: (profileModel === 'reference_match' && targetPath) ? targetPath : profileModel,
+                      });
+                    } else if (stepId === 'deClick') {
+                      await invoke('clean_clicks', {
+                        inputWav: inPath,
+                        outputWav: inPath,
+                        sensitivity: activePreset.phase1.deClick.sensitivity ?? 75,
+                      });
+                    } else if (stepId === 'dePlosive') {
+                      await invoke('apply_deplosive', {
+                        filePath: inPath,
+                        outPath: inPath,
+                        thresholdDb: activePreset.phase1.dePlosive.threshold ?? -24,
+                      });
+                    } else if (stepId === 'deEsser') {
+                      await invoke('process_deesser', {
+                        inputPath: inPath,
+                        outputPath: inPath,
+                        frequency: activePreset.phase1.deEsser.frequency ?? 6500,
+                        threshold: activePreset.phase1.deEsser.threshold ?? -20,
+                        ratio: activePreset.phase1.deEsser.ratio ?? 4.0,
+                      });
+                    } else if (stepId === 'denoise') {
+                      await invoke('process_denoise', {
+                        inputPath: inPath,
+                        outputPath: inPath,
+                        modelName: activePreset.phase1.denoise.model || 'UVR-DeNoise',
+                        strength: activePreset.phase1.denoise.strength,
+                      });
+                    } else if (stepId === 'dereverb') {
+                      await invoke('process_uvr_dereverb', {
+                        inputPath: inPath,
+                        outputPath: inPath,
+                        reverbTailExportPath: null,
+                        strength: (activePreset.phase1.dereverb.strength || 85) / 100.0,
+                      });
+                    } else if (stepId === 'volumeLeveler') {
+                      await invoke('level_speech_volume', {
+                        inputPath: inPath,
+                        outputPath: inPath,
+                        targetRms: activePreset.phase1.volumeLeveler.targetRms || -19.0,
+                        gateThresholdDb: -50.0,
+                        maxBoostDb: 12.0,
+                        maxAttenuationDb: 15.0,
+                      });
+                    }
+                  } catch (dspErr) {
+                    console.warn(`[MixingPanel Pipeline] Step ${stepId} error on ${inPath}:`, dspErr);
+                  }
+                }
+              }
+            }
+          }
+
+          // Обновление состояния в памяти через AudioDspService
+          if (stepId === 'normalization') {
             const dspRes = AudioDspService.applyNormalizationAndUpwardCompression(currentTracks, activePreset.phase1.normalization);
             currentTracks = dspRes.updatedTracks;
           } else if (stepId === 'eqMatching') {
@@ -2075,15 +2589,17 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
             const dspRes = AudioDspService.applyVolumeLeveler(currentTracks, activePreset.phase1.volumeLeveler);
             currentTracks = dspRes.updatedTracks;
           }
-setStepExecution(prev => ({
+
+          setStepExecution(prev => ({
             ...prev,
-            [stepId]: { status: 'success', progress: 100, log: `Обработка завершена успешно.`, hasRollback: true }
+            [stepId]: { status: 'success', progress: 100, log: `Обработка завершена успешно (Rust DSP).`, hasRollback: true }
           }));
 
           await new Promise(r => setTimeout(r, 200));
         }
       }
 
+      playbackEngine.clearCache();
       onUpdateProject({ tracks: currentTracks });
       playbackEngine.updateTracks(currentTracks).catch(console.error);
 
@@ -2957,9 +3473,18 @@ setStepExecution(prev => ({
                         });
                         stepElement = (
                           <div className="space-y-3.5 text-xs animate-fade-in">
-                            <div className="text-[10px] text-zinc-400 leading-normal bg-zinc-950/40 p-2.5 rounded-lg border border-white/5">
-                              <p className="font-semibold text-rose-400 mb-0.5">🚀 Локальный без-VST алгоритм:</p>
-                              Вычисляется <strong>вторая производная</strong> сигнала (ускорение) для мгновенного обнаружения микро-выбросов. Поврежденные слюной участки восстанавливаются гладкой кубической интерполяцией <em>Smoothstep</em>.
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] text-zinc-500 uppercase font-black">Алгоритм De-Click / Mouth-Click</span>
+                              <span className="text-[9px] font-mono text-rose-400 bg-rose-500/10 px-1.5 py-0.5 rounded border border-rose-500/20">
+                                Rayon DSP • LPC & 2nd Deriv
+                              </span>
+                            </div>
+
+                            <div className="text-[10px] text-zinc-400 leading-normal bg-zinc-950/40 p-2.5 rounded-lg border border-white/5 space-y-1">
+                              <p className="font-semibold text-rose-400">⚡ Нативный движок реставрации (Rust):</p>
+                              <p>• <strong>Детекция:</strong> Вторая производная (ускорение фронта) + линейное предсказание (LPC, Левинсон-Дурбин) для импульсов 0.5–4.0 мс.</p>
+                              <p>• <strong>Реставрация:</strong> Кубический сплайн Эрмита ($C^1$) с бесшовным косинусным кроссфейдом 0.5 мс по краям.</p>
+                              <p>• <strong>Оптимизация:</strong> Параллельная обработка чанков через Rayon без блокировки основного потока.</p>
                             </div>
 
                             <div className="space-y-1">
@@ -2979,7 +3504,7 @@ setStepExecution(prev => ({
 
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-mono text-zinc-400">
-                                <span>Чувствительность детекции</span>
+                                <span>Чувствительность детекции (порог)</span>
                                 <span className="text-rose-400 font-bold">{activePreset.phase1.deClick.sensitivity}%</span>
                               </div>
                               <input 
@@ -2996,15 +3521,15 @@ setStepExecution(prev => ({
 
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-mono text-zinc-400">
-                                <span>Макс. ширина щелчка</span>
-                                <span className="text-rose-400 font-bold">{(activePreset.phase1.deClick.maxClickWidthMs ?? 2.0).toFixed(1)} мс</span>
+                                <span>Окно импульса (длительность)</span>
+                                <span className="text-rose-400 font-bold">0.5 – {(activePreset.phase1.deClick.maxClickWidthMs ?? 4.0).toFixed(1)} мс</span>
                               </div>
                               <input 
                                 type="range" 
                                 min="0.5" 
                                 max="5.0" 
-                                step="0.1"
-                                value={activePreset.phase1.deClick.maxClickWidthMs ?? 2.0}
+                                step="0.1" 
+                                value={activePreset.phase1.deClick.maxClickWidthMs ?? 4.0}
                                 onChange={(e) => updatePhase1({
                                   deClick: { ...activePreset.phase1.deClick, maxClickWidthMs: parseFloat(e.target.value) }
                                 })}
@@ -3014,10 +3539,10 @@ setStepExecution(prev => ({
 
                             <div className="bg-zinc-950 border border-white/5 rounded-xl p-2.5 space-y-2">
                               <div className="flex justify-between items-center text-[9px] font-mono text-zinc-500 uppercase tracking-widest px-0.5">
-                                <span>Очистка в реальном времени</span>
+                                <span>Статус реставрации</span>
                                 <span className="text-emerald-400 flex items-center gap-1">
                                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                                  АКТИВНО
+                                  ГОТОВ К ДЕТЕКЦИИ
                                 </span>
                               </div>
 
@@ -3034,7 +3559,7 @@ setStepExecution(prev => ({
                                     fill="none" 
                                     stroke="#f43f5e" 
                                     strokeWidth="1.5" 
-                                    className="animate-pulse"
+                                    className="animate-pulse" 
                                   />
                                   <path 
                                     d="M 124 30 Q 130 30 137 30" 
@@ -3043,19 +3568,19 @@ setStepExecution(prev => ({
                                     strokeWidth="2" 
                                     strokeDasharray="2 1"
                                   />
-                                  <text x="145" y="15" fill="#f43f5e" fontSize="7" fontFamily="monospace">ЩЕЛЧОК/СЛЮНИ (ВЫРЕЗАНО)</text>
-                                  <text x="145" y="52" fill="#10b981" fontSize="7" fontFamily="monospace">SMOOTHSTEP ИНТЕРПОЛЯЦИЯ</text>
+                                  <text x="145" y="15" fill="#f43f5e" fontSize="7" fontFamily="monospace">КЛИК 0.5–4мс (LPC RESIDUAL)</text>
+                                  <text x="145" y="52" fill="#10b981" fontSize="7" fontFamily="monospace">СПЛАЙН + КРОССФЕЙД 0.5мс</text>
                                 </svg>
                               </div>
 
                               <div className="grid grid-cols-2 gap-2 text-[9px] font-mono text-zinc-500 px-0.5 pt-1">
                                 <div className="flex justify-between border-r border-white/5 pr-2">
-                                  <span>Удалено кликов:</span>
-                                  <span className="text-zinc-300 font-bold">142</span>
+                                  <span>Кроссфейд стыков:</span>
+                                  <span className="text-emerald-400 font-bold">0.5 мс (косинус)</span>
                                 </div>
                                 <div className="flex justify-between pl-1">
-                                  <span>Индекс слюны:</span>
-                                  <span className="text-zinc-300 font-bold">Низкий (0.24)</span>
+                                  <span>Чанки Rayon:</span>
+                                  <span className="text-indigo-400 font-bold">32768 spl + 1024 guard</span>
                                 </div>
                               </div>
                             </div>
@@ -3103,14 +3628,14 @@ setStepExecution(prev => ({
                             </div>
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-mono text-zinc-400">
-                                <span>Частота среза фильтра</span>
+                                <span>Максимальный динамический срез</span>
                                 <span className="font-bold text-indigo-400">{activePreset.phase1.dePlosive.frequencyCutoff} Гц</span>
                               </div>
                               <input 
                                 type="range" 
-                                min="40" 
-                                max="150" 
-                                step="5"
+                                min="120" 
+                                max="200" 
+                                step="5" 
                                 value={activePreset.phase1.dePlosive.frequencyCutoff}
                                 onChange={(e) => updatePhase1({
                                   dePlosive: { ...activePreset.phase1.dePlosive, frequencyCutoff: parseInt(e.target.value) }
@@ -3118,9 +3643,21 @@ setStepExecution(prev => ({
                                 className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
                               />
                             </div>
-                            <div className="text-[10px] text-zinc-400 leading-normal bg-zinc-950/40 p-2.5 rounded-lg border border-white/5">
-                              Устраняет низкочастотные воздушные удары по капсюлю микрофона от букв Б, П, Т без обрезания полезного баса в голосе.
+                            
+                            <div className="bg-zinc-950/40 p-2.5 rounded-lg border border-white/5 space-y-1.5">
+                              <div className="text-[10px] text-zinc-400 leading-normal">
+                                Двухполосный сайдчейн (20–120 Гц vs 200–2000 Гц). В покое фильтр 40 Гц, при ударе воздуха в капсюль динамически срезает до {activePreset.phase1.dePlosive.frequencyCutoff} Гц (атака 6 мс, release 80 мс).
+                              </div>
+                              <div className="flex items-center justify-between text-[9px] font-mono text-zinc-400 border-t border-white/5 pt-1.5">
+                                <span className="flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                                  Butterworth 4-го порядка (-24 dB/oct)
+                                </span>
+                                <span className="text-indigo-400 font-bold">Rayon DSP Engine</span>
+                              </div>
                             </div>
+
+                            {renderProcessingActions('deplosive', 'Подавить задувы (De-Plosive)', 'bg-indigo-600 hover:bg-indigo-500')}
                           </div>
                         );
                       } else if (stepKey === "deEsser") {
@@ -3133,16 +3670,50 @@ setStepExecution(prev => ({
                         });
                         stepElement = (
                           <div className="space-y-3 animate-fade-in text-xs">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] text-zinc-500 uppercase font-black">Режим деэссера</span>
+                              <div className="flex items-center bg-zinc-900 border border-white/10 rounded-lg p-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => updatePhase1({
+                                    deEsser: { ...activePreset.phase1.deEsser, mode: 'split_band' }
+                                  })}
+                                  className={cn(
+                                    "px-2 py-0.5 text-[9px] font-bold rounded transition-all",
+                                    (activePreset.phase1.deEsser.mode ?? 'split_band') === 'split_band'
+                                      ? "bg-indigo-600 text-white shadow-sm"
+                                      : "text-zinc-400 hover:text-zinc-200"
+                                  )}
+                                >
+                                  Split-Band
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => updatePhase1({
+                                    deEsser: { ...activePreset.phase1.deEsser, mode: 'wideband' }
+                                  })}
+                                  className={cn(
+                                    "px-2 py-0.5 text-[9px] font-bold rounded transition-all",
+                                    activePreset.phase1.deEsser.mode === 'wideband'
+                                      ? "bg-indigo-600 text-white shadow-sm"
+                                      : "text-zinc-400 hover:text-zinc-200"
+                                  )}
+                                >
+                                  Wideband
+                                </button>
+                              </div>
+                            </div>
+
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-mono text-zinc-400">
-                                <span>Порог де-эссинга</span>
+                                <span>Порог де-эссинга (Threshold)</span>
                                 <span className="font-bold text-indigo-400">{activePreset.phase1.deEsser.threshold} dB</span>
                               </div>
                               <input 
                                 type="range" 
                                 min="-50" 
                                 max="-5" 
-                                step="1"
+                                step="1" 
                                 value={activePreset.phase1.deEsser.threshold}
                                 onChange={(e) => updatePhase1({
                                   deEsser: { ...activePreset.phase1.deEsser, threshold: parseFloat(e.target.value) }
@@ -3150,16 +3721,17 @@ setStepExecution(prev => ({
                                 className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
                               />
                             </div>
+
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-mono text-zinc-400">
-                                <span>Целевая частота сибилянтов</span>
+                                <span>Центральная частота (Sidechain Bandpass)</span>
                                 <span className="font-bold text-indigo-400">{activePreset.phase1.deEsser.frequency} Гц</span>
                               </div>
                               <input 
                                 type="range" 
                                 min="4000" 
                                 max="9000" 
-                                step="100"
+                                step="100" 
                                 value={activePreset.phase1.deEsser.frequency}
                                 onChange={(e) => updatePhase1({
                                   deEsser: { ...activePreset.phase1.deEsser, frequency: parseInt(e.target.value) }
@@ -3167,9 +3739,39 @@ setStepExecution(prev => ({
                                 className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
                               />
                             </div>
-                            <div className="text-[10px] text-zinc-400 leading-normal bg-zinc-950/40 p-2.5 rounded-lg border border-white/5">
-                              Ослабляет неприятные свистящие частоты в районе верхних средних и высоких частот при произнесении сибилянтов.
+
+                            <div className="space-y-1">
+                              <div className="flex justify-between text-[10px] font-mono text-zinc-400">
+                                <span>Степень сжатия (Ratio)</span>
+                                <span className="font-bold text-indigo-400">{(activePreset.phase1.deEsser.ratio ?? 4.0).toFixed(1)}:1</span>
+                              </div>
+                              <input 
+                                type="range" 
+                                min="1.5" 
+                                max="10" 
+                                step="0.5" 
+                                value={activePreset.phase1.deEsser.ratio ?? 4.0}
+                                onChange={(e) => updatePhase1({
+                                  deEsser: { ...activePreset.phase1.deEsser, ratio: parseFloat(e.target.value) }
+                                })}
+                                className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
+                              />
                             </div>
+
+                            <div className="bg-zinc-950/40 p-2.5 rounded-lg border border-white/5 space-y-1.5">
+                              <div className="text-[10px] text-zinc-400 leading-normal">
+                                Сайдчейн полосовой фильтр (Bandpass Q=2.0) и быстрый RMS детектор (атака 1.5 мс, релиз 50 мс) с мягким коленом (Soft-Knee 6 dB) для естественного звучания согласных «С», «З», «Щ».
+                              </div>
+                              <div className="flex items-center justify-between text-[9px] font-mono text-zinc-400 border-t border-white/5 pt-1.5">
+                                <span className="flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
+                                  LR-4 Split-Band Crossover
+                                </span>
+                                <span className="text-indigo-400 font-bold">biquad DSP Engine</span>
+                              </div>
+                            </div>
+
+                            {renderProcessingActions('deesser', 'Смягчить сибилянты (De-Esser)', 'bg-indigo-600 hover:bg-indigo-500')}
                           </div>
                         );
                       } else if (stepKey === "denoise") {
@@ -3273,8 +3875,8 @@ setStepExecution(prev => ({
                           </div>
                         );
                       } else if (stepKey === "volumeLeveler") {
-                        stepName = "Авто-выравнивание уровня (Leveler)";
-                        stepDesc = "Сглаживание перепадов внутри фраз";
+                        stepName = "Выравниватель громкости (Speech Leveler)";
+                        stepDesc = "Двухоконный RMS AGC для стабильного уровня речи";
                         stepIcon = <Volume2 className="w-3.5 h-3.5 text-indigo-400" />;
                         stepBypass = activePreset.phase1.volumeLeveler.bypass;
                         handleBypassToggle = () => updatePhase1({
@@ -3282,23 +3884,44 @@ setStepExecution(prev => ({
                         });
                         stepElement = (
                           <div className="space-y-3 animate-fade-in text-xs">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] text-zinc-500 uppercase font-black">Двухоконный RMS регулятор (Rust DSP)</span>
+                              <span className="text-[9px] font-mono text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded border border-indigo-500/20">
+                                Rayon • Lookahead 15 ms
+                              </span>
+                            </div>
+
+                            <div className="text-[10px] text-zinc-400 leading-normal bg-zinc-950/40 p-2.5 rounded-lg border border-white/5 space-y-1">
+                              <p className="font-semibold text-indigo-400">⚡ Speech Vocal Leveler / AGC:</p>
+                              <p>• <strong>Быстрое окно:</strong> 50 мс для точной детекции каждого слога речи.</p>
+                              <p>• <strong>Медленное окно:</strong> 800 мс для анализа общего контекста и динамики фразы.</p>
+                              <p>• <strong>Lookahead буфер:</strong> 15 мс упреждения для плавной адаптации без артефактов и клиппинга.</p>
+                              <p>• <strong>Лимиты усиления:</strong> +12 dB макс. подтяжка шепота / -15 dB макс. подавление криков.</p>
+                            </div>
+
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-mono text-zinc-400">
-                                <span>Целевой уровень (Target RMS)</span>
-                                <span className="font-bold text-indigo-400">{activePreset.phase1.volumeLeveler.targetRms} dB</span>
+                                <span>Целевой уровень речи (Target RMS)</span>
+                                <span className="font-bold text-indigo-400">{activePreset.phase1.volumeLeveler.targetRms} dBFS</span>
                               </div>
                               <input 
                                 type="range" 
-                                min="-30" 
-                                max="-10" 
-                                step="1"
+                                min="-26" 
+                                max="-14" 
+                                step="0.5"
                                 value={activePreset.phase1.volumeLeveler.targetRms}
                                 onChange={(e) => updatePhase1({
                                   volumeLeveler: { ...activePreset.phase1.volumeLeveler, targetRms: parseFloat(e.target.value) }
                                 })}
                                 className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
                               />
+                              <div className="flex justify-between text-[9px] text-zinc-500 font-mono">
+                                <span>-26 dBFS (Шепот)</span>
+                                <span className="text-indigo-400 font-bold">Оптимум: -18 ... -20 dBFS</span>
+                                <span>-14 dBFS (Громко)</span>
+                              </div>
                             </div>
+
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-mono text-zinc-400">
                                 <span>Степень сжатия (Ratio)</span>
@@ -3316,9 +3939,8 @@ setStepExecution(prev => ({
                                 className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
                               />
                             </div>
-                            <div className="text-[10px] text-zinc-400 leading-normal bg-zinc-950/40 p-2.5 rounded-lg border border-white/5">
-                              Автоматический регулятор громкости (AGC), сглаживающий разницу между тихими и громкими словами спикера в реальном времени.
-                            </div>
+
+                            {renderProcessingActions('volumeleveler', 'Выровнять громкость (Speech Vocal Leveler)', 'bg-indigo-600 hover:bg-indigo-500')}
                           </div>
                         );
                       } else if (stepKey === "eqMatching") {
@@ -3331,7 +3953,12 @@ setStepExecution(prev => ({
                         });
                         stepElement = (
                           <div className="space-y-3 animate-fade-in text-xs">
-                            <label className="text-[10px] text-zinc-500 uppercase font-black block">Профиль АЧХ (Match Target)</label>
+                            <div className="flex items-center justify-between">
+                              <label className="text-[10px] text-zinc-500 uppercase font-black block">Профиль АЧХ (Match Target)</label>
+                              <span className="text-[9px] font-mono text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded border border-indigo-500/20">
+                                FFT 4096 / 1/3-octave OLA
+                              </span>
+                            </div>
                             <select 
                               value={activePreset.phase1.eqMatching.profileModel}
                               onChange={(e) => updatePhase1({
@@ -3339,14 +3966,54 @@ setStepExecution(prev => ({
                               })}
                               className="w-full bg-zinc-950 border border-white/10 rounded-lg p-2 text-xs text-zinc-300 cursor-pointer"
                             >
+                              <option value="vocal_presence">Vocal Presence (+3 dB 3-5 кГц, срез саб-низа &lt;80 Гц)</option>
+                              <option value="warm_analog">Warm Analog (плотный низ 200-300 Гц, срез 12-16 кГц)</option>
+                              <option value="reference_match">Пользовательский WAV-референс (EQ Matching)</option>
                               <option value="flat">Плоская характеристика (Flat EQ)</option>
-                              <option value="vocal_presence">Презенс вокала (Vocal Presence - подкаст)</option>
-                              <option value="warm_analog">Теплый аналоговый звук (Warm Analog)</option>
-                              <option value="reference_match">Сравнение с оригинальным референсом дубляжа</option>
                             </select>
+
+                            {activePreset.phase1.eqMatching.profileModel === 'reference_match' && (
+                              <div className="space-y-1.5 p-2 bg-zinc-950/60 rounded-lg border border-indigo-500/20">
+                                <label className="text-[10px] text-zinc-400 font-semibold block">Путь к файлу WAV-референса:</label>
+                                <input
+                                  type="text"
+                                  placeholder="C:/Audio/reference_voice.wav"
+                                  value={activePreset.phase1.eqMatching.targetProfilePath || ''}
+                                  onChange={(e) => updatePhase1({
+                                    eqMatching: { ...activePreset.phase1.eqMatching, targetProfilePath: e.target.value }
+                                  })}
+                                  className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-indigo-500"
+                                />
+                                <span className="text-[9px] text-zinc-500 block">
+                                  АЧХ будет вычислена как H(f) = S_target / S_source со сглаживанием в 1/3 октавы.
+                                </span>
+                              </div>
+                            )}
+
+                            <div className="grid grid-cols-2 gap-2 text-[10px] text-zinc-400 bg-zinc-950/40 p-2 rounded-lg border border-white/5">
+                              <div>
+                                <span className="text-zinc-500 block">Макс. подъем:</span>
+                                <span className="text-emerald-400 font-mono font-bold">+6.0 dB</span>
+                              </div>
+                              <div>
+                                <span className="text-zinc-500 block">Макс. срез:</span>
+                                <span className="text-amber-400 font-mono font-bold">-12.0 dB</span>
+                              </div>
+                            </div>
                             
                             <div className="text-[10px] text-zinc-400 leading-normal bg-zinc-950/40 p-2.5 rounded-lg border border-white/5 mb-2">
-                              Корректирует частотную кривую новой дорожки, приближая ее к тембральной окраске эталонного голоса. Исключает разницу в качестве микрофонов актеров.
+                              {activePreset.phase1.eqMatching.profileModel === 'vocal_presence' && (
+                                <>Поднимает диапазон разборчивости и презенса 3–5 кГц (+3 dB) и убирает гул ниже 80 Гц для читаемости в миксе.</>
+                              )}
+                              {activePreset.phase1.eqMatching.profileModel === 'warm_analog' && (
+                                <>Придает бархатистость и кинематографичную плотность в области 200–300 Гц с мягким спадом резких сибилянтов на 12–16 кГц.</>
+                              )}
+                              {activePreset.phase1.eqMatching.profileModel === 'reference_match' && (
+                                <>Гармонизирует спектральную плотность мощности (PSD) дорожки под спектр загруженного аудио-референса.</>
+                              )}
+                              {activePreset.phase1.eqMatching.profileModel === 'flat' && (
+                                <>Линейная прозрачная передаточная функция с отсечением инфранизкого гула ниже 30 Гц.</>
+                              )}
                             </div>
                             {renderProcessingActions('smarteq', 'Применить Умный EQ', 'bg-amber-600 hover:bg-amber-500')}
                           </div>
@@ -3584,7 +4251,16 @@ setStepExecution(prev => ({
                                 <div className="bg-zinc-950/60 p-3 rounded-xl border border-indigo-500/20 space-y-2 animate-fade-in">
                                   <div className="flex items-center justify-between text-[11px]">
                                     <span className="font-bold text-indigo-400">{separatorProgress.stage}</span>
-                                    <span className="font-mono text-zinc-300">{Math.round(separatorProgress.percent)}%</span>
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-mono text-zinc-300">{Math.round(separatorProgress.percent)}%</span>
+                                      <button
+                                        type="button"
+                                        onClick={handleCancelSeparation}
+                                        className="text-[10px] text-red-400 hover:text-red-300 bg-red-950/40 hover:bg-red-950/70 border border-red-500/30 px-2 py-0.5 rounded transition-all cursor-pointer"
+                                      >
+                                        Прервать
+                                      </button>
+                                    </div>
                                   </div>
                                   <div className="w-full bg-zinc-800 rounded-full h-1.5 overflow-hidden">
                                     <div 

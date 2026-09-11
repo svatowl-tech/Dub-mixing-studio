@@ -9,8 +9,9 @@
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
-    "build:desktop": "node scripts/setup_embed_py.js && tauri build",
+    "download:models": "node scripts/download_models.js",
     "setup:ai": "node scripts/setup_embed_py.js",
+    "build:desktop": "node scripts/download_models.js && node scripts/setup_embed_py.js && tauri build",
     "preview": "vite preview",
     "clean": "rm -rf dist src-tauri/target",
     "lint": "tsc --noEmit",

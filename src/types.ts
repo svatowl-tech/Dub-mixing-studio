@@ -359,6 +359,8 @@ export interface PrepProcessingConfig {
     threshold: number; // dB
     frequency: number; // Hz
     bypass: boolean;
+    ratio?: number;
+    mode?: 'split_band' | 'wideband';
     vstPluginId?: string;
   };
   
@@ -393,6 +395,110 @@ export interface PrepProcessingConfig {
     keepSeparatedStems: boolean;
     bypass: boolean;
   };
+}
+
+export interface NormalizationStats {
+  initialLufs: number;
+  finalLufs: number;
+  initialTruePeakDb: number;
+  finalTruePeakDb: number;
+  gainAppliedDb: number;
+  upwardCompressionApplied: boolean;
+  sampleRate: number;
+  channels: number;
+  durationSec: number;
+  outputPath?: string;
+}
+
+export interface DeclickReport {
+  clicksDetected: number;
+  samplesRestored: number;
+  channels: number;
+  sampleRate: number;
+  durationSec: number;
+  processedPath: string;
+}
+
+export interface DeplosiveReport {
+  plosivesDetected: number;
+  maxReductionDb: number;
+  channels: number;
+  sampleRate: number;
+  durationSec: number;
+  processedPath: string;
+}
+
+export interface DeEsserReport {
+  sibilantsDetected: number;
+  maxReductionDb: number;
+  channels: number;
+  sampleRate: number;
+  durationSec: number;
+  processedPath: string;
+}
+
+export interface DenoiseProgressPayload {
+  percent: number;
+  currentFrame: number;
+  totalFrames: number;
+  stage: string;
+}
+
+export interface DenoiseReport {
+  modelName: string;
+  providerUsed: string;
+  sampleRate: number;
+  channels: number;
+  durationSec: number;
+  noiseReductionDb: number;
+  processedPath: string;
+  isNeural: boolean;
+}
+
+export interface DereverbProgressPayload {
+  percent: number;
+  currentFrame: number;
+  totalFrames: number;
+  stage: string;
+}
+
+export interface DereverbResult {
+  modelName: string;
+  providerUsed: string;
+  sampleRate: number;
+  channels: number;
+  durationSec: number;
+  reverbReductionDb: number;
+  dryVocalPath: string;
+  reverbTailPath?: string | null;
+  isNeural: boolean;
+}
+
+export interface VolumeLevelerReport {
+  inputPath: string;
+  outputPath: string;
+  sampleRate: number;
+  channels: number;
+  durationSec: number;
+  initialRmsDb: number;
+  finalRmsDb: number;
+  dynamicRangeCompressedDb: number;
+  maxBoostAppliedDb: number;
+  maxCutAppliedDb: number;
+  speechPercentage: number;
+}
+
+export interface SeparationResult {
+  vocalsPath: string;
+  noVocalsPath: string;
+  modelName: string;
+  durationSec: number;
+}
+
+export interface SeparationProgressPayload {
+  percent: number;
+  stage: string;
+  logLine: string;
 }
 
 // Этап 2: Тайминг и выравнивание (Timing & Alignment)
