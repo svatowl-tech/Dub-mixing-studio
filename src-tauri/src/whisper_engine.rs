@@ -3,17 +3,15 @@
 
 use hound::{SampleFormat, WavReader};
 use rubato::{
-    FastFixedIn, PolynomialDegree, Resampler, SincFixedIn, SincInterpolationParameters,
+    Resampler, SincFixedIn, SincInterpolationParameters,
     SincInterpolationType, WindowFunction,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use tauri::command;
 
 /// Модели Whisper
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum WhisperModelType {
@@ -187,9 +185,8 @@ pub fn resample_audio_rubato(
         return Ok(samples.to_vec());
     }
 
-    // Инициализируем SincFixedIn или FastFixedIn ресэмплер
+    // Инициализируем SincFixedIn ресэмплер
     let chunk_size = 1024;
-    let sub_chunks = 2;
 
     let params = SincInterpolationParameters {
         sinc_len: 64,
@@ -438,9 +435,6 @@ pub fn run_whisper_transcription(
         .unwrap_or("ggml-base.bin")
         .to_string();
 
-    let lang = config.language.as_deref().unwrap_or("ru");
-    let n_threads = config.n_threads.unwrap_or(4).max(1);
-
     // 3. Вызов Whisper (whisper.cpp)
     // Примечание: При наличии библиотеки whisper-rs выполняется нативный вызов WhisperContext.
     // Если бинарная модель не найдена на диске, формируется аккуратный распознанный сегмент с подсказками сценария.
@@ -448,6 +442,9 @@ pub fn run_whisper_transcription(
 
     #[cfg(feature = "whisper-rs")]
     {
+        let lang = config.language.as_deref().unwrap_or("ru");
+        let n_threads = config.n_threads.unwrap_or(4).max(1);
+
         if model_path.exists() {
             use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
             let ctx = WhisperContext::new_with_params(

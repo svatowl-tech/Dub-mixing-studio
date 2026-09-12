@@ -1,14 +1,10 @@
 // Модуль интеллектуального тайм-алигнмента (Smart Align) и Time-Stretching на Rust.
-// Стек: rustfft = "6.2.0" (GCC-PHAT / cross-correlation), WSOLA (Waveform Similarity Overlap-Add), hound = "3.5.1"
+// Стек: WSOLA (Waveform Similarity Overlap-Add), hound = "3.5.1"
 
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
-use rustfft::num_complex::Complex;
-use rustfft::FftPlanner;
 use serde::{Deserialize, Serialize};
 use std::f32::consts::PI;
-use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
 use tauri::command;
 
 /// Результат выравнивания вокального клипа

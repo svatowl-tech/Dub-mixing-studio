@@ -65,10 +65,10 @@ async function setupWindows() {
     // Install audio-separator and required dependencies
     console.log('[AI Env Setup] Installing audio-separator for Windows...');
     try {
-        execSync(`"${pyExe}" -m pip install --no-cache-dir "audio-separator[gpu]" onnxruntime-gpu --no-warn-script-location`, { stdio: 'inherit' });
-    } catch (gpuErr) {
-        console.warn('[AI Env Setup] GPU audio-separator installation failed, falling back to CPU version:', gpuErr.message);
         execSync(`"${pyExe}" -m pip install --no-cache-dir "audio-separator[cpu]" onnxruntime --extra-index-url https://download.pytorch.org/whl/cpu --no-warn-script-location`, { stdio: 'inherit' });
+    } catch (err) {
+        console.warn('[AI Env Setup] Installation failed, retrying standard index:', err.message);
+        execSync(`"${pyExe}" -m pip install --no-cache-dir "audio-separator[cpu]" onnxruntime --no-warn-script-location`, { stdio: 'inherit' });
     }
     
     // Cleanup temporary install files
@@ -177,12 +177,22 @@ function cleanupLongPaths(platform) {
                 for (const entry of entries) {
                     const fullPath = path.join(dir, entry.name);
                     if (entry.isDirectory()) {
-                        if (entry.name === '__pycache__' || (entry.name.endsWith('.dist-info') && entry.name.includes('licenses'))) {
+                        if (
+                            entry.name === '__pycache__' ||
+                            entry.name === 'tests' ||
+                            entry.name === 'test' ||
+                            entry.name.endsWith('.dist-info') && (entry.name.includes('licenses') || entry.name.includes('RECORD'))
+                        ) {
                             try { fs.rmSync(fullPath, { recursive: true, force: true }); } catch (_) {}
                         } else {
                             cleanRecursive(fullPath);
                         }
-                    } else if (entry.name.endsWith('.pyc') || entry.name.endsWith('.pyo')) {
+                    } else if (
+                        entry.name.endsWith('.pyc') ||
+                        entry.name.endsWith('.pyo') ||
+                        entry.name.endsWith('.pdb') ||
+                        entry.name.endsWith('.chm')
+                    ) {
                         try { fs.unlinkSync(fullPath); } catch (_) {}
                     }
                 }

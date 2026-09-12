@@ -293,27 +293,21 @@ export class TimingAlignmentService {
             console.groupEnd();
 
             if (report.segments.length > 1) {
-              const segPeaks = seg.waveform || [];
               for (let idx = 0; idx < report.segments.length; idx++) {
                 const cue = report.segments[idx];
                 const newId = `${seg.id}_phr${idx + 1}_${Date.now().toString(36)}`;
-
-                let slicedWaveform: number[] = [];
-                if (segPeaks.length > 0 && dur > 0) {
-                  const pStart = Math.floor((cue.startSec / dur) * segPeaks.length);
-                  const pEnd = Math.min(segPeaks.length, Math.ceil((cue.endSec / dur) * segPeaks.length));
-                  slicedWaveform = segPeaks.slice(pStart, Math.max(pStart + 10, pEnd));
-                }
+                const isNewExportedClip = Boolean(cue.filePath && cue.filePath !== seg.filePath);
+                const clipDur = parseFloat((cue.durationMs / 1000.0).toFixed(3));
 
                 newSegments.push({
                   ...seg,
                   id: newId,
                   startTime: parseFloat((seg.startTime + cue.startSec).toFixed(3)),
-                  duration: parseFloat((cue.durationMs / 1000.0).toFixed(3)),
-                  fileOffset: parseFloat(((seg.fileOffset || 0) + cue.startSec).toFixed(3)),
-                  fileDuration: seg.fileDuration || seg.duration,
+                  duration: clipDur,
+                  fileOffset: isNewExportedClip ? 0 : parseFloat(((seg.fileOffset || 0) + cue.startSec).toFixed(3)),
+                  fileDuration: isNewExportedClip ? clipDur : (seg.fileDuration || seg.duration),
                   filePath: cue.filePath || seg.filePath,
-                  waveform: slicedWaveform.length > 0 ? slicedWaveform : undefined,
+                  waveform: isNewExportedClip ? undefined : seg.waveform,
                   fadeIn: 0.02,
                   fadeOut: 0.03,
                   timingWarning: undefined,
@@ -323,21 +317,17 @@ export class TimingAlignmentService {
               handledViaRust = true;
             } else if (report.segments.length === 1) {
               const cue = report.segments[0];
-              const segPeaks = seg.waveform || [];
-              let slicedWaveform: number[] = [];
-              if (segPeaks.length > 0 && dur > 0) {
-                const pStart = Math.floor((cue.startSec / dur) * segPeaks.length);
-                const pEnd = Math.min(segPeaks.length, Math.ceil((cue.endSec / dur) * segPeaks.length));
-                slicedWaveform = segPeaks.slice(pStart, Math.max(pStart + 10, pEnd));
-              }
+              const isNewExportedClip = Boolean(cue.filePath && cue.filePath !== seg.filePath);
+              const clipDur = parseFloat((cue.durationMs / 1000.0).toFixed(3));
 
               newSegments.push({
                 ...seg,
                 startTime: parseFloat((seg.startTime + cue.startSec).toFixed(3)),
-                duration: parseFloat((cue.durationMs / 1000.0).toFixed(3)),
-                fileOffset: parseFloat(((seg.fileOffset || 0) + cue.startSec).toFixed(3)),
+                duration: clipDur,
+                fileOffset: isNewExportedClip ? 0 : parseFloat(((seg.fileOffset || 0) + cue.startSec).toFixed(3)),
+                fileDuration: isNewExportedClip ? clipDur : (seg.fileDuration || seg.duration),
                 filePath: cue.filePath || seg.filePath,
-                waveform: slicedWaveform.length > 0 ? slicedWaveform : seg.waveform,
+                waveform: isNewExportedClip ? undefined : seg.waveform,
                 fadeIn: 0.02,
                 fadeOut: 0.03,
                 timingWarning: undefined,
@@ -373,10 +363,6 @@ export class TimingAlignmentService {
           for (let idx = 0; idx < speechRegions.length; idx++) {
             const region = speechRegions[idx];
             const newId = `${seg.id}_phr${idx + 1}_${Date.now().toString(36)}`;
-            
-            const pStart = Math.floor((region.start / dur) * peaks.length);
-            const pEnd = Math.min(peaks.length, Math.ceil((region.end / dur) * peaks.length));
-            const slicedWaveform = peaks.slice(pStart, Math.max(pStart + 10, pEnd));
 
             newSegments.push({
               ...seg,
@@ -385,7 +371,7 @@ export class TimingAlignmentService {
               duration: parseFloat(region.duration.toFixed(3)),
               fileOffset: parseFloat(((seg.fileOffset || 0) + region.start).toFixed(3)),
               fileDuration: seg.fileDuration || seg.duration,
-              waveform: slicedWaveform,
+              waveform: seg.waveform,
               fadeIn: 0.02,
               fadeOut: 0.03,
               timingWarning: undefined,
@@ -394,16 +380,14 @@ export class TimingAlignmentService {
           }
         } else if (speechRegions.length === 1 && (speechRegions[0].duration < dur - 0.1)) {
           const region = speechRegions[0];
-          const pStart = Math.floor((region.start / dur) * peaks.length);
-          const pEnd = Math.min(peaks.length, Math.ceil((region.end / dur) * peaks.length));
-          const slicedWaveform = peaks.slice(pStart, Math.max(pStart + 10, pEnd));
 
           newSegments.push({
             ...seg,
             startTime: parseFloat((seg.startTime + region.start).toFixed(3)),
             duration: parseFloat(region.duration.toFixed(3)),
             fileOffset: parseFloat(((seg.fileOffset || 0) + region.start).toFixed(3)),
-            waveform: slicedWaveform,
+            fileDuration: seg.fileDuration || seg.duration,
+            waveform: seg.waveform,
             fadeIn: 0.02,
             fadeOut: 0.03,
             timingWarning: undefined,

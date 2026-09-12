@@ -1,6 +1,6 @@
 use tauri::{AppHandle, Emitter, Manager};
 use std::process::Stdio;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -67,6 +67,35 @@ fn find_python(app_handle: &AppHandle) -> Option<String> {
         }
     }
     None
+}
+
+/// Поиск и создание каталога для моделей UVR
+/// Для скачивания и записи моделей ВСЕГДА используется доступный на запись каталог (app_data_dir/models),
+/// чтобы избежать ошибки `PermissionError: [Errno 13] Permission denied: C:\Program Files\...`.
+fn find_models_dir(app_handle: &AppHandle) -> Option<PathBuf> {
+    // 1. Приоритетный каталог: пользовательские данные приложения (гарантированно доступен на запись)
+    if let Ok(data_dir) = app_handle.path().app_data_dir() {
+        let models_dir = data_dir.join("models");
+        let _ = std::fs::create_dir_all(&models_dir);
+        if models_dir.is_dir() {
+            return Some(models_dir);
+        }
+    }
+
+    // 2. Вторичные каталоги (для portable / dev режима)
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("models"));
+        candidates.push(cwd.join("resources").join("models"));
+        candidates.push(cwd.join("src-tauri").join("models"));
+    }
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            candidates.push(exe_dir.join("models"));
+        }
+    }
+
+    candidates.into_iter().find(|p| p.is_dir())
 }
 
 // Поиск команды pip на системе
@@ -314,6 +343,10 @@ pub async fn run_audio_separator_cmd(
     // Сохраним список файлов в выходной директории ДО запуска, чтобы найти новые файлы
     let pre_files = get_files_in_dir(&norm_output_dir);
 
+    let models_dir_arg = find_models_dir(&app_handle)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
     // Python runner script: использует API audio_separator.separator.Separator напрямую
     // Это исключает любые ошибки аргументов CLI (--cpu, --use_gpu, --denoise true)
     let py_runner = r#"
@@ -324,6 +357,7 @@ model_filename = sys.argv[2]
 output_dir = sys.argv[3]
 use_gpu = sys.argv[4].lower() == 'true'
 denoise = sys.argv[5].lower() == 'true'
+models_dir = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] != '' else None
 
 if not use_gpu:
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
@@ -336,19 +370,24 @@ try:
         'output_dir': output_dir,
         'output_format': 'WAV',
     }
+    if models_dir:
+        kwargs['model_file_dir'] = models_dir
     if denoise:
         kwargs['mdx_params'] = {'denoise': True}
         
     try:
         separator = Separator(**kwargs)
     except Exception:
-        separator = Separator(output_dir=output_dir, output_format='WAV')
+        fallback_kwargs = {'output_dir': output_dir, 'output_format': 'WAV'}
+        if models_dir:
+            fallback_kwargs['model_file_dir'] = models_dir
+        separator = Separator(**fallback_kwargs)
 
-    print(f'Loading model: {model_filename}...')
+    print(f'Loading model: {model_filename}...', flush=True)
     separator.load_model(model_filename)
-    print(f'Separating: {input_file}...')
+    print(f'Separating: {input_file}...', flush=True)
     outputs = separator.separate(input_file)
-    print('SUCCESS_OUTPUT_FILES:' + json.dumps(outputs))
+    print('SUCCESS_OUTPUT_FILES:' + json.dumps(outputs), flush=True)
 except Exception:
     traceback.print_exc()
     sys.exit(1)
@@ -363,6 +402,7 @@ except Exception:
         &norm_output_dir,
         if use_gpu { "true" } else { "false" },
         if denoise { "true" } else { "false" },
+        &models_dir_arg,
     ]);
     cmd.env("PYTHONIOENCODING", "utf-8");
     if !use_gpu {

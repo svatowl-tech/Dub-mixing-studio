@@ -160,7 +160,7 @@ pub fn apply_project_rules(
                         warning_level = WarningLevel::Warning;
                         message = format!(
                             "Голос дабера перекрывает хвост оригинала (на {:.0} мс). Рекомендуется ускорить или подрезать.",
-                            seg.end_ms - (orig_e - target_tail_clearance)
+                            end_diff
                         );
                     }
 
@@ -223,7 +223,7 @@ pub fn apply_project_rules(
                     let tolerance_ms = 100.0;
 
                     let start_diff = seg.start_ms - sub_s;
-                    let end_diff = seg.end_ms - sub_e;
+                    let _end_diff = seg.end_ms - sub_e;
                     let dur_diff = cur_dur - sub_dur;
 
                     let mut is_valid = true;

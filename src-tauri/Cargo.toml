@@ -47,6 +47,7 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 asio = ["cpal/asio"]
+whisper-rs = []
 
 [profile.release]
 lto = true

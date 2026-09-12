@@ -38,8 +38,10 @@ const REQUIRED_MODELS = [
         name: 'VR-DeEcho-Normal.onnx',
         aliases: ['UVR-DeEcho-Normal.onnx', 'UVR-De-Echo-Normal.onnx', 'VR-DeEcho-Normal.onnx'],
         urls: [
-            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/VR-DeEcho-Normal.onnx',
-            'https://huggingface.co/Derur/UVR-models/resolve/main/VR-DeEcho-Normal.onnx'
+            'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/VR_Architecture/VR-DeEcho-Normal.onnx',
+            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/VR_Models/VR-DeEcho-Normal.onnx',
+            'https://huggingface.co/datasets/SayanoAI/UVR5-Models/resolve/main/VR_Models/VR-DeEcho-Normal.onnx',
+            'https://huggingface.co/Derur/UVR-models/resolve/main/VR_Models/VR-DeEcho-Normal.onnx'
         ],
         description: 'VR Architecture De-Echo Normal Model'
     },
@@ -47,8 +49,10 @@ const REQUIRED_MODELS = [
         name: 'VR-DeEcho-Aggressive.onnx',
         aliases: ['UVR-DeEcho-Aggressive.onnx', 'UVR-De-Echo-Aggressive.onnx', 'VR-DeEcho-Aggressive.onnx'],
         urls: [
-            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/VR-DeEcho-Aggressive.onnx',
-            'https://huggingface.co/Derur/UVR-models/resolve/main/VR-DeEcho-Aggressive.onnx'
+            'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/VR_Architecture/VR-DeEcho-Aggressive.onnx',
+            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/VR_Models/VR-DeEcho-Aggressive.onnx',
+            'https://huggingface.co/datasets/SayanoAI/UVR5-Models/resolve/main/VR_Models/VR-DeEcho-Aggressive.onnx',
+            'https://huggingface.co/Derur/UVR-models/resolve/main/VR_Models/VR-DeEcho-Aggressive.onnx'
         ],
         description: 'VR Architecture De-Echo Aggressive Model'
     },

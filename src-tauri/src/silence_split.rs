@@ -92,6 +92,7 @@ pub struct SilenceSplitReport {
 }
 
 /// Вспомогательная структура сырого интервала речи (в сэмплах)
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 struct RawSpeechInterval {
     raw_start: usize,
