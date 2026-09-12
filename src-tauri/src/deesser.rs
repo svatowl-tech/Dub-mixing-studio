@@ -69,6 +69,7 @@ impl DeEsser {
     /// - `frequency`: Центральная частота сайдчейн-фильтра сибилянтов (по умолчанию 6500.0 Гц)
     /// - `threshold`: Порог срабатывания в dBFS (например, -20.0 dBFS)
     /// - `ratio`: Степень сжатия компрессора (например, 4.0 или 6.0)
+    #[allow(dead_code)]
     pub fn new(sample_rate: f32, frequency: f32, threshold: f32, ratio: f32) -> Self {
         Self::with_channels(sample_rate, frequency, threshold, ratio, 2)
     }
@@ -124,11 +125,13 @@ impl DeEsser {
     }
 
     /// Устанавливает ширину плавного soft-knee сжатия в децибелах
+    #[allow(dead_code)]
     pub fn set_knee_width(&mut self, knee_db: f32) {
         self.knee_width_db = knee_db.clamp(1.0, 18.0);
     }
 
     /// Устанавливает режим работы: SplitBand или Wideband
+    #[allow(dead_code)]
     pub fn set_mode(&mut self, mode: DeEsserMode) {
         self.mode = mode;
     }
@@ -289,6 +292,7 @@ impl DeEsser {
     }
 
     /// Сбрасывает фильтры и внутренние состояния каналов
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         for state in &mut self.channels {
             state.sidechain_filter.reset_state();

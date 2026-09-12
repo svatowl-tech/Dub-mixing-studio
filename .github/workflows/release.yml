@@ -95,7 +95,7 @@ jobs:
             os: macos-latest
           - id: linux
             name: Linux x64 (DEB & AppImage)
-            os: ubuntu-22.04
+            os: ubuntu-24.04
 
     steps:
       - name: Checkout Repository
@@ -132,8 +132,8 @@ jobs:
             librsvg2-dev \
             libasound2-dev \
             patchelf \
-            squashfs-tools \
-            libfuse2
+            squashfs-tools
+          sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
 
       - name: Install NPM Dependencies
         run: npm install

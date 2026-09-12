@@ -273,7 +273,6 @@ export default function App() {
         mainWindow.onCloseRequested(async (event) => {
           event.preventDefault();
           try {
-            const { closeStudioWindow } = await import('./lib/windowHelpers');
             await closeStudioWindow();
           } catch(e) {
             console.error("Cleanup error", e);

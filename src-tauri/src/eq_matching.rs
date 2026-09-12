@@ -12,6 +12,7 @@ pub const MAX_BOOST_DB: f32 = 6.0;
 pub const MAX_CUT_DB: f32 = -12.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct EqProfileSummary {
     pub profile_name: String,
     pub max_boost_db: f32,

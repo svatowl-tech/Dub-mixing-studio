@@ -96,6 +96,7 @@ impl BiquadFilter {
         y
     }
 
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.s1 = 0.0;
         self.s2 = 0.0;

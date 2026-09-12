@@ -394,6 +394,7 @@ pub fn execute_volume_leveler(
 }
 
 /// Пакетная многопоточная обработка массива файлов через Rayon
+#[allow(dead_code)]
 pub fn batch_level_speech_volume(
     file_pairs: &[(PathBuf, PathBuf)],
     config: &VolumeLevelerConfig,

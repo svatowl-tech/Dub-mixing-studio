@@ -21,6 +21,7 @@ pub struct NormalizationStats {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum AudioError {
     IoError(std::io::Error),
     HoundError(hound::Error),

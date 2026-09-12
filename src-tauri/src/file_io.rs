@@ -1,6 +1,6 @@
 use std::fs;
 // sync
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use serde::Serialize;
 use hound;
 
@@ -29,7 +29,7 @@ pub fn normalize_windows_path(path_str: &str) -> String {
                     if canon_str.starts_with(r"\\?\") {
                         canon_str = canon_str[4..].to_string();
                     }
-                    let mut result_path = PathBuf::from(canon_str);
+                    let mut result_path = std::path::PathBuf::from(canon_str);
                     for comp in components.iter().rev() {
                         result_path = result_path.join(comp);
                     }

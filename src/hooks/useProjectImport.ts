@@ -3,6 +3,7 @@ import { logger } from '../lib/logger';
 import { IOLogger } from '../lib/ioLogger';
 import { Project, AudioTrack, SubtitleLine } from '../types';
 import { getGlobalAudioSettings, getSafeFileUrl } from '../lib/utils';
+import { UniversalParserService } from '../services/UniversalParserService';
 
 export const useProjectImport = (
   project: Project | null,
@@ -115,7 +116,7 @@ export const useProjectImport = (
        try {
          const res = await window.electronAPI.readTextFile(subImportedPath);
          if (res.success && res.data) {
-            const parsed = await import('../services/UniversalParserService').then(m => m.UniversalParserService.parse(res.data, subImportedPath));
+            const parsed = await UniversalParserService.parse(res.data, subImportedPath);
             if (parsed && parsed.length > 0) {
                 initialSubtitles = parsed;
                 initialRoles = Array.from(new Set(parsed.map(s => s.role)));
