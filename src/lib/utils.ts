@@ -41,6 +41,30 @@ export const formatHotkey = (action: HotkeyAction) => {
 
 const blobUrlCache = new Map<string, string>();
 
+export const invalidateFileUrl = (path: string | undefined): void => {
+  if (!path) return;
+  if (blobUrlCache.has(path)) {
+    const url = blobUrlCache.get(path);
+    if (url && url.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(url);
+      } catch (_) {}
+    }
+    blobUrlCache.delete(path);
+  }
+};
+
+export const clearFileUrlCache = (): void => {
+  blobUrlCache.forEach(url => {
+    if (url && url.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(url);
+      } catch (_) {}
+    }
+  });
+  blobUrlCache.clear();
+};
+
 export const getSafeFileUrl = (path: string | undefined): string | undefined => {
   if (!path) return undefined;
   try {

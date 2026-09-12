@@ -74,7 +74,7 @@ import {
   DEFAULT_PHASE3_ORDER,
   DEFAULT_PHASE4_ORDER
 } from '../lib/defaultPresets';
-import { cn, getGlobalAudioSettings } from '../lib/utils';
+import { cn, getGlobalAudioSettings, invalidateFileUrl } from '../lib/utils';
 import { AudioSeparatorService } from '../services/audioSeparatorService';
 import { TimingAlignmentService } from '../services/timingAlignmentService';
 import { MixingService } from '../services/mixingService';
@@ -967,6 +967,9 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         let lastNativeReport: DenoiseReport | null = null;
         let processedTracksCount = 0;
 
+        console.group(`%c[MixingPanel] ▶ Шумоподавление (Denoise)`, 'color: #0d9488; font-weight: bold;');
+        console.log(`Параметры: модель = ${activePreset.phase1.denoise.model}, сила = ${activePreset.phase1.denoise.strength}%`);
+
         if (isTauriAvailable()) {
           const targetTracks = selectedSegment?.trackId
             ? project.tracks.filter(t => t.id === selectedSegment.trackId)
@@ -981,6 +984,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
               const inPath = seg.filePath;
               if (inPath && !inPath.startsWith('blob:') && !inPath.startsWith('data:')) {
                 try {
+                  console.log(`[MixingPanel] Вызов process_denoise для: ${inPath}`);
                   const rep = await invoke<DenoiseReport>('process_denoise', {
                     inputPath: inPath,
                     outputPath: inPath,
@@ -990,9 +994,16 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                   if (rep) {
                     lastNativeReport = rep;
                     processedTracksCount++;
+                    console.log(`[MixingPanel] ✓ Отчет Denoise:`, rep);
+                  }
+                  invalidateFileUrl(inPath);
+                  if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                    (window as any).webFileCache.delete(inPath);
+                    const basename = inPath.split(/[/\\]/).pop();
+                    if (basename) (window as any).webFileCache.delete(basename);
                   }
                 } catch (e) {
-                  console.warn('[MixingPanel] Native process_denoise error:', e);
+                  console.error('[MixingPanel] ❌ Native process_denoise error:', e);
                 }
               }
             }
@@ -1005,16 +1016,33 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           selectedSegment?.trackId,
           selectedSegment?.segment?.id
         );
-        onUpdateProject({ tracks: res.updatedTracks });
+
+        const freshTracks = res.updatedTracks.map(t => ({
+          ...t,
+          segments: t.segments.map(s => ({
+            ...s,
+            blobUrl: undefined,
+            updatedAt: Date.now()
+          }))
+        }));
+
+        onUpdateProject({ tracks: freshTracks });
         playbackEngine.clearCache();
-        await playbackEngine.updateTracks(res.updatedTracks);
+        await playbackEngine.updateTracks(freshTracks);
 
         const summaryMsg = lastNativeReport
           ? `Шумоподавление завершено (${lastNativeReport.isNeural ? `UVR DeNoise: ${lastNativeReport.providerUsed}` : lastNativeReport.modelName}): подавление шума -${lastNativeReport.noiseReductionDb.toFixed(1)} dB на ${processedTracksCount} дорожках.`
           : res.logSummary;
+        console.log(`%c[MixingPanel] ✅ ${summaryMsg}`, 'color: #10b981; font-weight: bold;');
+        console.groupEnd();
         showToast(summaryMsg);
       } else if (effectType === 'dereverb') {
         let nativeReport: any = null;
+        let processedTracksCount = 0;
+
+        console.group(`%c[MixingPanel] ▶ Дереверберация (De-Reverb)`, 'color: #6366f1; font-weight: bold;');
+        console.log(`Параметры: модель = ${activePreset.phase1.dereverb.model}, сила = ${activePreset.phase1.dereverb.strength}%`);
+
         if (isTauriAvailable()) {
           const targetTracks = selectedSegment?.trackId
             ? project.tracks.filter(t => t.id === selectedSegment.trackId)
@@ -1029,17 +1057,27 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
               const inPath = seg.filePath;
               if (inPath && !inPath.startsWith('blob:') && !inPath.startsWith('data:')) {
                 try {
+                  console.log(`[MixingPanel] Вызов process_uvr_dereverb для: ${inPath}`);
                   const rep = await invoke<any>('process_uvr_dereverb', {
                     inputPath: inPath,
                     outputPath: inPath,
+                    modelName: activePreset.phase1.dereverb.model || 'rt_dereverb_v2',
                     reverbTailExportPath: null,
                     strength: (activePreset.phase1.dereverb.strength || 85) / 100.0,
                   });
                   if (rep) {
                     nativeReport = rep;
+                    processedTracksCount++;
+                    console.log(`[MixingPanel] ✓ Отчет De-Reverb:`, rep);
+                  }
+                  invalidateFileUrl(inPath);
+                  if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                    (window as any).webFileCache.delete(inPath);
+                    const basename = inPath.split(/[/\\]/).pop();
+                    if (basename) (window as any).webFileCache.delete(basename);
                   }
                 } catch (e) {
-                  console.warn('[MixingPanel] Native process_uvr_dereverb error:', e);
+                  console.error('[MixingPanel] ❌ Native process_uvr_dereverb error:', e);
                 }
               }
             }
@@ -1052,13 +1090,25 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           selectedSegment?.trackId,
           selectedSegment?.segment?.id
         );
-        onUpdateProject({ tracks: res.updatedTracks });
+
+        const freshTracks = res.updatedTracks.map(t => ({
+          ...t,
+          segments: t.segments.map(s => ({
+            ...s,
+            blobUrl: undefined,
+            updatedAt: Date.now()
+          }))
+        }));
+
+        onUpdateProject({ tracks: freshTracks });
         playbackEngine.clearCache();
-        await playbackEngine.updateTracks(res.updatedTracks);
+        await playbackEngine.updateTracks(freshTracks);
 
         const summaryMsg = nativeReport
-          ? `De-Reverb завершен (${nativeReport.isNeural ? `UVR De-Echo [${nativeReport.providerUsed}]` : nativeReport.modelName}): подавление комнатного эха -${nativeReport.reverbReductionDb.toFixed(1)} dB.`
+          ? `De-Reverb завершен (${nativeReport.isNeural ? `UVR De-Echo [${nativeReport.providerUsed}]` : nativeReport.modelName}): подавление комнатного эха -${nativeReport.reverbReductionDb.toFixed(1)} dB на ${processedTracksCount} дорожках.`
           : res.logSummary;
+        console.log(`%c[MixingPanel] ✅ ${summaryMsg}`, 'color: #10b981; font-weight: bold;');
+        console.groupEnd();
         showToast(summaryMsg);
       } else if (effectType === 'volumeleveler') {
         let lastReport: VolumeLevelerReport | null = null;
@@ -2532,20 +2582,32 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                         ratio: activePreset.phase1.deEsser.ratio ?? 4.0,
                       });
                     } else if (stepId === 'denoise') {
+                      console.log(`[MixingPanel Pipeline] Запуск Denoise для ${inPath} (модель: ${activePreset.phase1.denoise.model}, сила: ${activePreset.phase1.denoise.strength}%)`);
                       await invoke('process_denoise', {
                         inputPath: inPath,
                         outputPath: inPath,
                         modelName: activePreset.phase1.denoise.model || 'UVR-DeNoise',
                         strength: activePreset.phase1.denoise.strength,
                       });
+                      invalidateFileUrl(inPath);
+                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                        (window as any).webFileCache.delete(inPath);
+                      }
                     } else if (stepId === 'dereverb') {
+                      console.log(`[MixingPanel Pipeline] Запуск De-Reverb для ${inPath} (модель: ${activePreset.phase1.dereverb.model}, сила: ${activePreset.phase1.dereverb.strength}%)`);
                       await invoke('process_uvr_dereverb', {
                         inputPath: inPath,
                         outputPath: inPath,
+                        modelName: activePreset.phase1.dereverb.model || 'rt_dereverb_v2',
                         reverbTailExportPath: null,
                         strength: (activePreset.phase1.dereverb.strength || 85) / 100.0,
                       });
+                      invalidateFileUrl(inPath);
+                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                        (window as any).webFileCache.delete(inPath);
+                      }
                     } else if (stepId === 'volumeLeveler') {
+                      console.log(`[MixingPanel Pipeline] Запуск Volume Leveler для ${inPath}`);
                       await invoke('level_speech_volume', {
                         inputPath: inPath,
                         outputPath: inPath,
@@ -2554,9 +2616,13 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                         maxBoostDb: 12.0,
                         maxAttenuationDb: 15.0,
                       });
+                      invalidateFileUrl(inPath);
+                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                        (window as any).webFileCache.delete(inPath);
+                      }
                     }
                   } catch (dspErr) {
-                    console.warn(`[MixingPanel Pipeline] Step ${stepId} error on ${inPath}:`, dspErr);
+                    console.error(`[MixingPanel Pipeline] ❌ Step ${stepId} error on ${inPath}:`, dspErr);
                   }
                 }
               }
@@ -2590,9 +2656,19 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
             currentTracks = dspRes.updatedTracks;
           }
 
+          // Invalidate blob URLs on updated tracks so player loads fresh audio from disk
+          currentTracks = currentTracks.map(t => ({
+            ...t,
+            segments: t.segments.map(s => ({
+              ...s,
+              blobUrl: undefined,
+              updatedAt: Date.now()
+            }))
+          }));
+
           setStepExecution(prev => ({
             ...prev,
-            [stepId]: { status: 'success', progress: 100, log: `Обработка завершена успешно (Rust DSP).`, hasRollback: true }
+            [stepId]: { status: 'success', progress: 100, log: `Обработка шага ${stepId} завершена успешно.`, hasRollback: true }
           }));
 
           await new Promise(r => setTimeout(r, 200));

@@ -7,6 +7,7 @@ import { FinalRenderService } from './finalRenderService';
 import { PlaybackEngine } from './playbackEngine';
 import { AudioSeparatorService } from './audioSeparatorService';
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { invalidateFileUrl } from '../lib/utils';
 
 export interface ExecuteStepParams {
   stepId: string;
@@ -626,6 +627,9 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'denoise') {
+          console.group(`%c[Pipeline] ▶ Этап: Шумоподавление (UVR DeNoise)`, 'color: #0d9488; font-weight: bold; font-size: 13px;');
+          console.log(`[Pipeline] Модель: ${activePreset.phase1.denoise.model || 'UVR-DeNoise'}, Сила: ${activePreset.phase1.denoise.strength}%, Bypass: ${activePreset.phase1.denoise.bypass}`);
+          
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
@@ -642,10 +646,12 @@ export class PipelineExecutionService {
           if (typeof window !== 'undefined' && isTauri()) {
             for (const track of project.tracks) {
               if (AudioDspService.isDubActorTrack(track) && track.isProcessingEnabled !== false) {
+                console.log(`[Pipeline] Обработка дорожки "${track.name}" (сегментов: ${track.segments.length})...`);
                 for (const seg of track.segments) {
                   const inputPath = seg.filePath;
                   if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
                     try {
+                      console.log(`[Pipeline] → Запуск process_denoise для: ${inputPath}`);
                       const rep = await invoke<DenoiseReport>('process_denoise', {
                         inputPath,
                         outputPath: inputPath,
@@ -655,11 +661,20 @@ export class PipelineExecutionService {
                       if (rep) {
                         lastNativeReport = rep;
                         processedTracksCount++;
+                        console.log(`[Pipeline] ✓ Шумоподавление завершено:`, rep);
+                      }
+                      invalidateFileUrl(inputPath);
+                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                        (window as any).webFileCache.delete(inputPath);
+                        const basename = inputPath.split(/[/\\]/).pop();
+                        if (basename) (window as any).webFileCache.delete(basename);
                       }
                     } catch (e) {
                       lastNativeError = String(e);
-                      console.warn('[Pipeline] Native process_denoise invocation error:', e);
+                      console.error('[Pipeline] ❌ Ошибка process_denoise:', e);
                     }
+                  } else {
+                    console.warn(`[Pipeline] Пропущен сегмент ${seg.id}: нет валидного локального filePath (${seg.filePath})`);
                   }
                 }
               }
@@ -670,6 +685,8 @@ export class PipelineExecutionService {
               .flatMap(t => t.segments.filter(s => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:')));
 
             if (dubSegments.length > 0 && processedTracksCount === 0 && lastNativeError) {
+              console.error(`[Pipeline] Фатальная ошибка этапа DeNoise: ${lastNativeError}`);
+              console.groupEnd();
               setStepExecution(prev => ({
                 ...prev,
                 [stepId]: {
@@ -689,13 +706,26 @@ export class PipelineExecutionService {
             activePreset.phase1.denoise
           );
 
-          onUpdateProject({ tracks: res.updatedTracks });
+          // Invalidate cached blobUrls to guarantee fresh audio from disk is loaded by player
+          const freshTracks = res.updatedTracks.map(t => ({
+            ...t,
+            segments: t.segments.map(s => ({
+              ...s,
+              blobUrl: undefined,
+              updatedAt: Date.now()
+            }))
+          }));
+
+          onUpdateProject({ tracks: freshTracks });
           playbackEngine.clearCache();
-          await playbackEngine.updateTracks(res.updatedTracks);
+          await playbackEngine.updateTracks(freshTracks);
 
           const summaryLog = lastNativeReport
             ? `Шумоподавление завершено (${lastNativeReport.isNeural ? `UVR DeNoise: ${lastNativeReport.providerUsed}` : lastNativeReport.modelName}): подавление шума -${lastNativeReport.noiseReductionDb.toFixed(1)} dB на ${processedTracksCount} дорожках.`
             : res.logSummary;
+
+          console.log(`%c[Pipeline] ✅ ${summaryLog}`, 'color: #10b981; font-weight: bold;');
+          console.groupEnd();
 
           setStepExecution(prev => ({
             ...prev,
@@ -717,6 +747,9 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'dereverb') {
+          console.group(`%c[Pipeline] ▶ Этап: Дереверберация (UVR De-Echo / De-Reverb)`, 'color: #6366f1; font-weight: bold; font-size: 13px;');
+          console.log(`[Pipeline] Модель: ${activePreset.phase1.dereverb.model || 'rt_dereverb_v2'}, Сила: ${activePreset.phase1.dereverb.strength}%, Bypass: ${activePreset.phase1.dereverb.bypass}`);
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
@@ -733,24 +766,36 @@ export class PipelineExecutionService {
           if (typeof window !== 'undefined' && isTauri()) {
             for (const track of project.tracks) {
               if (AudioDspService.isDubActorTrack(track) && track.isProcessingEnabled !== false) {
+                console.log(`[Pipeline] Обработка дорожки "${track.name}" (сегментов: ${track.segments.length})...`);
                 for (const seg of track.segments) {
                   const inputPath = seg.filePath;
                   if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
                     try {
+                      console.log(`[Pipeline] → Запуск process_uvr_dereverb для: ${inputPath}`);
                       const rep = await invoke<DereverbResult>('process_uvr_dereverb', {
                         inputPath,
                         outputPath: inputPath,
+                        modelName: activePreset.phase1.dereverb.model || 'rt_dereverb_v2',
                         reverbTailExportPath: null,
                         strength: (activePreset.phase1.dereverb.strength || 85) / 100.0,
                       });
                       if (rep) {
                         lastNativeReport = rep;
                         processedTracksCount++;
+                        console.log(`[Pipeline] ✓ Подавление реверберации завершено:`, rep);
+                      }
+                      invalidateFileUrl(inputPath);
+                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                        (window as any).webFileCache.delete(inputPath);
+                        const basename = inputPath.split(/[/\\]/).pop();
+                        if (basename) (window as any).webFileCache.delete(basename);
                       }
                     } catch (e) {
                       lastNativeError = String(e);
-                      console.warn('[Pipeline] Native process_uvr_dereverb invocation error:', e);
+                      console.error('[Pipeline] ❌ Ошибка process_uvr_dereverb:', e);
                     }
+                  } else {
+                    console.warn(`[Pipeline] Пропущен сегмент ${seg.id}: нет валидного локального filePath (${seg.filePath})`);
                   }
                 }
               }
@@ -761,6 +806,8 @@ export class PipelineExecutionService {
               .flatMap(t => t.segments.filter(s => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:')));
 
             if (dubSegments.length > 0 && processedTracksCount === 0 && lastNativeError) {
+              console.error(`[Pipeline] Фатальная ошибка этапа De-Reverb: ${lastNativeError}`);
+              console.groupEnd();
               setStepExecution(prev => ({
                 ...prev,
                 [stepId]: {
@@ -780,13 +827,26 @@ export class PipelineExecutionService {
             activePreset.phase1.dereverb
           );
 
-          onUpdateProject({ tracks: res.updatedTracks });
+          // Invalidate cached blobUrls to guarantee fresh audio from disk is loaded by player
+          const freshTracks = res.updatedTracks.map(t => ({
+            ...t,
+            segments: t.segments.map(s => ({
+              ...s,
+              blobUrl: undefined,
+              updatedAt: Date.now()
+            }))
+          }));
+
+          onUpdateProject({ tracks: freshTracks });
           playbackEngine.clearCache();
-          await playbackEngine.updateTracks(res.updatedTracks);
+          await playbackEngine.updateTracks(freshTracks);
 
           const summaryLog = lastNativeReport
             ? `Подавление эха завершено (${lastNativeReport.isNeural ? `UVR De-Echo: ${lastNativeReport.providerUsed}` : lastNativeReport.modelName}): подавление реверберации -${lastNativeReport.reverbReductionDb.toFixed(1)} dB на ${processedTracksCount} дорожках.`
             : res.logSummary;
+
+          console.log(`%c[Pipeline] ✅ ${summaryLog}`, 'color: #10b981; font-weight: bold;');
+          console.groupEnd();
 
           setStepExecution(prev => ({
             ...prev,

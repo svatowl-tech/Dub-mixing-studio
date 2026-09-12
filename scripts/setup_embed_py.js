@@ -177,7 +177,7 @@ function cleanupLongPaths(platform) {
                 for (const entry of entries) {
                     const fullPath = path.join(dir, entry.name);
                     if (entry.isDirectory()) {
-                        if (entry.name === '__pycache__' || entry.name === 'tests' || (entry.name.endsWith('.dist-info') && entry.name.includes('licenses'))) {
+                        if (entry.name === '__pycache__' || (entry.name.endsWith('.dist-info') && entry.name.includes('licenses'))) {
                             try { fs.rmSync(fullPath, { recursive: true, force: true }); } catch (_) {}
                         } else {
                             cleanRecursive(fullPath);

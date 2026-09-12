@@ -395,9 +395,21 @@ export class PlaybackEngine {
     return this.audioContext ? this.audioContext.currentTime : 0;
   }
 
-  public clearCache() {
-    this.bufferCache.clear();
-    console.log("[PlaybackEngine] Cache cleared");
+  public clearCache(targetUrlOrPath?: string) {
+    if (targetUrlOrPath) {
+      this.bufferCache.delete(targetUrlOrPath);
+      this.pendingBuffers.delete(targetUrlOrPath);
+      // Remove possible variations or raw path
+      for (const [key] of this.bufferCache) {
+        if (key.includes(targetUrlOrPath)) {
+          this.bufferCache.delete(key);
+        }
+      }
+    } else {
+      this.bufferCache.clear();
+      this.pendingBuffers.clear();
+    }
+    console.log("[PlaybackEngine] Cache cleared", targetUrlOrPath || 'ALL');
   }
 
   public async bindVideoElement(video: HTMLMediaElement) {
@@ -503,10 +515,12 @@ export class PlaybackEngine {
       try {
         const ctx = await this.getContext();
         
-        // Check global web cache directly to avoid CSP issues with fetch("blob:...")
+        // Check global web cache directly to avoid CSP issues with fetch("blob:...") in web-only mode
+        // In Tauri environment, prioritize disk-based fetch via convertFileSrc to ensure processed audio is fresh!
+        const isTauriEnv = typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
         const globalCache = (window as any).webFileCache;
         let fileOrBlob: Blob | File | undefined;
-        if (globalCache) {
+        if (!isTauriEnv && globalCache) {
           if (url) {
             fileOrBlob = globalCache.get(url);
           }
@@ -811,7 +825,16 @@ export class PlaybackEngine {
         if (seg.startTime <= lookaheadEnd && segmentEnd > liveVideoTime && !this.scheduledSegments.has(seg.id)) {
           this.scheduledSegments.add(seg.id);
           
-          const urlToLoad = (seg as any).url || seg.blobUrl || (seg.filePath ? getSafeFileUrl(seg.filePath) : null);
+          // If filePath is available and valid (especially in Tauri or after processing), use getSafeFileUrl
+          // to ensure playback uses the latest processed WAV on disk instead of stale initial blobUrl
+          const isTauriRuntime = typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
+          let urlToLoad: string | null = null;
+          if (isTauriRuntime && seg.filePath && !seg.filePath.startsWith('blob:') && !seg.filePath.startsWith('data:')) {
+            const diskUrl = getSafeFileUrl(seg.filePath);
+            urlToLoad = diskUrl || (seg as any).url || seg.blobUrl || null;
+          } else {
+            urlToLoad = (seg as any).url || seg.blobUrl || (seg.filePath ? getSafeFileUrl(seg.filePath) : null);
+          }
           if (!urlToLoad) continue;
 
           this.loadBuffer(urlToLoad, seg.filePath).then(buffer => {

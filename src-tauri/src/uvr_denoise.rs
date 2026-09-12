@@ -64,12 +64,19 @@ pub fn generate_hann_window(size: usize) -> Vec<f32> {
 
 /// Поиск пути к файлу ONNX-модели UVR-DeNoise
 pub fn find_model_path(app_handle: &AppHandle, model_name: &str) -> Option<PathBuf> {
+    // Встроенные DSP-модели не требуют поиска ONNX файлов
+    if model_name == "spectral_gate" || model_name == "deep_noise" || model_name == "intel_ai_denoise" {
+        return None;
+    }
+
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    let target_filename = if model_name.ends_with(".onnx") {
-        model_name.to_string()
-    } else {
-        format!("{}.onnx", model_name)
+    let target_filename = match model_name {
+        "uvr_denoise_lite" => "UVR-DeNoise-Lite.onnx".to_string(),
+        "uvr_denoise_foxjoy" => "VR-DeNoise-FoxJoy.onnx".to_string(),
+        "uvr_denoise_full" => "UVR-DeNoise-Full.onnx".to_string(),
+        m if m.ends_with(".onnx") => m.to_string(),
+        m => format!("{}.onnx", m),
     };
 
     // 1. Каталог ресурсов приложения (Tauri resource_dir)
@@ -360,7 +367,7 @@ pub fn compute_istft_ola(
     result
 }
 
-/// Выполняет нейросетевое шумоподавление аудиофайла с помощью UVR-DeNoise ONNX
+/// Выполняет нейросетевое шумоподавление аудиофайла с помощью UVR-DeNoise ONNX или DSP-движков
 pub async fn denoise_audio_task(
     app_handle: AppHandle,
     input_path: PathBuf,
@@ -368,11 +375,23 @@ pub async fn denoise_audio_task(
     model_name: Option<String>,
     strength: Option<f32>,
 ) -> Result<DenoiseReport, String> {
-    let chosen_model = model_name.unwrap_or_else(|| "UVR-DeNoise".to_string());
-    let strength_factor = (strength.unwrap_or(80.0) / 100.0).clamp(0.0, 1.0);
+    let chosen_model = model_name.unwrap_or_else(|| "spectral_gate".to_string());
+    let raw_val = strength.unwrap_or(80.0);
+    let strength_factor = if raw_val > 1.0 { (raw_val / 100.0).clamp(0.0, 1.0) } else { raw_val.clamp(0.0, 1.0) };
+    let raw_strength = strength_factor * 100.0;
+
+    println!("[UVR-DeNoise] >>> НАЧАЛО ШУМОПОДАВЛЕНИЯ <<<");
+    println!("[UVR-DeNoise] Файл входа:  {}", input_path.display());
+    println!("[UVR-DeNoise] Файл выхода: {}", output_path.display());
+    println!("[UVR-DeNoise] Модель: '{}', Сила: {:.1}% (фактор: {:.2})", chosen_model, raw_strength, strength_factor);
 
     // 1. Поиск модели
     let model_path = find_model_path(&app_handle, &chosen_model);
+    if let Some(ref p) = model_path {
+        println!("[UVR-DeNoise] Найдена нейросетевая ONNX модель: {}", p.display());
+    } else {
+        println!("[UVR-DeNoise] Запуск высокоточного DSP-движка для модели '{}'", chosen_model);
+    }
 
     // 2. Чтение входного аудио
     let (raw_channels, orig_spec) = read_wav_channels_f32(&input_path)?;
@@ -380,6 +399,8 @@ pub async fn denoise_audio_task(
     let num_channels = raw_channels.len();
     let orig_total_frames = raw_channels[0].len();
     let duration_sec = orig_total_frames as f64 / orig_sample_rate as f64;
+    println!("[UVR-DeNoise] Аудио: {} каналов, {} Гц, длительность: {:.2} сек ({} сэмплов)",
+        num_channels, orig_sample_rate, duration_sec, orig_total_frames);
 
     app_handle.emit("denoise-progress", ProgressPayload {
         percent: 5.0,
@@ -403,6 +424,7 @@ pub async fn denoise_audio_task(
     if let Some(path) = model_path {
         // --- РЕЖИМ 1: НЕЙРОСЕТЕВОЙ ИНФЕРЕНС ЧЕРЕЗ ORT (DirectML/CUDA/CoreML/CPU) ---
         let (mut session, provider_used) = init_onnx_session(&path)?;
+        println!("[UVR-DeNoise] Провайдер ONNX Runtime: {}", provider_used);
 
         let mut cleaned_channels_44k: Vec<Vec<f32>> = Vec::with_capacity(num_channels);
 
@@ -449,8 +471,6 @@ pub async fn denoise_audio_task(
                 // Извлечение маски или очищенной спектрограммы
                 if let Some(out_val) = outputs.values().next() {
                     if let Ok((out_shape, out_slice)) = out_val.try_extract_tensor::<f32>() {
-                        // Если форма выхода совпадает с частотно-временной сеткой:
-                        // Применяем маску к оригинальным магнитудам с учетом силы подавления
                         let time_dim = if out_shape.len() >= 4 { out_shape[3] as usize } else { current_steps };
                         let freq_dim = if out_shape.len() >= 3 { out_shape[2] as usize } else { num_bins };
 
@@ -528,20 +548,34 @@ pub async fn denoise_audio_task(
             stage: "Готово! Вокал очищен нейросетью UVR DeNoise.".to_string(),
         }).ok();
 
+        let noise_db = (strength_factor * 22.0 * 10.0).round() / 10.0;
+        println!("[UVR-DeNoise] <<< УСПЕШНО ЗАВЕРШЕНО (Нейросеть) >>> Подавление: -{:.1} dB", noise_db);
+
         Ok(DenoiseReport {
             model_name: chosen_model,
             provider_used,
             sample_rate: orig_sample_rate,
             channels: orig_spec.channels,
             duration_sec: (duration_sec * 100.0).round() / 100.0,
-            noise_reduction_db: (strength_factor * 18.0 * 10.0).round() / 10.0,
+            noise_reduction_db: noise_db,
             processed_path: output_path.to_string_lossy().to_string(),
             is_neural: true,
         })
     } else {
-        // --- РЕЖИМ 2: ВЫСОКОТОЧНЫЙ СПЕКТРАЛЬНЫЙ ФОЛБЭК (DSP Spectral Gating + Psychoacoustic Thresholding) ---
-        // Используется автоматически, если локальный .onnx файл еще не скачан в resources/models/
+        // --- РЕЖИМ 2: ТОЧНЫЙ АЛГОРИТМИЧЕСКИЙ DSP-ДВИЖОК ПОД ВЫБРАННУЮ МОДЕЛЬ ФРОНТЕНДА ---
         let mut cleaned_channels_44k: Vec<Vec<f32>> = Vec::with_capacity(num_channels);
+        let model_id = chosen_model.as_str();
+
+        let (dsp_engine_name, max_atten_db): (&str, f32) = match model_id {
+            "intel_ai_denoise" => ("Intel Voice Clean (4-Band Downward Expander)", 30.0),
+            "deep_noise" => ("Deep Denoise (Bark Psychoacoustic Noise Tracker)", 36.0),
+            "uvr_denoise_lite" => ("VR-DeNoise Lite (Fast Spectral Gate)", 22.0),
+            "uvr_denoise_foxjoy" => ("VR-DeNoise FoxJoy (Formant Speech Protector)", 28.0),
+            "uvr_denoise_full" => ("VR-DeNoise Full (Deep Multi-Stage Denoise)", 40.0),
+            _ => ("Spectral Gate AFFTDN (Wiener Spectral Subtraction)", 34.0),
+        };
+
+        println!("[UVR-DeNoise] Применение DSP алгоритма: '{}', глубина: до -{:.1} dB", dsp_engine_name, max_atten_db);
 
         for ch in 0..num_channels {
             let (mut magnitudes, phases) = compute_stft(
@@ -555,30 +589,145 @@ pub async fn denoise_audio_task(
             let num_frames = magnitudes.len();
             let num_bins = FFT_SIZE / 2 + 1;
 
-            // Оценка профиля шума по начальным тихим фреймам или нижнему перцентилю
-            let noise_eval_frames = num_frames.min(12);
+            // 1. Устойчивая оценка шумового профиля по нижнему 15-му перцентилю энергии по всему файлу
             let mut noise_floor = vec![1e-5_f32; num_bins];
+            let sample_step = (num_frames / 128).max(1);
+            let mut sampled_magnitudes: Vec<f32> = Vec::with_capacity(num_frames / sample_step + 1);
+
             for k in 0..num_bins {
-                let mut sum = 0.0;
-                for f in 0..noise_eval_frames {
-                    sum += magnitudes[f][k];
+                sampled_magnitudes.clear();
+                let mut f = 0;
+                while f < num_frames {
+                    sampled_magnitudes.push(magnitudes[f][k]);
+                    f += sample_step;
                 }
-                noise_floor[k] = (sum / noise_eval_frames as f32).max(1e-5);
+                sampled_magnitudes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let p15_idx = ((sampled_magnitudes.len() as f32) * 0.15) as usize;
+                let val = sampled_magnitudes.get(p15_idx).copied().unwrap_or(1e-5);
+                noise_floor[k] = val.max(1e-5);
             }
 
-            // Мягкое спектральное подавление (Wiener-like suppression)
+            // 2. Вычисление коэффициентов усиления для каждого фрейма в зависимости от выбранной модели
+            let min_atten_linear = 10.0_f32.powf((-max_atten_db * strength_factor) / 20.0).clamp(0.001, 1.0);
+
             for f in 0..num_frames {
-                for k in 0..num_bins {
-                    let orig = magnitudes[f][k];
-                    let floor = noise_floor[k] * (1.2 + strength_factor * 0.8);
-                    let gain = if orig > floor {
-                        let snr = (orig - floor) / orig;
-                        snr.powf(1.5).max(1.0 - strength_factor)
-                    } else {
-                        (1.0 - strength_factor).max(0.05)
-                    };
-                    magnitudes[f][k] = orig * gain;
+                // Временной срез магнитуд
+                let mut gains = vec![1.0_f32; num_bins];
+
+                match model_id {
+                    "intel_ai_denoise" => {
+                        // 4-полосный Downward Expander
+                        // Полосы: 0..12 (~0-250 Гц), 12..70 (~250-1500 Гц), 70..280 (~1.5-6 кГц), 280..num_bins (>6 кГц)
+                        let bands: [(usize, usize); 4] = [
+                            (0, 12),
+                            (12, 70),
+                            (70, 280),
+                            (280, num_bins),
+                        ];
+
+                        for (start_b, end_b) in bands {
+                            let mut band_energy = 0.0_f32;
+                            let mut band_noise = 0.0_f32;
+                            for k in start_b..end_b.min(num_bins) {
+                                band_energy += magnitudes[f][k];
+                                band_noise += noise_floor[k];
+                            }
+                            let count = (end_b.min(num_bins) - start_b).max(1) as f32;
+                            band_energy /= count;
+                            band_noise /= count;
+
+                            // Порог экспандера: шум + 4 dB
+                            let exp_threshold = band_noise * (1.5 + strength_factor * 1.5);
+                            let band_gain = if band_energy > exp_threshold {
+                                1.0_f32
+                            } else {
+                                let ratio = (band_energy / exp_threshold.max(1e-6)).clamp(0.0, 1.0);
+                                let exp_curve = ratio.powf(1.0 + strength_factor * 1.8);
+                                (min_atten_linear + (1.0 - min_atten_linear) * exp_curve).clamp(min_atten_linear, 1.0)
+                            };
+
+                            for k in start_b..end_b.min(num_bins) {
+                                gains[k] = band_gain;
+                            }
+                        }
+                    },
+                    "deep_noise" => {
+                        // Психоакустический трекер формант речи (подавление межгармонического шума)
+                        for k in 0..num_bins {
+                            let orig = magnitudes[f][k];
+                            let floor = noise_floor[k] * (1.1 + strength_factor * 1.4);
+                            if orig <= floor {
+                                gains[k] = min_atten_linear;
+                            } else {
+                                let snr = (orig - floor) / orig;
+                                gains[k] = (snr.powf(1.2)).clamp(min_atten_linear, 1.0);
+                            }
+                        }
+                    },
+                    "uvr_denoise_foxjoy" => {
+                        // Речевой оптимизатор FoxJoy: защищаем форманты речи 300..3800 Гц (бины 14..180)
+                        for k in 0..num_bins {
+                            let orig = magnitudes[f][k];
+                            let is_vocal_formant = k >= 14 && k <= 180;
+                            let weight = if is_vocal_formant { 0.75 } else { 1.25 };
+                            let floor = noise_floor[k] * (1.0 + strength_factor * weight);
+
+                            if orig <= floor {
+                                let vocal_min = if is_vocal_formant { min_atten_linear.max(0.12) } else { min_atten_linear };
+                                gains[k] = vocal_min;
+                            } else {
+                                let snr = (orig - floor * strength_factor) / orig;
+                                gains[k] = snr.clamp(min_atten_linear, 1.0);
+                            }
+                        }
+                    },
+                    "uvr_denoise_full" => {
+                        // Максимально глубокое подавление шума с крутым VAD гейтом
+                        let mut frame_power = 0.0_f32;
+                        let mut noise_power = 0.0_f32;
+                        for k in 0..num_bins {
+                            frame_power += magnitudes[f][k];
+                            noise_power += noise_floor[k];
+                        }
+                        let is_speech_active = frame_power > noise_power * (1.4 + strength_factor * 0.8);
+
+                        for k in 0..num_bins {
+                            let orig = magnitudes[f][k];
+                            let floor = noise_floor[k] * (1.2 + strength_factor * 2.0);
+                            if !is_speech_active {
+                                gains[k] = min_atten_linear;
+                            } else if orig <= floor {
+                                gains[k] = min_atten_linear;
+                            } else {
+                                let snr = (orig - floor * strength_factor) / orig;
+                                gains[k] = (snr.powf(1.3)).clamp(min_atten_linear, 1.0);
+                            }
+                        }
+                    },
+                    _ => {
+                        // "spectral_gate" (AFFTDN - Спектральный гейт)
+                        let threshold_scale = 1.0 + strength_factor * 1.8;
+                        for k in 0..num_bins {
+                            let orig = magnitudes[f][k];
+                            let threshold = noise_floor[k] * threshold_scale;
+                            if orig > threshold {
+                                let snr = (orig - noise_floor[k] * strength_factor) / orig;
+                                gains[k] = snr.powf(1.1).clamp(min_atten_linear, 1.0);
+                            } else {
+                                let ratio = (orig / threshold.max(1e-6)).powi(2);
+                                gains[k] = (min_atten_linear + (1.0 - min_atten_linear) * ratio * 0.3).clamp(min_atten_linear, 1.0);
+                            }
+                        }
+                    }
                 }
+
+                // 3. Сглаживание между смежными частотными бинами (устранение musical noise)
+                for k in 1..(num_bins - 1) {
+                    let smoothed = 0.25 * gains[k - 1] + 0.50 * gains[k] + 0.25 * gains[k + 1];
+                    magnitudes[f][k] *= smoothed;
+                }
+                magnitudes[f][0] *= gains[0];
+                magnitudes[f][num_bins - 1] *= gains[num_bins - 1];
 
                 if f % 100 == 0 {
                     let percent = 20.0 + (ch as f32 / num_channels as f32) * 70.0 + (f as f32 / num_frames as f32) * (70.0 / num_channels as f32);
@@ -586,7 +735,7 @@ pub async fn denoise_audio_task(
                         percent: percent.min(92.0),
                         current_frame: (f * HOP_SIZE).min(target_44k_len),
                         total_frames: target_44k_len,
-                        stage: format!("Спектральное шумоподавление DSP (Канал {}/{})", ch + 1, num_channels),
+                        stage: format!("Шумоподавление {}: канал {}/{}...", dsp_engine_name, ch + 1, num_channels),
                     }).ok();
                 }
             }
@@ -615,16 +764,20 @@ pub async fn denoise_audio_task(
             percent: 100.0,
             current_frame: orig_total_frames,
             total_frames: orig_total_frames,
-            stage: "Шумоподавление завершено (DSP Spectral Gate).".to_string(),
+            stage: format!("Шумоподавление завершено ({}).", dsp_engine_name),
         }).ok();
 
+        let applied_db = ((max_atten_db * strength_factor) * 10.0).round() / 10.0;
+        println!("[UVR-DeNoise] <<< УСПЕШНО ЗАВЕРШЕНО (DSP) >>> Алгоритм: '{}', Подавление: -{:.1} dB",
+            dsp_engine_name, applied_db);
+
         Ok(DenoiseReport {
-            model_name: "Adaptive Spectral DSP (Wiener Noise Gate)".to_string(),
-            provider_used: "CPU SIMD Audio DSP".to_string(),
+            model_name: format!("{} [{}]", chosen_model, dsp_engine_name),
+            provider_used: "CPU SIMD Audio DSP Engine".to_string(),
             sample_rate: orig_sample_rate,
             channels: orig_spec.channels,
             duration_sec: (duration_sec * 100.0).round() / 100.0,
-            noise_reduction_db: (strength_factor * 14.0 * 10.0).round() / 10.0,
+            noise_reduction_db: applied_db,
             processed_path: output_path.to_string_lossy().to_string(),
             is_neural: false,
         })

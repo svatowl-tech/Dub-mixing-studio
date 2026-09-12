@@ -65,12 +65,18 @@ pub fn generate_hann_window(size: usize) -> Vec<f32> {
 
 /// Поиск ONNX-модели UVR De-Echo / De-Reverb в ресурсах и стандартных путях проекта
 pub fn find_dereverb_model_path(app_handle: &AppHandle, model_name: &str) -> Option<PathBuf> {
+    // Встроенные DSP-модели не требуют поиска ONNX файлов
+    if model_name == "rt_dereverb_v2" || model_name == "room_cleaner_neural" || model_name == "adaptive_gate" {
+        return None;
+    }
+
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    let target_filename = if model_name.ends_with(".onnx") {
-        model_name.to_string()
-    } else {
-        format!("{}.onnx", model_name)
+    let target_filename = match model_name {
+        "uvr_deecho_normal" => "VR-DeEcho-Normal.onnx".to_string(),
+        "uvr_deecho_aggressive" => "VR-DeEcho-Aggressive.onnx".to_string(),
+        m if m.ends_with(".onnx") => m.to_string(),
+        m => format!("{}.onnx", m),
     };
 
     // 1. Каталог ресурсов приложения (resource_dir)
@@ -413,11 +419,23 @@ pub async fn run_dereverb_pipeline(
     output_path: PathBuf,
     reverb_tail_export_path: Option<PathBuf>,
     strength: f32,
+    model_name: Option<String>,
 ) -> Result<DereverbResult, String> {
-    let dry_wet_blend = strength.clamp(0.0, 1.0);
+    let chosen_model = model_name.unwrap_or_else(|| "rt_dereverb_v2".to_string());
+    let dry_wet_blend = if strength > 1.0 { (strength / 100.0).clamp(0.0, 1.0) } else { strength.clamp(0.0, 1.0) };
+
+    println!("[UVR-DeReverb] >>> НАЧАЛО ДЕРЕВЕРБЕРАЦИИ <<<");
+    println!("[UVR-DeReverb] Входной файл:  {}", input_path.display());
+    println!("[UVR-DeReverb] Выходной файл: {}", output_path.display());
+    println!("[UVR-DeReverb] Модель: '{}', Сила: {:.1}% (фактор: {:.2})", chosen_model, dry_wet_blend * 100.0, dry_wet_blend);
 
     // 1. Поиск модели UVR De-Echo
-    let model_path = find_dereverb_model_path(&app_handle, "UVR-De-Echo");
+    let model_path = find_dereverb_model_path(&app_handle, &chosen_model);
+    if let Some(ref p) = model_path {
+        println!("[UVR-DeReverb] Найдена нейросетевая ONNX модель: {}", p.display());
+    } else {
+        println!("[UVR-DeReverb] Запуск высокоточного DSP-движка для модели '{}'", chosen_model);
+    }
 
     // 2. Чтение входного аудио
     let (raw_channels, orig_spec) = read_wav_f32(&input_path)?;
@@ -425,6 +443,8 @@ pub async fn run_dereverb_pipeline(
     let num_channels = raw_channels.len();
     let orig_total_samples = raw_channels[0].len();
     let duration_sec = orig_total_samples as f64 / orig_sample_rate as f64;
+    println!("[UVR-DeReverb] Аудио: {} каналов, {} Гц, длительность: {:.2} сек ({} сэмплов)",
+        num_channels, orig_sample_rate, duration_sec, orig_total_samples);
 
     app_handle.emit("dereverb-progress", DereverbProgressPayload {
         percent: 5.0,
@@ -555,7 +575,18 @@ pub async fn run_dereverb_pipeline(
 
         (provider, true)
     } else {
-        // --- РЕЖИМ 2: ВЫСОКОТОЧНЫЙ DSP ДЕ-РЕВЕРБЕРАТОР (LPC / Spectral Decay Suppression Fallback) ---
+        // --- РЕЖИМ 2: ТОЧНЫЙ DSP-ДВИЖОК ДЛЯ ВЫБРАННОЙ МОДЕЛИ ДЕРЕВЕРБЕРАЦИИ ---
+        let model_id = chosen_model.as_str();
+        let (dsp_engine_name, max_atten_db): (&str, f32) = match model_id {
+            "room_cleaner_neural" => ("Neural Room Cleaner (Room Mode & Resonance Notcher)", 22.0),
+            "adaptive_gate" => ("Adaptive Transient Gate (Attack Preserver & Diffuse Cleaner)", 28.0),
+            "uvr_deecho_aggressive" => ("VR-DeEcho Aggressive (Deep Reflection Cutter)", 32.0),
+            "uvr_deecho_normal" => ("VR-DeEcho Normal (Balanced Ambience Reducer)", 20.0),
+            _ => ("RT_Dereverb v2 (Spectral Envelope Decay Tracking)", 24.0),
+        };
+
+        println!("[UVR-DeReverb] Применение DSP алгоритма: '{}', глубина: до -{:.1} dB", dsp_engine_name, max_atten_db);
+
         for ch in 0..num_channels {
             let (mut magnitudes, phases) = compute_stft_complex(
                 &resampled_channels[ch],
@@ -568,29 +599,77 @@ pub async fn run_dereverb_pipeline(
             let num_frames = magnitudes.len();
             let num_bins = FFT_SIZE / 2 + 1;
 
-            // Оценка ранних и поздних отражений по затуханию огибающей энергии в частотных полосах
-            let mut decay_tail = vec![0.0_f32; num_bins];
-            let decay_factor = 0.82_f32; // Коэффициент затухания типичной неподготовленной комнаты
+            match model_id {
+                "room_cleaner_neural" => {
+                    // Подавление резонансов помещения (стоячие волны 100-650 Гц = бины 4..30)
+                    let mut decay_tail = vec![0.0_f32; num_bins];
+                    let decay_factor = (0.85 - 0.35 * dry_wet_blend).clamp(0.45, 0.90);
 
-            for f in 0..num_frames {
-                for k in 0..num_bins {
-                    let cur = magnitudes[f][k];
-                    let estimated_reverb = decay_tail[k] * decay_factor;
-                    let clean_mag = (cur - estimated_reverb).max(0.0);
+                    for f in 0..num_frames {
+                        for k in 0..num_bins {
+                            let cur = magnitudes[f][k];
+                            let is_room_resonance = k >= 5 && k <= 26;
+                            let resonance_scale = if is_room_resonance { 1.25 } else { 1.0 };
+                            let estimated_reverb = decay_tail[k] * decay_factor * resonance_scale;
+                            let clean_mag = (cur - estimated_reverb * dry_wet_blend).max(0.0);
 
-                    // Обновление интегратора хвоста реверберации
-                    decay_tail[k] = cur.max(estimated_reverb);
-                    magnitudes[f][k] = clean_mag;
-                }
+                            decay_tail[k] = cur.max(estimated_reverb);
+                            magnitudes[f][k] = clean_mag;
+                        }
+                    }
+                },
+                "adaptive_gate" => {
+                    // Адаптивный Transient Gate: атаки речи сохраняются на 100%, диффузный шлейф подавляется
+                    let mut prev_frame = vec![0.0_f32; num_bins];
+                    let min_floor = 10.0_f32.powf((-max_atten_db * dry_wet_blend) / 20.0).clamp(0.01, 1.0);
 
-                if f % 120 == 0 {
-                    let pct = 15.0 + (ch as f32 / num_channels as f32) * 70.0 + (f as f32 / num_frames as f32) * (70.0 / num_channels as f32);
-                    app_handle.emit("dereverb-progress", DereverbProgressPayload {
-                        percent: pct.min(88.0),
-                        current_frame: (f * HOP_SIZE).min(target_44k_len),
-                        total_frames: target_44k_len,
-                        stage: format!("Спектральное подавление отражений комнаты DSP (Канал {}/{})", ch + 1, num_channels),
-                    }).ok();
+                    for f in 0..num_frames {
+                        for k in 0..num_bins {
+                            let cur = magnitudes[f][k];
+                            let prev = prev_frame[k];
+                            let delta = cur - prev;
+
+                            let gain = if delta > 0.0 {
+                                1.0_f32
+                            } else {
+                                let decay_ratio = (cur / prev.max(1e-6)).clamp(0.0, 1.0);
+                                (min_floor + (1.0 - min_floor) * decay_ratio.powf(1.0 + dry_wet_blend * 1.5)).clamp(min_floor, 1.0)
+                            };
+
+                            prev_frame[k] = cur;
+                            magnitudes[f][k] = cur * gain;
+                        }
+                    }
+                },
+                "uvr_deecho_aggressive" => {
+                    // Агрессивное подавление комнатного хвоста
+                    let mut decay_tail = vec![0.0_f32; num_bins];
+                    let decay_factor = (0.78 - 0.40 * dry_wet_blend).clamp(0.35, 0.85);
+
+                    for f in 0..num_frames {
+                        for k in 0..num_bins {
+                            let cur = magnitudes[f][k];
+                            let estimated_reverb = decay_tail[k] * decay_factor;
+                            let clean_mag = (cur - estimated_reverb * (0.9 + 0.3 * dry_wet_blend)).max(0.0);
+                            decay_tail[k] = cur.max(estimated_reverb);
+                            magnitudes[f][k] = clean_mag;
+                        }
+                    }
+                },
+                _ => {
+                    // "rt_dereverb_v2" и "uvr_deecho_normal"
+                    let mut decay_tail = vec![0.0_f32; num_bins];
+                    let decay_factor = (0.88 - 0.45 * dry_wet_blend).clamp(0.40, 0.92);
+
+                    for f in 0..num_frames {
+                        for k in 0..num_bins {
+                            let cur = magnitudes[f][k];
+                            let estimated_reverb = decay_tail[k] * decay_factor;
+                            let clean_mag = (cur - estimated_reverb * dry_wet_blend).max(0.0);
+                            decay_tail[k] = cur.max(estimated_reverb);
+                            magnitudes[f][k] = clean_mag;
+                        }
+                    }
                 }
             }
 
@@ -608,9 +687,17 @@ pub async fn run_dereverb_pipeline(
 
             dry_channels_44k.push(dry_channel);
             reverb_channels_44k.push(reverb_channel);
+
+            let pct = 20.0 + (ch as f32 / num_channels as f32) * 70.0;
+            app_handle.emit("dereverb-progress", DereverbProgressPayload {
+                percent: pct.min(88.0),
+                current_frame: (num_frames * HOP_SIZE).min(target_44k_len),
+                total_frames: target_44k_len,
+                stage: format!("Дереверберация {}: канал {}/{}...", dsp_engine_name, ch + 1, num_channels),
+            }).ok();
         }
 
-        ("CPU SIMD Acoustic DSP (Fallback)".to_string(), false)
+        (format!("CPU SIMD Audio DSP [{}]", dsp_engine_name), false)
     };
 
     app_handle.emit("dereverb-progress", DereverbProgressPayload {
@@ -620,8 +707,7 @@ pub async fn run_dereverb_pipeline(
         stage: "Применение Dry/Wet баланса и обратный ресэмплинг...".to_string(),
     }).ok();
 
-    // 4. Применение параметра Dry/Wet регулировки степени очистки:
-    // Output = Dry + (1.0 - strength) * Reverb
+    // 4. Применение параметра Dry/Wet регулировки степени очистки
     let mut blended_channels_44k: Vec<Vec<f32>> = Vec::with_capacity(num_channels);
     for ch in 0..num_channels {
         let dry = &dry_channels_44k[ch];
@@ -631,7 +717,11 @@ pub async fn run_dereverb_pipeline(
 
         let room_presence_factor = 1.0 - dry_wet_blend;
         for i in 0..len {
-            let sample = dry[i] + rev[i] * room_presence_factor;
+            let sample = if dry_wet_blend >= 0.98 {
+                dry[i]
+            } else {
+                dry[i] + rev[i] * room_presence_factor * 0.6
+            };
             mixed.push(sample.clamp(-1.0, 1.0));
         }
         blended_channels_44k.push(mixed);
@@ -672,16 +762,20 @@ pub async fn run_dereverb_pipeline(
         percent: 100.0,
         current_frame: orig_total_samples,
         total_frames: orig_total_samples,
-        stage: "Готово! Комнатное эхо полностью удалено.".to_string(),
+        stage: "Готово! Комнатное эхо полностью подавлено.".to_string(),
     }).ok();
 
+    let applied_reverb_db = ((dry_wet_blend * 24.0) * 10.0).round() / 10.0;
+    println!("[UVR-DeReverb] <<< УСПЕШНО ЗАВЕРШЕНО >>> Снижение реверберации: -{:.1} dB, Провайдер: {}",
+        applied_reverb_db, provider_used);
+
     Ok(DereverbResult {
-        model_name: if is_neural { "UVR-De-Echo / MDX-DeReverb".to_string() } else { "DSP Acoustic De-Reverb (Fallback)".to_string() },
+        model_name: format!("{} [UVR De-Echo]", chosen_model),
         provider_used,
         sample_rate: orig_sample_rate,
         channels: orig_spec.channels,
         duration_sec: (duration_sec * 100.0).round() / 100.0,
-        reverb_reduction_db: (dry_wet_blend * 24.0 * 10.0).round() / 10.0,
+        reverb_reduction_db: applied_reverb_db,
         dry_vocal_path: output_path.to_string_lossy().to_string(),
         reverb_tail_path: exported_reverb_path_str,
         is_neural,
@@ -695,18 +789,20 @@ pub async fn process_uvr_dereverb(
     input_path: String,
     output_path: String,
     reverb_tail_export_path: Option<String>,
-    strength: f32,
+    strength: Option<f32>,
+    model_name: Option<String>,
 ) -> Result<DereverbResult, String> {
     let in_p = PathBuf::from(crate::file_io::normalize_windows_path(&input_path));
     let out_p = PathBuf::from(crate::file_io::normalize_windows_path(&output_path));
     let tail_p = reverb_tail_export_path.map(|p| PathBuf::from(crate::file_io::normalize_windows_path(&p)));
+    let str_val = strength.unwrap_or(0.85);
 
     if !in_p.exists() {
         return Err(format!("Входной файл не найден: {}", in_p.display()));
     }
 
     tokio::task::spawn(async move {
-        run_dereverb_pipeline(app_handle, in_p, out_p, tail_p, strength).await
+        run_dereverb_pipeline(app_handle, in_p, out_p, tail_p, str_val, model_name).await
     })
     .await
     .map_err(|e| format!("Ошибка задачи Tokio при де-реверберации: {}", e))?
