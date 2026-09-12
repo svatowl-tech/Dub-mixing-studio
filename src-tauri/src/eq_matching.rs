@@ -119,7 +119,7 @@ fn compute_psd(
 /// Performs 1/3-octave logarithmic frequency smoothing on a dB curve.
 /// For each bin k at frequency f_k, integrates neighboring bins within [f_k * 2^(-1/6), f_k * 2^(+1/6)]
 /// using a triangular weighting window in log-frequency domain.
-fn smooth_one_third_octave(curve_db: &[f32], sample_rate: u32, fft_size: usize) -> Vec<f32> {
+fn smooth_one_third_octave(curve_db: &[f32], sample_rate: u32, _fft_size: usize) -> Vec<f32> {
     let num_bins = curve_db.len();
     let mut smoothed = vec![0.0_f32; num_bins];
     let nyquist = sample_rate as f32 * 0.5;

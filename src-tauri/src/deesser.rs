@@ -291,11 +291,11 @@ impl DeEsser {
     /// Сбрасывает фильтры и внутренние состояния каналов
     pub fn reset(&mut self) {
         for state in &mut self.channels {
-            state.sidechain_filter.reset();
-            state.lp1.reset();
-            state.lp2.reset();
-            state.hp1.reset();
-            state.hp2.reset();
+            state.sidechain_filter.reset_state();
+            state.lp1.reset_state();
+            state.lp2.reset_state();
+            state.hp1.reset_state();
+            state.hp2.reset_state();
             state.rms_power = 1e-10;
             state.current_gain = 1.0;
         }

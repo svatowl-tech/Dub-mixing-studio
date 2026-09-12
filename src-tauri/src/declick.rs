@@ -228,7 +228,7 @@ pub fn declick_sample_slice(
                 let pos = start - xfade_len + k;
                 let t_fade = k as f32 / xfade_len as f32;
                 let w = 0.5 * (1.0 - (PI * t_fade).cos()); // 0.0 to 1.0
-                let t_spline = -(xfade_len - k) as f32 / (count + 1) as f32;
+                let t_spline = -((xfade_len - k) as f32) / (count + 1) as f32;
                 let interp_sample = cubic_hermite(p0, m0, p1, m1, t_spline);
                 samples[pos] = samples[pos] * (1.0 - w) + interp_sample * w;
             }

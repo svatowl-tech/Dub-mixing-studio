@@ -1,8 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::f32::consts::PI;
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
-use ndarray::{Array4, Axis};
+use ndarray::Array4;
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use rustfft::{FftPlanner, num_complex::Complex32};
 use serde::{Deserialize, Serialize};
@@ -10,9 +9,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
-use ort::value::Value;
+use ort::value::Tensor;
 #[cfg(target_os = "windows")]
-use ort::execution_providers::DirectMLExecutionProvider;
+use ort::ep::directml::DirectML;
 
 /// Частота дискретизации, строго требуемая архитектурой UVR / MDX-Net
 pub const UVR_TARGET_SAMPLE_RATE: u32 = 44100;
@@ -124,11 +123,9 @@ pub fn init_onnx_session(model_path: &Path) -> Result<(Session, String), String>
     // Попытка подключения DirectML для Windows (DirectX 12 GPU)
     #[cfg(target_os = "windows")]
     {
-        if let Ok(dml) = DirectMLExecutionProvider::default().build() {
-            if let Ok(b) = session_builder.with_execution_providers([dml]) {
-                session_builder = b;
-                provider_used = "DirectML (GPU DirectX 12)".to_string();
-            }
+        if let Ok(b) = session_builder.with_execution_providers([DirectML::default().build()]) {
+            session_builder = b;
+            provider_used = "DirectML (GPU DirectX 12)".to_string();
         }
     }
 
@@ -439,8 +436,7 @@ pub async fn denoise_audio_task(
                 }
 
                 // Инференс в ONNX Runtime
-                let alloc = session.allocator();
-                let input_tensor = Value::from_array(alloc, &tensor_data)
+                let input_tensor = Tensor::from_array(tensor_data)
                     .map_err(|e| format!("Ошибка создания входного ONNX тензора: {}", e))?;
 
                 let outputs = session.run(ort::inputs!["input" => input_tensor]
@@ -449,13 +445,11 @@ pub async fn denoise_audio_task(
 
                 // Извлечение маски или очищенной спектрограммы
                 if let Some(out_val) = outputs.values().next() {
-                    if let Ok(extracted) = out_val.extract_tensor::<f32>() {
-                        let (out_shape, out_slice) = extracted.view();
-                        
+                    if let Ok((out_shape, out_slice)) = out_val.try_extract_tensor::<f32>() {
                         // Если форма выхода совпадает с частотно-временной сеткой:
                         // Применяем маску к оригинальным магнитудам с учетом силы подавления
-                        let time_dim = if out_shape.len() >= 4 { out_shape[3] } else { current_steps };
-                        let freq_dim = if out_shape.len() >= 3 { out_shape[2] } else { num_bins };
+                        let time_dim = if out_shape.len() >= 4 { out_shape[3] as usize } else { current_steps };
+                        let freq_dim = if out_shape.len() >= 3 { out_shape[2] as usize } else { num_bins };
 
                         let steps_to_apply = current_steps.min(time_dim);
                         let bins_to_apply = num_bins.min(freq_dim);

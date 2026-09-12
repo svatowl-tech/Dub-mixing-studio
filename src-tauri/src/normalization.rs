@@ -4,7 +4,6 @@ use std::error::Error;
 use serde::{Deserialize, Serialize};
 use hound::{WavReader, WavWriter, WavSpec, SampleFormat};
 use ebur128::{EbuR128, Mode};
-use rayon::prelude::*;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
