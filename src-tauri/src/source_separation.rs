@@ -182,27 +182,57 @@ pub async fn separate_audio_stems(
         log_line: format!("Запуск модели {} через {}", model_to_use, python_str),
     });
 
-    // 3. Формирование команды запуска скрипта инференса:
-    // python -m audio_separator.run input_video.mp4 --model_name UVR-MDX-NET-Voc_FT --output_dir ...
+    // 3. Формирование команды запуска скрипта инференса через Python API Separator:
+    let models_dir_arg = find_models_dir(&app_handle)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let py_runner = r#"
+import sys, os, json, traceback
+
+input_file = sys.argv[1]
+model_name = sys.argv[2]
+output_dir = sys.argv[3]
+use_gpu = sys.argv[4].lower() == 'true'
+models_dir = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] != '' else None
+
+if not use_gpu:
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''
+
+try:
+    from audio_separator.separator import Separator
+    os.makedirs(output_dir, exist_ok=True)
+
+    kwargs = {
+        'output_dir': output_dir,
+        'output_format': 'WAV',
+    }
+    if models_dir:
+        kwargs['model_file_dir'] = models_dir
+
+    separator = Separator(**kwargs)
+    print(f'Loading model: {model_name}...', flush=True)
+    separator.load_model(model_name)
+    print(f'Separating: {input_file}...', flush=True)
+    outputs = separator.separate(input_file)
+    print('SUCCESS_OUTPUT_FILES:' + json.dumps(outputs), flush=True)
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
+"#;
+
     let mut cmd = tokio::process::Command::new(&python_str);
     cmd.args(&[
-        "-m",
-        "audio_separator.run",
+        "-c",
+        py_runner,
         &norm_input,
-        "--model_name",
         &model_to_use,
-        "--output_dir",
         &target_out_dir.to_string_lossy(),
+        if gpu_enabled { "true" } else { "false" },
+        &models_dir_arg,
     ]);
 
-    if let Some(models_dir) = find_models_dir(&app_handle) {
-        cmd.args(&["--model_file_dir", &models_dir.to_string_lossy()]);
-    }
-
-    if gpu_enabled {
-        cmd.arg("--use_gpu");
-    } else {
-        cmd.arg("--cpu");
+    if !gpu_enabled {
         cmd.env("CUDA_VISIBLE_DEVICES", "");
     }
 
@@ -213,7 +243,7 @@ pub async fn separate_audio_stems(
     // 4. Запуск дочернего процесса
     let mut child = cmd.spawn().map_err(|e| {
         format!(
-            "Не удалось запустить процесс Python ({}) с модулем audio_separator.run: {}",
+            "Не удалось запустить процесс Python ({}) для разделения аудио: {}",
             python_str, e
         )
     })?;

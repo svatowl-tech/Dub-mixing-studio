@@ -263,35 +263,61 @@ pub async fn copy_file_to_project(app_handle: tauri::AppHandle, src: String, des
     let is_audio = ["wav", "mp3", "flac", "ogg", "m4a", "aac", "wma"].contains(&ext.as_str());
 
     if is_audio {
-        if let Ok(ffprobe_cmd) = app_handle.shell().sidecar("ffprobe") {
-            if let Ok(output) = ffprobe_cmd.args(&[
-                "-v", "error", "-select_streams", "a:0",
-                "-show_entries", "stream=sample_rate",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                &norm_src,
-            ]).output().await {
-                if output.status.success() {
-                    let stdout_str = String::from_utf8_lossy(&output.stdout);
-                    if let Ok(sr) = stdout_str.trim().parse::<u32>() {
-                        if sr != 48000 {
-                            // КРИТИЧЕСКИ ВАЖНО: Меняем расширение на wav для совместимости с pcm_s16le
-                            dest_path.set_extension("wav");
-                            
-                            println!("[copy_file_to_project] Resampling from {}Hz to 48000Hz...", sr);
-                            if let Ok(ffmpeg_cmd) = app_handle.shell().sidecar("ffmpeg") {
-                                if let Ok(out) = ffmpeg_cmd.args(&[
-                                    "-y", "-i", &norm_src,
-                                    "-ar", "48000", "-c:a", "pcm_s16le", 
-                                    dest_path.to_str().unwrap()
-                                ]).output().await {
-                                    if out.status.success() {
-                                        return Ok(dest_path.to_str().unwrap().to_string());
-                                    }
-                                }
+        let mut need_conversion = ext != "wav";
+
+        if !need_conversion {
+            if let Ok(ffprobe_cmd) = app_handle.shell().sidecar("ffprobe") {
+                if let Ok(output) = ffprobe_cmd.args(&[
+                    "-v", "error", "-select_streams", "a:0",
+                    "-show_entries", "stream=sample_rate",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    &norm_src,
+                ]).output().await {
+                    if output.status.success() {
+                        let stdout_str = String::from_utf8_lossy(&output.stdout);
+                        if let Ok(sr) = stdout_str.trim().parse::<u32>() {
+                            if sr != 48000 {
+                                need_conversion = true;
                             }
                         }
                     }
                 }
+            }
+        }
+
+        if need_conversion {
+            dest_path.set_extension("wav");
+            let dest_str = dest_path.to_string_lossy().to_string();
+            println!("[copy_file_to_project] Converting/resampling audio to 48000Hz WAV: {} -> {}", norm_src, dest_str);
+
+            let mut converted = false;
+            if let Ok(ffmpeg_cmd) = app_handle.shell().sidecar("ffmpeg") {
+                if let Ok(out) = ffmpeg_cmd.args(&[
+                    "-y", "-i", &norm_src,
+                    "-ar", "48000", "-c:a", "pcm_s16le", 
+                    &dest_str
+                ]).output().await {
+                    if out.status.success() {
+                        converted = true;
+                    }
+                }
+            }
+
+            if !converted {
+                let ffmpeg_bin = find_ffmpeg_path();
+                if let Ok(out) = tokio::process::Command::new(&ffmpeg_bin).args(&[
+                    "-y", "-i", &norm_src,
+                    "-ar", "48000", "-c:a", "pcm_s16le", 
+                    &dest_str
+                ]).output().await {
+                    if out.status.success() {
+                        converted = true;
+                    }
+                }
+            }
+
+            if converted {
+                return Ok(dest_str);
             }
         }
     }
@@ -300,4 +326,66 @@ pub async fn copy_file_to_project(app_handle: tauri::AppHandle, src: String, des
     let fallback_dest = Path::new(&norm_dest_dir).join(file_name);
     fs::copy(&norm_src, &fallback_dest).map_err(|e| format!("Failed to copy file: {}", e))?;
     Ok(fallback_dest.to_str().unwrap().to_string())
+}
+
+#[tauri::command]
+pub async fn ensure_track_audio_wav(app_handle: AppHandle, file_path: String) -> Result<String, String> {
+    let norm_path = normalize_windows_path(&file_path);
+    let src = std::path::PathBuf::from(&norm_path);
+    if !src.exists() {
+        return Err(format!("Файл аудио не найден: {}", norm_path));
+    }
+
+    // Если это уже валидный WAV с правильным RIFF заголовком
+    if hound::WavReader::open(&src).is_ok() {
+        return Ok(norm_path);
+    }
+
+    // Преобразуем в .wav в той же папке
+    let mut dest = src.clone();
+    dest.set_extension("wav");
+    let dest_str = dest.to_string_lossy().to_string();
+
+    // Если wav уже существует и актуальнее источника
+    if dest.exists() {
+        if let (Ok(src_meta), Ok(dest_meta)) = (src.metadata(), dest.metadata()) {
+            if let (Ok(src_mtime), Ok(dest_mtime)) = (src_meta.modified(), dest_meta.modified()) {
+                if dest_mtime >= src_mtime {
+                    if hound::WavReader::open(&dest).is_ok() {
+                        return Ok(dest_str);
+                    }
+                }
+            }
+        }
+    }
+
+    println!("[ensure_track_audio_wav] Converting {} to 48kHz WAV -> {}", norm_path, dest_str);
+
+    let mut converted = false;
+    if let Ok(ffmpeg_cmd) = app_handle.shell().sidecar("ffmpeg") {
+        if let Ok(out) = ffmpeg_cmd.args(&[
+            "-y", "-i", &norm_path,
+            "-ar", "48000", "-c:a", "pcm_s16le",
+            &dest_str
+        ]).output().await {
+            if out.status.success() {
+                converted = true;
+            }
+        }
+    }
+
+    if !converted {
+        let ffmpeg_bin = find_ffmpeg_path();
+        let out = tokio::process::Command::new(&ffmpeg_bin).args(&[
+            "-y", "-i", &norm_path,
+            "-ar", "48000", "-c:a", "pcm_s16le",
+            &dest_str
+        ]).output().await.map_err(|e| format!("Не удалось запустить ffmpeg для конвертации: {}", e))?;
+
+        if !out.status.success() {
+            return Err(format!("Ошибка конвертации в WAV через ffmpeg: {}", String::from_utf8_lossy(&out.stderr)));
+        }
+    }
+
+    Ok(dest_str)
 }

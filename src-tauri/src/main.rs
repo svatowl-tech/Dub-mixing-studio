@@ -40,7 +40,7 @@ use audio_separator::{check_audio_separator_status, install_audio_separator_pkg,
 use export_engine::{export_audio, export_stems, export_all_stems, quick_preview_export, batch_export, export_audio_book, export_backstage_video};
 use db::{AppState, init_db, save_project_to_db, load_project_from_db, migrate_json_to_db, save_subtitles, generate_stress_test, load_segments_in_range, check_project_assets, verify_project_files, cleanup_orphaned_files, relink_segment_file, calculate_file_hash, find_file_by_hash};
 use waveform_engine::{extract_audio_peaks_bin, generate_waveform_peaks};
-use file_io::{read_text_file, read_binary_file, list_audio_files, write_audio_file, init_project_folder, get_file_info, save_media_recorder_take, save_project_file, copy_file_to_project};
+use file_io::{read_text_file, read_binary_file, list_audio_files, write_audio_file, init_project_folder, get_file_info, save_media_recorder_take, save_project_file, copy_file_to_project, ensure_track_audio_wav};
 use media_processor::{create_proxy_video, mux_video, merge_segments, merge_project_segments, render_final_video, concat_backstage_videos, get_media_info, extract_mkv_assets, create_blank_video, apply_audio_effect};
 
 use std::sync::Arc;
@@ -321,6 +321,7 @@ fn main() {
             process_denoise,
             process_uvr_dereverb,
             level_speech_volume,
+            ensure_track_audio_wav,
             separate_audio_stems,
             cancel_source_separation
         ])

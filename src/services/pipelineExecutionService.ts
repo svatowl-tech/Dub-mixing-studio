@@ -38,17 +38,60 @@ const DEFAULT_VOCAL_CHAIN: AuditionVocalBusChainConfig = {
   proDS: { enabled: true, threshold: -24, range: -8, frequency: 10000, wideBand: true, bypass: false }
 };
 
+/**
+ * Обеспечивает, чтобы все аудиодорожки дубляжа были сконвертированы в 48kHz WAV
+ * для корректной нативной DSP обработки и предотвращения ошибок "no RIFF tag found".
+ */
+async function ensureDubActorTracksWav(
+  tracks: AudioTrack[]
+): Promise<{ updatedTracks: AudioTrack[]; changed: boolean }> {
+  if (typeof window === 'undefined' || !isTauri()) {
+    return { updatedTracks: tracks, changed: false };
+  }
+
+  let changed = false;
+  const updatedTracks = tracks.map(t => ({
+    ...t,
+    segments: [...t.segments]
+  }));
+
+  for (const track of updatedTracks) {
+    if (AudioDspService.isDubActorTrack(track) && track.isProcessingEnabled !== false) {
+      for (let si = 0; si < track.segments.length; si++) {
+        const seg = track.segments[si];
+        const inputPath = seg.filePath;
+        if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
+          try {
+            const wavPath = await invoke<string>('ensure_track_audio_wav', { filePath: inputPath });
+            if (wavPath && wavPath !== inputPath) {
+              track.segments[si] = {
+                ...seg,
+                filePath: wavPath,
+              };
+              changed = true;
+            }
+          } catch (err) {
+            console.warn('[Pipeline] ensure_track_audio_wav conversion warning:', inputPath, err);
+          }
+        }
+      }
+    }
+  }
+
+  return { updatedTracks, changed };
+}
+
 export class PipelineExecutionService {
   /**
    * Executes a specific pipeline step across any of the 4 phases with real DSP calculations,
    * audio track modifications, audit logging, and state synchronization.
    */
   static async executeStep(params: ExecuteStepParams): Promise<void> {
+    let { project } = params;
     const {
       stepId,
       title,
       phaseNum,
-      project,
       activePreset,
       playbackEngine,
       onUpdateProject,
@@ -96,6 +139,17 @@ export class PipelineExecutionService {
       // ЭТАП 1: ПРЕДОБРАБОТКА (Audio DSP Processing Engine)
       // =========================================================================
       if (phaseNum === 1) {
+        // Гарантируем, что все дорожки дубляжа сконвертированы в 48kHz WAV перед DSP обработкой
+        if (typeof window !== 'undefined' && isTauri()) {
+          const { updatedTracks, changed } = await ensureDubActorTracksWav(project.tracks);
+          if (changed) {
+            project = { ...project, tracks: updatedTracks };
+            onUpdateProject({ tracks: updatedTracks });
+            playbackEngine.clearCache();
+            await playbackEngine.updateTracks(updatedTracks);
+          }
+        }
+
         if (stepId === 'normalization') {
           const targetLufs = activePreset.phase1.normalization.targetLufs ?? -16.0;
           setStepExecution(prev => ({
@@ -109,6 +163,7 @@ export class PipelineExecutionService {
 
           let lastNativeNorm: NormalizationStats | null = null;
           let processedTracksCount = 0;
+          let lastNativeError = '';
 
           if (typeof window !== 'undefined' && isTauri()) {
             for (const track of project.tracks) {
@@ -127,11 +182,30 @@ export class PipelineExecutionService {
                         processedTracksCount++;
                       }
                     } catch (e) {
+                      lastNativeError = String(e);
                       console.warn('[Pipeline] Native normalize_audio invocation error:', e);
                     }
                   }
                 }
               }
+            }
+
+            const dubSegments = project.tracks
+              .filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false)
+              .flatMap(t => t.segments.filter(s => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:')));
+
+            if (dubSegments.length > 0 && processedTracksCount === 0 && lastNativeError) {
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  status: 'failed',
+                  progress: 0,
+                  log: `Ошибка нативной нормализации EBU R128: ${lastNativeError}`,
+                  hasRollback: false,
+                }
+              }));
+              showToast(`Ошибка нормализации: ${lastNativeError}`);
+              return;
             }
           }
 
@@ -186,6 +260,9 @@ export class PipelineExecutionService {
             }
           }));
 
+          let nativeSuccessCount = 0;
+          let lastNativeError = '';
+
           // Native Tauri DSP processing if running in desktop app
           if (typeof window !== 'undefined' && isTauri()) {
             for (const track of project.tracks) {
@@ -199,12 +276,32 @@ export class PipelineExecutionService {
                         outputPath: inputPath,
                         profileName: profileParam,
                       });
+                      nativeSuccessCount++;
                     } catch (e) {
+                      lastNativeError = String(e);
                       console.warn('[Pipeline] Native match_eq_profile invocation error:', e);
                     }
                   }
                 }
               }
+            }
+
+            const dubSegments = project.tracks
+              .filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false)
+              .flatMap(t => t.segments.filter(s => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:')));
+
+            if (dubSegments.length > 0 && nativeSuccessCount === 0 && lastNativeError) {
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  status: 'failed',
+                  progress: 0,
+                  log: `Ошибка нативного EQ Matching: ${lastNativeError}`,
+                  hasRollback: false,
+                }
+              }));
+              showToast(`Ошибка EQ Matching: ${lastNativeError}`);
+              return;
             }
           }
 
@@ -217,9 +314,13 @@ export class PipelineExecutionService {
           playbackEngine.clearCache();
           await playbackEngine.updateTracks(res.updatedTracks);
 
+          const summaryLog = nativeSuccessCount > 0
+            ? `EQ Matching применен (FFT 4096, 1/3-октавное сглаживание) на ${nativeSuccessCount} сегментах.`
+            : res.logSummary;
+
           setStepExecution(prev => ({
             ...prev,
-            [stepId]: { status: 'success', progress: 100, log: res.logSummary, hasRollback: true }
+            [stepId]: { status: 'success', progress: 100, log: summaryLog, hasRollback: true }
           }));
 
           addAuditLogs([{
@@ -229,10 +330,10 @@ export class PipelineExecutionService {
             stepId: 'eqMatching',
             status: 'success',
             title: 'EQ Matching',
-            message: res.logSummary
+            message: summaryLog
           }]);
 
-          showToast(res.logSummary);
+          showToast(summaryLog);
           return;
         }
 
@@ -249,6 +350,8 @@ export class PipelineExecutionService {
 
           let nativeClicksCount = 0;
           let nativeSamplesRestored = 0;
+          let processedTracksCount = 0;
+          let lastNativeError = '';
 
           if (typeof window !== 'undefined' && isTauri()) {
             for (const track of project.tracks) {
@@ -265,13 +368,33 @@ export class PipelineExecutionService {
                       if (rep) {
                         nativeClicksCount += rep.clicksDetected;
                         nativeSamplesRestored += rep.samplesRestored;
+                        processedTracksCount++;
                       }
                     } catch (e) {
+                      lastNativeError = String(e);
                       console.warn('[Pipeline] Native clean_clicks invocation error:', e);
                     }
                   }
                 }
               }
+            }
+
+            const dubSegments = project.tracks
+              .filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false)
+              .flatMap(t => t.segments.filter(s => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:')));
+
+            if (dubSegments.length > 0 && processedTracksCount === 0 && lastNativeError) {
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  status: 'failed',
+                  progress: 0,
+                  log: `Ошибка нативного De-Click: ${lastNativeError}`,
+                  hasRollback: false,
+                }
+              }));
+              showToast(`Ошибка De-Click: ${lastNativeError}`);
+              return;
             }
           }
 
@@ -284,8 +407,8 @@ export class PipelineExecutionService {
           playbackEngine.clearCache();
           await playbackEngine.updateTracks(res.updatedTracks);
 
-          const summaryLog = nativeClicksCount > 0
-            ? `De-Click завершен (Rayon DSP): обнаружено ${nativeClicksCount} кликов, восстановлено ${nativeSamplesRestored} сэмплов.`
+          const summaryLog = processedTracksCount > 0
+            ? `De-Click завершен (Rayon DSP): обработано ${processedTracksCount} сегментов, обнаружено ${nativeClicksCount} кликов, восстановлено ${nativeSamplesRestored} сэмплов.`
             : res.logSummary;
 
           setStepExecution(prev => ({
@@ -320,6 +443,8 @@ export class PipelineExecutionService {
 
           let nativePlosivesCount = 0;
           let maxReductionDb = 0;
+          let processedTracksCount = 0;
+          let lastNativeError = '';
 
           if (typeof window !== 'undefined' && isTauri()) {
             for (const track of project.tracks) {
@@ -338,13 +463,33 @@ export class PipelineExecutionService {
                         if (rep.maxReductionDb > maxReductionDb) {
                           maxReductionDb = rep.maxReductionDb;
                         }
+                        processedTracksCount++;
                       }
                     } catch (e) {
+                      lastNativeError = String(e);
                       console.warn('[Pipeline] Native apply_deplosive invocation error:', e);
                     }
                   }
                 }
               }
+            }
+
+            const dubSegments = project.tracks
+              .filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false)
+              .flatMap(t => t.segments.filter(s => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:')));
+
+            if (dubSegments.length > 0 && processedTracksCount === 0 && lastNativeError) {
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  status: 'failed',
+                  progress: 0,
+                  log: `Ошибка нативного De-Plosive: ${lastNativeError}`,
+                  hasRollback: false,
+                }
+              }));
+              showToast(`Ошибка De-Plosive: ${lastNativeError}`);
+              return;
             }
           }
 
@@ -357,8 +502,8 @@ export class PipelineExecutionService {
           playbackEngine.clearCache();
           await playbackEngine.updateTracks(res.updatedTracks);
 
-          const summaryLog = nativePlosivesCount > 0
-            ? `De-Plosive завершен (Rayon + Butterworth HPF): подавлено ${nativePlosivesCount} задувов/взрывов, макс. срез -${maxReductionDb.toFixed(1)} dB (сдвиг среза 40->175 Гц).`
+          const summaryLog = processedTracksCount > 0
+            ? `De-Plosive завершен (Rayon + Butterworth HPF): обработано ${processedTracksCount} сегментов, подавлено ${nativePlosivesCount} задувов/взрывов, макс. срез -${maxReductionDb.toFixed(1)} dB (сдвиг среза 40->175 Гц).`
             : res.logSummary;
 
           setStepExecution(prev => ({
@@ -396,6 +541,8 @@ export class PipelineExecutionService {
 
           let nativeSibilantsCount = 0;
           let maxReductionDb = 0;
+          let processedTracksCount = 0;
+          let lastNativeError = '';
 
           if (typeof window !== 'undefined' && isTauri()) {
             for (const track of project.tracks) {
@@ -416,13 +563,33 @@ export class PipelineExecutionService {
                         if (rep.maxReductionDb > maxReductionDb) {
                           maxReductionDb = rep.maxReductionDb;
                         }
+                        processedTracksCount++;
                       }
                     } catch (e) {
+                      lastNativeError = String(e);
                       console.warn('[Pipeline] Native process_deesser invocation error:', e);
                     }
                   }
                 }
               }
+            }
+
+            const dubSegments = project.tracks
+              .filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false)
+              .flatMap(t => t.segments.filter(s => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:')));
+
+            if (dubSegments.length > 0 && processedTracksCount === 0 && lastNativeError) {
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  status: 'failed',
+                  progress: 0,
+                  log: `Ошибка нативного De-Esser: ${lastNativeError}`,
+                  hasRollback: false,
+                }
+              }));
+              showToast(`Ошибка De-Esser: ${lastNativeError}`);
+              return;
             }
           }
 
@@ -435,8 +602,8 @@ export class PipelineExecutionService {
           playbackEngine.clearCache();
           await playbackEngine.updateTracks(res.updatedTracks);
 
-          const summaryLog = nativeSibilantsCount > 0
-            ? `De-Esser завершен (Split-Band DSP): сглажено ${nativeSibilantsCount} сибилянтов («С», «З», «Щ»), макс. подавление -${maxReductionDb.toFixed(1)} dB.`
+          const summaryLog = processedTracksCount > 0
+            ? `De-Esser завершен (Split-Band DSP): обработано ${processedTracksCount} сегментов, сглажено ${nativeSibilantsCount} сибилянтов («С», «З», «Щ»), макс. подавление -${maxReductionDb.toFixed(1)} dB.`
             : res.logSummary;
 
           setStepExecution(prev => ({
@@ -470,6 +637,7 @@ export class PipelineExecutionService {
 
           let lastNativeReport: DenoiseReport | null = null;
           let processedTracksCount = 0;
+          let lastNativeError = '';
 
           if (typeof window !== 'undefined' && isTauri()) {
             for (const track of project.tracks) {
@@ -489,11 +657,30 @@ export class PipelineExecutionService {
                         processedTracksCount++;
                       }
                     } catch (e) {
+                      lastNativeError = String(e);
                       console.warn('[Pipeline] Native process_denoise invocation error:', e);
                     }
                   }
                 }
               }
+            }
+
+            const dubSegments = project.tracks
+              .filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false)
+              .flatMap(t => t.segments.filter(s => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:')));
+
+            if (dubSegments.length > 0 && processedTracksCount === 0 && lastNativeError) {
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  status: 'failed',
+                  progress: 0,
+                  log: `Ошибка нативного шумоподавления: ${lastNativeError}`,
+                  hasRollback: false,
+                }
+              }));
+              showToast(`Ошибка DeNoise: ${lastNativeError}`);
+              return;
             }
           }
 
@@ -541,6 +728,7 @@ export class PipelineExecutionService {
 
           let lastNativeReport: DereverbResult | null = null;
           let processedTracksCount = 0;
+          let lastNativeError = '';
 
           if (typeof window !== 'undefined' && isTauri()) {
             for (const track of project.tracks) {
@@ -560,11 +748,30 @@ export class PipelineExecutionService {
                         processedTracksCount++;
                       }
                     } catch (e) {
+                      lastNativeError = String(e);
                       console.warn('[Pipeline] Native process_uvr_dereverb invocation error:', e);
                     }
                   }
                 }
               }
+            }
+
+            const dubSegments = project.tracks
+              .filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false)
+              .flatMap(t => t.segments.filter(s => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:')));
+
+            if (dubSegments.length > 0 && processedTracksCount === 0 && lastNativeError) {
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  status: 'failed',
+                  progress: 0,
+                  log: `Ошибка нативного De-Echo / De-Reverb: ${lastNativeError}`,
+                  hasRollback: false,
+                }
+              }));
+              showToast(`Ошибка De-Reverb: ${lastNativeError}`);
+              return;
             }
           }
 
@@ -612,6 +819,7 @@ export class PipelineExecutionService {
 
           let lastNativeReport: VolumeLevelerReport | null = null;
           let processedTracksCount = 0;
+          let lastNativeError = '';
 
           if (typeof window !== 'undefined' && isTauri()) {
             for (const track of project.tracks) {
@@ -633,11 +841,30 @@ export class PipelineExecutionService {
                         processedTracksCount++;
                       }
                     } catch (e) {
+                      lastNativeError = String(e);
                       console.warn('[Pipeline] Native level_speech_volume invocation error:', e);
                     }
                   }
                 }
               }
+            }
+
+            const dubSegments = project.tracks
+              .filter(t => AudioDspService.isDubActorTrack(t) && t.isProcessingEnabled !== false)
+              .flatMap(t => t.segments.filter(s => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:')));
+
+            if (dubSegments.length > 0 && processedTracksCount === 0 && lastNativeError) {
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  status: 'failed',
+                  progress: 0,
+                  log: `Ошибка нативного выравнивания громкости (AGC): ${lastNativeError}`,
+                  hasRollback: false,
+                }
+              }));
+              showToast(`Ошибка Volume Leveler: ${lastNativeError}`);
+              return;
             }
           }
 

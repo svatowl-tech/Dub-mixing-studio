@@ -74,6 +74,7 @@
           "process_denoise",
           "process_uvr_dereverb",
           "level_speech_volume",
+          "ensure_track_audio_wav",
           "separate_audio_stems",
           "cancel_source_separation"
         ],
