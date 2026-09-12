@@ -1,6 +1,6 @@
 use std::fs;
 // sync
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use serde::Serialize;
 use hound;
 

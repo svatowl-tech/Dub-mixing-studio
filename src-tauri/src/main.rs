@@ -25,7 +25,7 @@ use vst_host::{
     scan_plugins, load_plugin, unload_plugin, process_audio_block,
     get_plugin_parameters, set_plugin_parameter, get_plugin_state,
     set_plugin_state, open_plugin_editor, close_plugin_editor,
-    SharedVstHostState,
+    SharedVstHostState, VstHostState,
 };
 use normalization::normalize_audio;
 use eq_matching::match_eq_profile;

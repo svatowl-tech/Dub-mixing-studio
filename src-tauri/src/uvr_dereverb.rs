@@ -119,9 +119,10 @@ pub fn init_dereverb_session(model_path: &Path) -> Result<(Session, String), Str
         .unwrap_or(4)
         .min(8);
 
+    #[allow(unused_mut)]
     let mut provider_used = "CPU (SIMD Multithreaded)".to_string();
 
-    let mut session_builder = Session::builder()
+    let session_builder = Session::builder()
         .map_err(|e| format!("Ошибка создания SessionBuilder: {}", e))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("Ошибка настройки уровня оптимизации: {}", e))?
@@ -129,12 +130,13 @@ pub fn init_dereverb_session(model_path: &Path) -> Result<(Session, String), Str
         .map_err(|e| format!("Ошибка настройки потоков инференса: {}", e))?;
 
     #[cfg(target_os = "windows")]
-    {
-        if let Ok(b) = session_builder.with_execution_providers([DirectML::default().build()]) {
-            session_builder = b;
+    let session_builder = match session_builder.with_execution_providers([DirectML::default().build()]) {
+        Ok(b) => {
             provider_used = "DirectML (GPU DirectX 12)".to_string();
+            b
         }
-    }
+        Err(e) => e.recover(),
+    };
 
     let session = session_builder
         .commit_from_file(model_path)
@@ -485,8 +487,8 @@ pub async fn run_dereverb_pipeline(
                 let input_tensor = Tensor::from_array(tensor_data)
                     .map_err(|e| format!("Ошибка формирования входного тензора DeReverb: {}", e))?;
 
-                let outputs = session.run(ort::inputs!["input" => input_tensor]
-                    .map_err(|e| format!("Ошибка связывания входов: {}", e))?)
+                let outputs = session
+                    .run(ort::inputs!["input" => input_tensor])
                     .map_err(|e| format!("Ошибка инференса UVR De-Echo: {}", e))?;
 
                 // Извлечение маски или предсказанной сухой спектрограммы
