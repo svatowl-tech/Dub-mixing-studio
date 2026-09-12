@@ -3,6 +3,8 @@ use std::fs;
 use std::path::Path;
 use serde::Serialize;
 use hound;
+use tauri::AppHandle;
+use tauri_plugin_shell::ShellExt;
 
 pub fn normalize_windows_path(path_str: &str) -> String {
     #[cfg(target_os = "windows")]
