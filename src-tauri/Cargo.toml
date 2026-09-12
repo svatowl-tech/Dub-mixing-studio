@@ -38,11 +38,11 @@ ndarray = "0.16.1"
 [target.'cfg(windows)'.dependencies]
 cpal = { version = "0.15", features = ["asio"] }
 windows = { version = "0.58", features = ["Win32_System_Com", "Win32_System_Threading", "Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
-ort = { version = "2.0.0-rc.9", default-features = false, features = ["ndarray", "download-binaries", "copy-dylibs", "directml"] }
+ort = { version = "2.0.0-rc.9", default-features = false, features = ["ndarray", "download-binaries", "copy-dylibs", "tls-rustls", "directml"] }
 
 [target.'cfg(not(windows))'.dependencies]
 cpal = { version = "0.15" }
-ort = { version = "2.0.0-rc.9", default-features = false, features = ["ndarray", "download-binaries", "copy-dylibs"] }
+ort = { version = "2.0.0-rc.9", default-features = false, features = ["ndarray", "download-binaries", "copy-dylibs", "tls-rustls"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
