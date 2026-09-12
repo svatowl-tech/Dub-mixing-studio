@@ -122,7 +122,8 @@ pub fn init_dereverb_session(model_path: &Path) -> Result<(Session, String), Str
     #[allow(unused_mut)]
     let mut provider_used = "CPU (SIMD Multithreaded)".to_string();
 
-    let session_builder = Session::builder()
+    #[allow(unused_mut)]
+    let mut session_builder = Session::builder()
         .map_err(|e| format!("Ошибка создания SessionBuilder: {}", e))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("Ошибка настройки уровня оптимизации: {}", e))?
@@ -130,7 +131,7 @@ pub fn init_dereverb_session(model_path: &Path) -> Result<(Session, String), Str
         .map_err(|e| format!("Ошибка настройки потоков инференса: {}", e))?;
 
     #[cfg(target_os = "windows")]
-    let session_builder = match session_builder.with_execution_providers([DirectML::default().build()]) {
+    let mut session_builder = match session_builder.with_execution_providers([DirectML::default().build()]) {
         Ok(b) => {
             provider_used = "DirectML (GPU DirectX 12)".to_string();
             b

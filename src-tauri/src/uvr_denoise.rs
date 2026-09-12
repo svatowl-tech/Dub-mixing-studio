@@ -114,7 +114,8 @@ pub fn init_onnx_session(model_path: &Path) -> Result<(Session, String), String>
     #[allow(unused_mut)]
     let mut provider_used = "CPU (Multithreaded)".to_string();
 
-    let session_builder = Session::builder()
+    #[allow(unused_mut)]
+    let mut session_builder = Session::builder()
         .map_err(|e| format!("Ошибка создания SessionBuilder: {}", e))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| format!("Ошибка настройки оптимизации: {}", e))?
@@ -123,7 +124,7 @@ pub fn init_onnx_session(model_path: &Path) -> Result<(Session, String), String>
 
     // Попытка подключения DirectML для Windows (DirectX 12 GPU)
     #[cfg(target_os = "windows")]
-    let session_builder = match session_builder.with_execution_providers([DirectML::default().build()]) {
+    let mut session_builder = match session_builder.with_execution_providers([DirectML::default().build()]) {
         Ok(b) => {
             provider_used = "DirectML (GPU DirectX 12)".to_string();
             b
