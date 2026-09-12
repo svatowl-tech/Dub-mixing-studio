@@ -19,28 +19,20 @@ const REQUIRED_MODELS = [
         name: 'UVR-MDX-NET-Voc_FT.onnx',
         aliases: ['UVR-MDX-NET-Voc_FT.onnx'],
         urls: [
-            'https://huggingface.co/Politrees/UVR_resources/resolve/main/MDXNet_models/UVR-MDX-NET-Voc_FT.onnx',
-            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx'
+            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx',
+            'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Voc_FT.onnx'
         ],
         description: 'Vocal / Instrument Stem Separation ONNX Model'
     },
     {
-        name: 'VR-DeNoise-FoxJoy.onnx',
-        aliases: ['UVR-DeNoise.onnx', 'UVR-DeNoise-Lite.onnx', 'VR-DeNoise-FoxJoy.onnx'],
+        name: 'Reverb_HQ_By_FoxJoy.onnx',
+        aliases: ['VR-DeReverb-FoxJoy.onnx', 'UVR-DeReverb.onnx', 'Reverb_HQ_By_FoxJoy.onnx'],
         urls: [
-            'https://huggingface.co/Derur/UVR-models/resolve/main/VR-DeNoise-FoxJoy.onnx',
-            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/VR-DeNoise-FoxJoy.onnx'
-        ],
-        description: 'Neural Background Noise Reduction Model'
-    },
-    {
-        name: 'VR-DeReverb-FoxJoy.onnx',
-        aliases: ['UVR-DeReverb.onnx', 'Reverb_HQ_By_FoxJoy.onnx', 'VR-DeReverb-FoxJoy.onnx'],
-        urls: [
+            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Reverb_HQ_By_FoxJoy.onnx',
             'https://huggingface.co/Derur/UVR-models/resolve/main/Reverb_HQ_By_FoxJoy.onnx',
-            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Reverb_HQ_By_FoxJoy.onnx'
+            'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx'
         ],
-        description: 'Neural Room Acoustics & Reverb Removal Model'
+        description: 'Neural Room Acoustics & Reverb Removal Model (FoxJoy HQ)'
     }
 ];
 

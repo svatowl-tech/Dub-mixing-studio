@@ -22,7 +22,7 @@
     "postinstall": "node scripts/setup-ffmpeg.js"
   },
   "build": {
-    "appId": "com.dubmixingstudio.app",
+    "appId": "com.dubmixingstudio.desktop",
     "productName": "Dub Mixing Studio",
     "copyright": "Copyright © 2026 Dub Mixing Studio",
     "asar": true,

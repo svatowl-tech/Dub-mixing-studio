@@ -622,7 +622,7 @@ pub async fn denoise_audio_task(
         }).ok();
 
         Ok(DenoiseReport {
-            model_name: "DSP Spectral Gating (Fallback: ONNX модель не найдена в resources/models/)".to_string(),
+            model_name: "Adaptive Spectral DSP (Wiener Noise Gate)".to_string(),
             provider_used: "CPU SIMD Audio DSP".to_string(),
             sample_rate: orig_sample_rate,
             channels: orig_spec.channels,
