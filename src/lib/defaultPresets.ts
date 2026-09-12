@@ -107,10 +107,14 @@ export const createDefaultPhase2 = (type: MixingType) => ({
   voiceoverLeadMs: 0,
   silenceSplit: {
     enabled: true,
-    thresholdDb: -42.0,
-    minSilenceDurationMs: type === MixingType.VOICEOVER ? 450 : 350,
-    minSegmentDurationMs: 180,
-    padSilenceMs: 40,
+    thresholdDb: -35.0, // Порог включения речи (Onset)
+    offsetThresholdDb: -45.0, // Порог выключения речи с гистерезисом (Offset)
+    minSilenceDurationMs: type === MixingType.VOICEOVER ? 350 : 300,
+    minSegmentDurationMs: 200,
+    paddingPreMs: 80,
+    paddingPostMs: 150,
+    padSilenceMs: 80,
+    exportClips: false,
     bypass: false,
   },
   whisper: {

@@ -76,7 +76,12 @@
           "level_speech_volume",
           "ensure_track_audio_wav",
           "separate_audio_stems",
-          "cancel_source_separation"
+          "cancel_source_separation",
+          "split_by_silence",
+          "transcribe_and_match_script",
+          "align_vocal_clip",
+          "validate_and_adjust_project_rules",
+          "validate_timeline_compliance"
         ],
         "deny": []
       }

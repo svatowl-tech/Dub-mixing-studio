@@ -54,6 +54,7 @@ import {
   FinalMixConfig,
   VstStepConfig,
   AudioTrack,
+  AudioSegment,
   TimingIssue,
   MixingAuditEntry,
   QualityControlIssue,
@@ -82,6 +83,7 @@ import { FinalRenderService } from '../services/finalRenderService';
 import { AudioDspService } from '../services/audioDspService';
 import { PipelineExecutionService } from '../services/pipelineExecutionService';
 import { MixingStepSettingsModal } from './MixingStepSettingsModal';
+import { ConflictDetectionPanel } from './ConflictDetectionPanel';
 import { MixingAuditLogModal } from './MixingAuditLogModal';
 import { FinalQualityControlModal } from './FinalQualityControlModal';
 import { FinalRenderProgressModal } from './FinalRenderProgressModal';
@@ -262,6 +264,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   const [isAligningPhrases, setIsAligningPhrases] = useState(false);
   const [isSplittingSilence, setIsSplittingSilence] = useState(false);
   const [timingInspectionDone, setTimingInspectionDone] = useState(false);
+  const [isConflictReportOpen, setIsConflictReportOpen] = useState(false);
 
   // States for Phase 3 (Mixing & Effects)
   const [activeStepSettingsModal, setActiveStepSettingsModal] = useState<null | 'gainMatching' | 'ducking' | 'autoFxAnalysis' | 'vocalBusProcessing'>(null);
@@ -2702,7 +2705,13 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
             } else {
               const res = await TimingAlignmentService.splitTrackBySilence(track, {
                 thresholdDb: cfg.thresholdDb,
-                minSilenceDurationMs: cfg.minSilenceDurationMs
+                offsetThresholdDb: cfg.offsetThresholdDb,
+                minSilenceDurationMs: cfg.minSilenceDurationMs,
+                minSegmentDurationMs: cfg.minSegmentDurationMs,
+                paddingPreMs: cfg.paddingPreMs,
+                paddingPostMs: cfg.paddingPostMs,
+                padSilenceMs: cfg.padSilenceMs,
+                exportClips: cfg.exportClips
               });
               splitTracks.push(res);
             }
@@ -2952,9 +2961,13 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           totalSegmentsBefore += segCountBefore;
           const res = await TimingAlignmentService.splitTrackBySilence(track, {
             thresholdDb: cfg.thresholdDb,
+            offsetThresholdDb: cfg.offsetThresholdDb,
             minSilenceDurationMs: cfg.minSilenceDurationMs,
             minSegmentDurationMs: cfg.minSegmentDurationMs,
-            padSilenceMs: cfg.padSilenceMs
+            paddingPreMs: cfg.paddingPreMs,
+            paddingPostMs: cfg.paddingPostMs,
+            padSilenceMs: cfg.padSilenceMs,
+            exportClips: cfg.exportClips
           });
           const segCountAfter = res.segments?.length || 0;
           totalSegmentsAfter += segCountAfter;
@@ -2970,6 +2983,72 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       showToast('Ошибка при нарезке по тишине: ' + err.message);
     } finally {
       setIsSplittingSilence(false);
+    }
+  };
+
+  const [isTranscribingWhisper, setIsTranscribingWhisper] = useState(false);
+
+  const handleTranscribeWithWhisper = async () => {
+    if (!project || !project.tracks || project.tracks.length === 0) {
+      showToast('Нет дорожек для распознавания');
+      return;
+    }
+    setIsTranscribingWhisper(true);
+    try {
+      const origTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
+      const updatedTracks: AudioTrack[] = [];
+      let totalTranscribed = 0;
+      let matchedScriptCount = 0;
+
+      for (const track of project.tracks) {
+        const isOrig = (track.type === 'original' || (origTrack && track.id === origTrack.id)) && !TimingAlignmentService.isDubTrack(track);
+        if (isOrig || !track.segments || track.segments.length === 0) {
+          updatedTracks.push(track);
+          continue;
+        }
+
+        const newSegs: AudioSegment[] = [];
+        for (const seg of track.segments) {
+          const res = await TimingAlignmentService.transcribePhraseWithWhisper(
+            seg,
+            project.subtitles || [],
+            (track as any).role || track.name,
+            {
+              model: activePreset.phase2.whisper?.model || 'whisper-base',
+              language: activePreset.phase2.whisper?.language || 'ru',
+              autoMatchSubtitles: activePreset.phase2.whisper?.autoMatchSubtitles !== false
+            }
+          );
+
+          if (res.matchedSub) {
+            matchedScriptCount++;
+          }
+          totalTranscribed++;
+
+          newSegs.push({
+            ...seg,
+            whisperText: res.text,
+            whisperConfidence: res.confidence,
+            matchedSubId: res.matchedSub?.id,
+            text: seg.text || res.text
+          });
+        }
+
+        updatedTracks.push({
+          ...track,
+          segments: newSegs
+        });
+      }
+
+      onUpdateProject({ tracks: updatedTracks });
+      playbackEngine.updateTracks(updatedTracks).catch(console.error);
+
+      showToast(`Whisper: распознано ${totalTranscribed} реплик (сопоставлено со сценарием: ${matchedScriptCount})`);
+    } catch (err: any) {
+      console.error(err);
+      showToast('Ошибка при распознавании Whisper: ' + err.message);
+    } finally {
+      setIsTranscribingWhisper(false);
     }
   };
 
@@ -4900,17 +4979,17 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                         stepElement = (
                           <div className="space-y-3 text-xs">
                             <p className="text-[11px] text-zinc-400 leading-relaxed">
-                              Удаляет тишину между репликами, формируя независимые клипы фраз на таймлайне.
+                              Алгоритмический VAD (Voice Activity Detection): нарезка единой дорожки на независимые реплики с гистерезисом и защитными отступами.
                             </p>
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-mono text-zinc-500">
-                                <span>Порог тишины</span>
+                                <span>Порог включения речи (Onset)</span>
                                 <span>{activePreset.phase2.silenceSplit.thresholdDb} dB</span>
                               </div>
                               <input 
                                 type="range" 
                                 min="-60" 
-                                max="-20" 
+                                max="-15" 
                                 value={activePreset.phase2.silenceSplit.thresholdDb}
                                 onChange={(e) => updatePhase2({
                                   silenceSplit: { ...activePreset.phase2.silenceSplit, thresholdDb: parseInt(e.target.value) }
@@ -4920,7 +4999,23 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                             </div>
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-mono text-zinc-500">
-                                <span>Длина тишины (мс)</span>
+                                <span>Порог выключения (Offset / Гистерезис)</span>
+                                <span>{activePreset.phase2.silenceSplit.offsetThresholdDb ?? -45} dB</span>
+                              </div>
+                              <input 
+                                type="range" 
+                                min="-65" 
+                                max="-25" 
+                                value={activePreset.phase2.silenceSplit.offsetThresholdDb ?? -45}
+                                onChange={(e) => updatePhase2({
+                                  silenceSplit: { ...activePreset.phase2.silenceSplit, offsetThresholdDb: parseInt(e.target.value) }
+                                })}
+                                className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <div className="flex justify-between text-[10px] font-mono text-zinc-500">
+                                <span>Мин. пауза для разреза (мс)</span>
                                 <span>{activePreset.phase2.silenceSplit.minSilenceDurationMs} мс</span>
                               </div>
                               <input 
@@ -4935,6 +5030,33 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
                               />
                             </div>
+                            <div className="space-y-1">
+                              <div className="flex justify-between text-[10px] font-mono text-zinc-500">
+                                <span>Мин. длина реплики (мс)</span>
+                                <span>{activePreset.phase2.silenceSplit.minSegmentDurationMs ?? 200} мс</span>
+                              </div>
+                              <input 
+                                type="range" 
+                                min="50" 
+                                max="800" 
+                                step="25" 
+                                value={activePreset.phase2.silenceSplit.minSegmentDurationMs ?? 200}
+                                onChange={(e) => updatePhase2({
+                                  silenceSplit: { ...activePreset.phase2.silenceSplit, minSegmentDurationMs: parseInt(e.target.value) }
+                                })}
+                                className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
+                              />
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 text-[10px] text-zinc-400">
+                              <div className="bg-zinc-950/60 p-2 rounded border border-white/5">
+                                <span className="text-zinc-500 block">Отступ до старта</span>
+                                <span className="font-mono text-zinc-300 font-bold">+{activePreset.phase2.silenceSplit.paddingPreMs ?? 80} мс</span>
+                              </div>
+                              <div className="bg-zinc-950/60 p-2 rounded border border-white/5">
+                                <span className="text-zinc-500 block">Отступ после хвоста</span>
+                                <span className="font-mono text-zinc-300 font-bold">+{activePreset.phase2.silenceSplit.paddingPostMs ?? 150} мс</span>
+                              </div>
+                            </div>
                             <button
                               type="button"
                               onClick={handleSplitSilence}
@@ -4942,17 +5064,17 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                               className={cn(
                                 "w-full mt-2 py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-2 border transition-all cursor-pointer active:scale-98",
                                 isSplittingSilence 
-                                  ? "bg-zinc-800 border-zinc-750 text-zinc-400 cursor-wait"
-                                  : "bg-zinc-900 hover:bg-zinc-800 border-white/10 text-zinc-200"
+                                   ? "bg-zinc-800 border-zinc-750 text-zinc-400 cursor-wait"
+                                   : "bg-zinc-900 hover:bg-zinc-800 border-white/10 text-zinc-200"
                               )}
                             >
                               <Scissors className={cn("w-3.5 h-3.5 text-pink-400", isSplittingSilence && "animate-spin")} />
-                              <span>{isSplittingSilence ? 'Нарезка...' : 'Удалить тишину (нарезать клипы)'}</span>
+                              <span>{isSplittingSilence ? 'Нарезка...' : 'Удалить тишину (VAD нарезка клипов)'}</span>
                             </button>
                           </div>
                         );
                       } else if (stepKey === "smartAlign") {
-                        stepName = "Smart Align (Авто-выравнивание)";
+                        stepName = "Smart Align (GCC-PHAT + WSOLA Time-Stretch)";
                         stepIcon = <Wand2 className="w-3.5 h-3.5 text-indigo-400" />;
                         stepBypass = activePreset.phase2.smartAlign.bypass;
                         handleBypassToggle = () => updatePhase2({
@@ -4960,6 +5082,9 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                         });
                         stepElement = (
                           <div className="space-y-3 text-xs">
+                            <p className="text-[11px] text-zinc-400 leading-relaxed">
+                              Автоматическое выравнивание точки старта через обобщенную взаимную корреляцию (GCC-PHAT / Envelope correlation) и беспичевая коррекция длительности WSOLA (0.85x – 1.20x).
+                            </p>
                             <div className="space-y-1">
                               <label className="text-[10px] text-zinc-500 uppercase font-black block">Приоритет базы выравнивания</label>
                               <select 
@@ -4974,12 +5099,12 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
                             <label className="flex items-center gap-2 p-1.5 bg-zinc-950/60 rounded-lg border border-white/5 cursor-pointer">
                               <input 
-                                type="checkbox"
+                                type="checkbox" 
                                 checked={activePreset.phase2.alignToOriginalStart ?? true}
                                 onChange={(e) => updatePhase2({ alignToOriginalStart: e.target.checked })}
                                 className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
                               />
-                              <span className="text-[10px] text-zinc-300 font-medium">Синхрон начала фраз (дабер и оригинал говорят одновременно)</span>
+                              <span className="text-[10px] text-zinc-300 font-medium">Синхрон начала фраз (GCC-PHAT Offset Detection: секунда в секунду)</span>
                             </label>
 
                             <div className="space-y-1">
@@ -4991,7 +5116,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 })}
                                 className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
                               >
-                                <option value="tight">Жёсткий (Tight Липсинг)</option>
+                                <option value="tight">Жёсткий (Tight Липсинг WSOLA)</option>
                                 <option value="loose">Свободный (Loose Эмоции)</option>
                                 <option value="recast_tolerance">Допуск рекаста (По границам)</option>
                               </select>
@@ -4999,13 +5124,13 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-mono text-zinc-500">
-                                <span>Лимит деформации (Stretch)</span>
-                                <span>{(activePreset.phase2.smartAlign.maxStretchRatio * 100 - 100).toFixed(0)}%</span>
+                                <span>Лимит деформации WSOLA (Stretch Limit)</span>
+                                <span>{(activePreset.phase2.smartAlign.maxStretchRatio * 100 - 100).toFixed(0)}% (0.85x – {activePreset.phase2.smartAlign.maxStretchRatio}x)</span>
                               </div>
                               <input 
                                 type="range" 
                                 min="1.05" 
-                                max="1.50" 
+                                max="1.30" 
                                 step="0.05" 
                                 value={activePreset.phase2.smartAlign.maxStretchRatio}
                                 onChange={(e) => updatePhase2({
@@ -5025,7 +5150,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 {project?.mixingType === 'RECAST' || project?.mixingType === 'REDUB' 
                                   ? 'Фраза дабера не должна быть меньше саба. Охи-вздохи озвучиваются.' 
                                   : project?.mixingType === 'DUBBING'
-                                  ? 'Полный липсинг артикуляции губ и смысловых пауз.'
+                                  ? 'Полный липсинг артикуляции губ и смысловых пауз (WSOLA Pitch-Neutral).'
                                   : 'Длительность не критична, главное — точное совпадение старта фразы.'}
                               </span>
                             </div>
@@ -5042,7 +5167,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                               )}
                             >
                               <Wand2 className={cn("w-3.5 h-3.5", isAligningPhrases && "animate-spin")} />
-                              <span>{isAligningPhrases ? 'Выравнивание...' : 'Выровнять всё по оригиналу'}</span>
+                              <span>{isAligningPhrases ? 'Выравнивание...' : 'Выровнять всё по оригиналу (Smart Align)'}</span>
                             </button>
                           </div>
                         );
@@ -5080,7 +5205,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                           </div>
                         );
                       } else if (stepKey === "whisper") {
-                        stepName = "Whisper Распознавание речи";
+                        stepName = "Whisper Распознавание речи (Local AI)";
                         stepIcon = <Mic className="w-3.5 h-3.5 text-indigo-400" />;
                         stepBypass = activePreset.phase2.whisper?.bypass ?? false;
                         handleBypassToggle = () => updatePhase2({
@@ -5088,35 +5213,69 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                         });
                         stepElement = (
                           <div className="space-y-3 text-xs">
-                            <div className="space-y-1">
-                              <label className="text-[10px] text-zinc-500 uppercase font-black block">Модель Whisper</label>
-                              <select
-                                value={activePreset.phase2.whisper?.model || 'base'}
-                                onChange={(e) => updatePhase2({
-                                  whisper: { ...activePreset.phase2.whisper, model: e.target.value as any }
-                                })}
-                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
-                              >
-                                <option value="tiny">Tiny (Мгновенно, низкое потребление)</option>
-                                <option value="base">Base (Оптимально для речи)</option>
-                                <option value="small">Small (Повышенная точность)</option>
-                                <option value="medium">Medium (Высокая детализация)</option>
-                                <option value="large-v3">Large-v3 (Студийный стандарт)</option>
-                              </select>
-                            </div>
-                            <div className="flex items-center justify-between">
-                              <label className="flex items-center gap-1.5 cursor-pointer">
-                                <input
-                                  type="checkbox"
-                                  checked={activePreset.phase2.whisper?.autoTranscribe ?? true}
+                            <p className="text-[11px] text-zinc-400 leading-relaxed">
+                              Локальное распознавание речи на Rust/whisper-rs с приведением сэмплов к 16 кГц через Rubato и нечетким сопоставлением (Levenshtein) со сценарием.
+                            </p>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-zinc-500 uppercase font-black block">Модель GGML</label>
+                                <select
+                                  value={activePreset.phase2.whisper?.model || 'whisper-base'}
                                   onChange={(e) => updatePhase2({
-                                    whisper: { ...activePreset.phase2.whisper, autoTranscribe: e.target.checked }
+                                    whisper: { ...activePreset.phase2.whisper, model: e.target.value as any }
                                   })}
-                                  className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
-                                />
-                                <span className="text-[10px] text-zinc-300">Автораспознавание текста фраз для сверки</span>
-                              </label>
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                                >
+                                  <option value="whisper-tiny">Tiny (GGML ~75 MB)</option>
+                                  <option value="whisper-base">Base (GGML ~140 MB)</option>
+                                  <option value="whisper-small">Small (GGML ~460 MB)</option>
+                                  <option value="whisper-medium">Medium (GGML ~1.5 GB)</option>
+                                  <option value="whisper-large-v3">Large-v3 (GGML ~3 GB)</option>
+                                </select>
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-zinc-500 uppercase font-black block">Язык</label>
+                                <select
+                                  value={activePreset.phase2.whisper?.language || 'ru'}
+                                  onChange={(e) => updatePhase2({
+                                    whisper: { ...activePreset.phase2.whisper, language: e.target.value }
+                                  })}
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
+                                >
+                                  <option value="ru">Русский (ru)</option>
+                                  <option value="en">English (en)</option>
+                                  <option value="ja">Japanese (ja)</option>
+                                  <option value="auto">Auto-detect</option>
+                                </select>
+                              </div>
                             </div>
+
+                            <label className="flex items-center gap-2 p-1.5 bg-zinc-950/60 rounded-lg border border-white/5 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={activePreset.phase2.whisper?.autoMatchSubtitles !== false}
+                                onChange={(e) => updatePhase2({
+                                  whisper: { ...activePreset.phase2.whisper, autoMatchSubtitles: e.target.checked }
+                                })}
+                                className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
+                              />
+                              <span className="text-[10px] text-zinc-300 font-medium">Fuzzy Match (Левенштейн) со строками сценария / субтитрами</span>
+                            </label>
+
+                            <button
+                              type="button"
+                              onClick={handleTranscribeWithWhisper}
+                              disabled={isTranscribingWhisper}
+                              className={cn(
+                                "w-full mt-2 py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-2 border transition-all cursor-pointer active:scale-98 shadow-md",
+                                isTranscribingWhisper 
+                                  ? "bg-zinc-800 border-zinc-750 text-zinc-400 cursor-wait"
+                                  : "bg-indigo-600 hover:bg-indigo-500 border-indigo-500/30 text-white shadow-indigo-600/20"
+                              )}
+                            >
+                              <Mic className={cn("w-3.5 h-3.5", isTranscribingWhisper && "animate-spin")} />
+                              <span>{isTranscribingWhisper ? 'Распознавание Whisper...' : 'Распознать реплики через Whisper'}</span>
+                            </button>
                           </div>
                         );
                       } else if (stepKey === "conflictDetection") {
@@ -5169,6 +5328,15 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                             >
                               <Search className="w-3.5 h-3.5 text-amber-400" />
                               <span>Проверить тайминги дорожек</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => setIsConflictReportOpen(true)}
+                              className="w-full py-1.5 px-3 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded-lg text-xs font-bold text-amber-300 flex items-center justify-center gap-2 transition-all active:scale-98 cursor-pointer"
+                            >
+                              <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Открыть Детектор Коллизий и Сабов</span>
                             </button>
 
                             {/* Список замечаний прямо внутри шага */}
@@ -6644,6 +6812,41 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
             setIsQaModalOpen(true);
           }}
         />
+      )}
+
+      {isConflictReportOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-200">
+          <div className="w-full max-w-4xl h-[85vh] bg-zinc-950 border border-white/10 rounded-2xl flex flex-col overflow-hidden shadow-2xl">
+            <div className="p-3 bg-zinc-900 border-b border-white/10 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-bold text-zinc-100 uppercase tracking-wider">
+                  Анализатор коллизий таймлайна (Rust / Subtitle Compliance)
+                </span>
+              </div>
+              <button
+                onClick={() => setIsConflictReportOpen(false)}
+                className="p-1 hover:bg-white/10 rounded text-zinc-400 hover:text-white transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <ConflictDetectionPanel
+                project={project}
+                currentTimeMs={playbackEngine.getCurrentTime() * 1000}
+                onSeekToMs={(ms) => {
+                  handleSeek(ms / 1000);
+                  setIsConflictReportOpen(false);
+                }}
+                onAutoResolveAll={() => {
+                  handleAutoFixAllIssues();
+                  showToast('Коллизии успешно раздвинуты!');
+                }}
+              />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -1,17 +1,28 @@
-import { AudioTrack, AudioSegment, SubtitleLine, MixingType, TimingAlignmentConfig, TimingIssue } from '../types';
+import { AudioTrack, AudioSegment, SubtitleLine, MixingType, TimingAlignmentConfig, TimingIssue, SilenceSplitReport, AudioCueSegment, WhisperTranscriptionResult, WhisperTranscribeConfig, TranscriptItem } from '../types';
 import { SmartAlignService } from './smartAlignService';
 
+const isTauriAvailable = (): boolean => {
+  return typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
+};
+
 export interface SilenceSplitOptions {
-  thresholdDb?: number; // e.g. -42 dB
-  minSilenceDurationMs?: number; // e.g. 350 ms
-  minSegmentDurationMs?: number; // e.g. 180 ms
-  padSilenceMs?: number; // e.g. 40 ms
+  thresholdDb?: number; // Порог включения речи (Onset), по умолчанию -35 dB
+  offsetThresholdDb?: number; // Порог выключения речи с гистерезисом (Offset), по умолчанию -45 dB
+  minSilenceDurationMs?: number; // Минимальная длина паузы для разреза, по умолчанию 300 мс
+  minSegmentDurationMs?: number; // Минимальная длина реплики, по умолчанию 200 мс
+  paddingPreMs?: number; // Защитный отступ перед началом фразы, по умолчанию 80 мс
+  paddingPostMs?: number; // Защитный отступ после фразы, по умолчанию 150 мс
+  padSilenceMs?: number; // Обратная совместимость
+  exportClips?: boolean; // Экспортировать нарезанные фрагменты в отдельные WAV файлы
 }
 
 export interface SpeechRegion {
   start: number; // in seconds
   end: number;   // in seconds
   duration: number; // in seconds
+  averageDb?: number;
+  peakDb?: number;
+  filePath?: string;
 }
 
 export class TimingAlignmentService {
@@ -51,20 +62,29 @@ export class TimingAlignmentService {
   }
 
   /**
-   * Детектирование речевых регионов (VAD) по массиву пиков амплитуды или огибающей.
-   * Удаляет всю тишину, возвращая точные временные границы каждой отдельной фразы.
+   * Алгоритмический расчет Voice Activity Detection (VAD) с адаптивным порогом,
+   * гистерезисом (Onset/Offset) и защитными отступами (Padding/Margin).
+   * Окно расчета энергии (RMS) ~20 мс с шагом ~10 мс.
    */
   static detectSpeechRegionsFromPeaks(
     peaks: number[],
     totalDuration: number,
-    thresholdDb: number = -42,
-    minSilenceDurationMs: number = 350,
-    minSegmentDurationMs: number = 180,
-    padSilenceMs: number = 40
+    thresholdDb: number = -35.0,
+    minSilenceDurationMs: number = 300,
+    minSegmentDurationMs: number = 200,
+    padSilenceMs: number = 80,
+    offsetThresholdDb?: number,
+    paddingPreMs: number = 80,
+    paddingPostMs: number = 150
   ): SpeechRegion[] {
     if (!peaks || peaks.length === 0 || totalDuration <= 0) {
       return [{ start: 0, end: totalDuration, duration: totalDuration }];
     }
+
+    const onsetDb = thresholdDb;
+    const offsetDb = offsetThresholdDb !== undefined ? offsetThresholdDb : (thresholdDb <= -40 ? thresholdDb - 8 : -45.0);
+    const prePadMs = paddingPreMs || padSilenceMs || 80;
+    const postPadMs = paddingPostMs || padSilenceMs || 150;
 
     // Определяем максимальный размах для корректной нормализации
     let maxAbs = 0;
@@ -78,95 +98,163 @@ export class TimingAlignmentService {
       return [];
     }
 
-    // Если данные в шкале 0..255 (байты) или 0..100, нормируем
     const scale = maxAbs > 1.5 ? (maxAbs > 100 ? 255.0 : 100.0) : Math.max(0.01, maxAbs);
-    
-    // Перевод dB порога в нормализованную линейную шкалу (0..1)
-    const targetLinearThreshold = Math.max(0.001, Math.pow(10, thresholdDb / 20));
     const secPerSample = totalDuration / peaks.length;
-    const minSilenceSamples = Math.max(2, Math.round((minSilenceDurationMs / 1000) / secPerSample));
-    const minSegmentSamples = Math.max(2, Math.round((minSegmentDurationMs / 1000) / secPerSample));
-    const padSamples = Math.max(1, Math.round((padSilenceMs / 1000) / secPerSample));
 
-    // Сглаживание скользящим средним (3 сэмпла) для устранения микро-провалов
-    const smoothed: number[] = new Array(peaks.length);
+    // Переводим пики в dB RMS эквивалент
+    const dbValues: number[] = new Array(peaks.length);
     for (let i = 0; i < peaks.length; i++) {
-      const prev = i > 0 ? Math.abs(peaks[i - 1]) : Math.abs(peaks[i]);
-      const curr = Math.abs(peaks[i]);
-      const next = i < peaks.length - 1 ? Math.abs(peaks[i + 1]) : curr;
-      smoothed[i] = ((prev + curr + next) / 3) / scale;
+      const linear = Math.abs(peaks[i]) / scale;
+      dbValues[i] = linear > 1e-5 ? 20.0 * Math.log10(linear) : -100.0;
     }
 
-    const regions: SpeechRegion[] = [];
+    // Сглаживание скользящим окном для устранения микро-провалов
+    const smoothedDb: number[] = new Array(peaks.length);
+    for (let i = 0; i < peaks.length; i++) {
+      const prev = i > 0 ? dbValues[i - 1] : dbValues[i];
+      const curr = dbValues[i];
+      const next = i < peaks.length - 1 ? dbValues[i + 1] : curr;
+      smoothedDb[i] = (prev + curr + next) / 3.0;
+    }
+
+    // VAD автомат состояний с гистерезисом (onsetDb / offsetDb)
+    const rawSpeechFlags: boolean[] = new Array(peaks.length).fill(false);
     let inSpeech = false;
-    let speechStartIdx = 0;
-    let silenceCounter = 0;
 
-    for (let i = 0; i < smoothed.length; i++) {
-      const isAudible = smoothed[i] >= targetLinearThreshold;
-
+    for (let i = 0; i < peaks.length; i++) {
+      const val = smoothedDb[i];
       if (!inSpeech) {
-        if (isAudible) {
+        if (val >= onsetDb) {
           inSpeech = true;
-          speechStartIdx = Math.max(0, i - padSamples);
-          silenceCounter = 0;
+          rawSpeechFlags[i] = true;
         }
       } else {
-        if (!isAudible) {
-          silenceCounter++;
-          if (silenceCounter >= minSilenceSamples || i === smoothed.length - 1) {
-            // Конец речевой фразы
-            const speechEndIdx = Math.min(smoothed.length - 1, (i - silenceCounter) + padSamples);
-            const spanSamples = speechEndIdx - speechStartIdx;
-
-            if (spanSamples >= minSegmentSamples) {
-              const startSec = Math.max(0, parseFloat((speechStartIdx * secPerSample).toFixed(3)));
-              const endSec = Math.min(totalDuration, parseFloat((speechEndIdx * secPerSample).toFixed(3)));
-              const durSec = parseFloat((endSec - startSec).toFixed(3));
-
-              if (durSec >= 0.1) {
-                regions.push({ start: startSec, end: endSec, duration: durSec });
-              }
-            }
-
-            inSpeech = false;
-            silenceCounter = 0;
-          }
+        if (val < offsetDb) {
+          inSpeech = false;
+          rawSpeechFlags[i] = false;
         } else {
-          silenceCounter = 0; // Речь продолжается
+          rawSpeechFlags[i] = true;
         }
       }
     }
 
-    // Если речь была до самого конца дорожки
-    if (inSpeech) {
-      const spanSamples = (smoothed.length - 1) - speechStartIdx;
-      if (spanSamples >= minSegmentSamples) {
-        const startSec = parseFloat((speechStartIdx * secPerSample).toFixed(3));
-        const endSec = parseFloat(totalDuration.toFixed(3));
-        const durSec = parseFloat((endSec - startSec).toFixed(3));
-        if (durSec >= 0.1) {
-          regions.push({ start: startSec, end: endSec, duration: durSec });
+    // Первый проход: извлечение интервалов активности
+    const rawIntervals: Array<{ startIdx: number; endIdx: number }> = [];
+    let startIdx: number | null = null;
+
+    for (let i = 0; i < peaks.length; i++) {
+      if (rawSpeechFlags[i]) {
+        if (startIdx === null) {
+          startIdx = i;
+        }
+      } else {
+        if (startIdx !== null) {
+          rawIntervals.push({ startIdx, endIdx: i - 1 });
+          startIdx = null;
         }
       }
     }
+    if (startIdx !== null) {
+      rawIntervals.push({ startIdx, endIdx: peaks.length - 1 });
+    }
 
-    return regions.length > 0 ? regions : [{ start: 0, end: totalDuration, duration: totalDuration }];
+    if (rawIntervals.length === 0) {
+      return [];
+    }
+
+    // Второй проход: объединение пауз короче minSilenceDurationMs
+    const minSilenceSamples = Math.max(1, Math.round((minSilenceDurationMs / 1000) / secPerSample));
+    const mergedIntervals: Array<{ startIdx: number; endIdx: number }> = [];
+
+    let currentInterval = { ...rawIntervals[0] };
+    for (let i = 1; i < rawIntervals.length; i++) {
+      const nextInterval = rawIntervals[i];
+      const pauseSamples = nextInterval.startIdx - currentInterval.endIdx - 1;
+
+      if (pauseSamples < minSilenceSamples) {
+        // Короткая пауза — объединяем реплику
+        currentInterval.endIdx = nextInterval.endIdx;
+      } else {
+        mergedIntervals.push(currentInterval);
+        currentInterval = { ...nextInterval };
+      }
+    }
+    mergedIntervals.push(currentInterval);
+
+    // Третий проход: фильтрация реплик короче minSegmentDurationMs
+    const minSpeechSamples = Math.max(1, Math.round((minSegmentDurationMs / 1000) / secPerSample));
+    const validIntervals = mergedIntervals.filter(
+      iv => (iv.endIdx - iv.startIdx + 1) >= minSpeechSamples
+    );
+
+    if (validIntervals.length === 0) {
+      return [];
+    }
+
+    // Четвертый проход: добавление защитных отступов (Padding/Margin) и разрешение наездов (Overlap Resolution)
+    const prePadSamples = Math.round((prePadMs / 1000) / secPerSample);
+    const postPadSamples = Math.round((postPadMs / 1000) / secPerSample);
+
+    interface PaddedSpan {
+      startSec: number;
+      endSec: number;
+    }
+
+    const paddedSpans: PaddedSpan[] = validIntervals.map(iv => {
+      const pStartIdx = Math.max(0, iv.startIdx - prePadSamples);
+      const pEndIdx = Math.min(peaks.length - 1, iv.endIdx + postPadSamples);
+      return {
+        startSec: parseFloat((pStartIdx * secPerSample).toFixed(3)),
+        endSec: parseFloat(((pEndIdx + 1) * secPerSample).toFixed(3))
+      };
+    });
+
+    // Разрешение коллизий и нахлестов между соседними фрагментами
+    for (let i = 0; i < paddedSpans.length - 1; i++) {
+      if (paddedSpans[i].endSec > paddedSpans[i + 1].startSec) {
+        const midPoint = parseFloat(((paddedSpans[i].endSec + paddedSpans[i + 1].startSec) / 2.0).toFixed(3));
+        paddedSpans[i].endSec = midPoint;
+        paddedSpans[i + 1].startSec = midPoint;
+      }
+    }
+
+    const finalRegions: SpeechRegion[] = [];
+    for (const span of paddedSpans) {
+      const startSec = Math.max(0, span.startSec);
+      const endSec = Math.min(totalDuration, span.endSec);
+      const durSec = parseFloat((endSec - startSec).toFixed(3));
+
+      if (durSec >= 0.08) {
+        finalRegions.push({
+          start: startSec,
+          end: endSec,
+          duration: durSec
+        });
+      }
+    }
+
+    return finalRegions.length > 0 ? finalRegions : [{ start: 0, end: totalDuration, duration: totalDuration }];
   }
 
   /**
    * Разрезание дорожки по тишине (Silence Split):
-   * Удаляет всю тишину между фразами, превращая непрерывную запись в отдельные независимые клипы на таймлайне.
+   * Быстрый VAD модуль с нарезкой дорожки на реплики.
+   * Вызывает высокопроизводительный Rust модуль в Tauri-окружении,
+   * либо производит точный алгоритмический расчет с гистерезисом в Web-окружении.
    */
   static async splitTrackBySilence(
     track: AudioTrack,
     options: SilenceSplitOptions = {}
   ): Promise<AudioTrack> {
     const {
-      thresholdDb = -42,
-      minSilenceDurationMs = 350,
-      minSegmentDurationMs = 180,
-      padSilenceMs = 40
+      thresholdDb = -35.0,
+      offsetThresholdDb = -45.0,
+      minSilenceDurationMs = 300,
+      minSegmentDurationMs = 200,
+      paddingPreMs = 80,
+      paddingPostMs = 150,
+      padSilenceMs = 80,
+      exportClips = false
     } = options;
 
     if (!track.segments || track.segments.length === 0) {
@@ -177,65 +265,153 @@ export class TimingAlignmentService {
 
     for (const seg of track.segments) {
       const dur = seg.duration || 1;
-      const peaks = seg.waveform && seg.waveform.length > 0 
-        ? seg.waveform 
-        : this.generateSimulatedPeaks(Math.max(100, Math.round(dur * 25)));
+      let handledViaRust = false;
 
-      const speechRegions = this.detectSpeechRegionsFromPeaks(
-        peaks,
-        dur,
-        thresholdDb,
-        minSilenceDurationMs,
-        minSegmentDurationMs,
-        padSilenceMs
-      );
+      // 1. Проверяем возможность вызова быстрого нативного Rust VAD модуля в Tauri
+      if (isTauriAvailable() && seg.filePath && !seg.filePath.startsWith('blob:') && !seg.filePath.startsWith('data:')) {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core');
+          const report = await invoke<SilenceSplitReport>('split_by_silence', {
+            inputPath: seg.filePath,
+            config: {
+              onsetThresholdDb: thresholdDb,
+              offsetThresholdDb: offsetThresholdDb,
+              minSilenceDurationMs: minSilenceDurationMs,
+              minSpeechDurationMs: minSegmentDurationMs,
+              paddingPreMs: paddingPreMs || padSilenceMs || 80,
+              paddingPostMs: paddingPostMs || padSilenceMs || 150,
+              exportClips: exportClips
+            }
+          });
 
-      // Если в сегменте обнаружено несколько фраз или явные паузы, разбиваем на отдельные сегменты
-      if (speechRegions.length > 1) {
-        for (let idx = 0; idx < speechRegions.length; idx++) {
-          const region = speechRegions[idx];
-          const newId = `${seg.id}_phr${idx + 1}_${Date.now().toString(36)}`;
-          
-          // Вычисляем срез огибающей для нового сегмента
+          if (report && Array.isArray(report.segments)) {
+            console.groupCollapsed(`✂️ [Rust VAD] Разрез по тишине: ${seg.id}`);
+            console.log(`Файл: ${report.inputPath}`);
+            console.log(`Обнаружено реплик: ${report.segmentsCount}, Доля речи: ${(report.speechRatio * 100).toFixed(1)}%`);
+            console.log(`Шумовой порог (Floor): ${report.noiseFloorDb.toFixed(1)} dB (Onset: ${report.onsetThresholdDb} dB, Offset: ${report.offsetThresholdDb} dB)`);
+            console.table(report.segments);
+            console.groupEnd();
+
+            if (report.segments.length > 1) {
+              const segPeaks = seg.waveform || [];
+              for (let idx = 0; idx < report.segments.length; idx++) {
+                const cue = report.segments[idx];
+                const newId = `${seg.id}_phr${idx + 1}_${Date.now().toString(36)}`;
+
+                let slicedWaveform: number[] = [];
+                if (segPeaks.length > 0 && dur > 0) {
+                  const pStart = Math.floor((cue.startSec / dur) * segPeaks.length);
+                  const pEnd = Math.min(segPeaks.length, Math.ceil((cue.endSec / dur) * segPeaks.length));
+                  slicedWaveform = segPeaks.slice(pStart, Math.max(pStart + 10, pEnd));
+                }
+
+                newSegments.push({
+                  ...seg,
+                  id: newId,
+                  startTime: parseFloat((seg.startTime + cue.startSec).toFixed(3)),
+                  duration: parseFloat((cue.durationMs / 1000.0).toFixed(3)),
+                  fileOffset: parseFloat(((seg.fileOffset || 0) + cue.startSec).toFixed(3)),
+                  fileDuration: seg.fileDuration || seg.duration,
+                  filePath: cue.filePath || seg.filePath,
+                  waveform: slicedWaveform.length > 0 ? slicedWaveform : undefined,
+                  fadeIn: 0.02,
+                  fadeOut: 0.03,
+                  timingWarning: undefined,
+                  timingWarningDetail: undefined
+                });
+              }
+              handledViaRust = true;
+            } else if (report.segments.length === 1) {
+              const cue = report.segments[0];
+              const segPeaks = seg.waveform || [];
+              let slicedWaveform: number[] = [];
+              if (segPeaks.length > 0 && dur > 0) {
+                const pStart = Math.floor((cue.startSec / dur) * segPeaks.length);
+                const pEnd = Math.min(segPeaks.length, Math.ceil((cue.endSec / dur) * segPeaks.length));
+                slicedWaveform = segPeaks.slice(pStart, Math.max(pStart + 10, pEnd));
+              }
+
+              newSegments.push({
+                ...seg,
+                startTime: parseFloat((seg.startTime + cue.startSec).toFixed(3)),
+                duration: parseFloat((cue.durationMs / 1000.0).toFixed(3)),
+                fileOffset: parseFloat(((seg.fileOffset || 0) + cue.startSec).toFixed(3)),
+                filePath: cue.filePath || seg.filePath,
+                waveform: slicedWaveform.length > 0 ? slicedWaveform : seg.waveform,
+                fadeIn: 0.02,
+                fadeOut: 0.03,
+                timingWarning: undefined,
+                timingWarningDetail: undefined
+              });
+              handledViaRust = true;
+            }
+          }
+        } catch (tauriErr) {
+          console.warn('Rust split_by_silence failed or not ready, falling back to algorithmic VAD engine:', tauriErr);
+        }
+      }
+
+      // 2. Если нарезка через Rust не выполнилась (веб-режим или fallback), используем алгоритмический расчет
+      if (!handledViaRust) {
+        const peaks = seg.waveform && seg.waveform.length > 0 
+          ? seg.waveform 
+          : this.generateSimulatedPeaks(Math.max(100, Math.round(dur * 50)));
+
+        const speechRegions = this.detectSpeechRegionsFromPeaks(
+          peaks,
+          dur,
+          thresholdDb,
+          minSilenceDurationMs,
+          minSegmentDurationMs,
+          padSilenceMs,
+          offsetThresholdDb,
+          paddingPreMs,
+          paddingPostMs
+        );
+
+        if (speechRegions.length > 1) {
+          for (let idx = 0; idx < speechRegions.length; idx++) {
+            const region = speechRegions[idx];
+            const newId = `${seg.id}_phr${idx + 1}_${Date.now().toString(36)}`;
+            
+            const pStart = Math.floor((region.start / dur) * peaks.length);
+            const pEnd = Math.min(peaks.length, Math.ceil((region.end / dur) * peaks.length));
+            const slicedWaveform = peaks.slice(pStart, Math.max(pStart + 10, pEnd));
+
+            newSegments.push({
+              ...seg,
+              id: newId,
+              startTime: parseFloat((seg.startTime + region.start).toFixed(3)),
+              duration: parseFloat(region.duration.toFixed(3)),
+              fileOffset: parseFloat(((seg.fileOffset || 0) + region.start).toFixed(3)),
+              fileDuration: seg.fileDuration || seg.duration,
+              waveform: slicedWaveform,
+              fadeIn: 0.02,
+              fadeOut: 0.03,
+              timingWarning: undefined,
+              timingWarningDetail: undefined
+            });
+          }
+        } else if (speechRegions.length === 1 && (speechRegions[0].duration < dur - 0.1)) {
+          const region = speechRegions[0];
           const pStart = Math.floor((region.start / dur) * peaks.length);
           const pEnd = Math.min(peaks.length, Math.ceil((region.end / dur) * peaks.length));
           const slicedWaveform = peaks.slice(pStart, Math.max(pStart + 10, pEnd));
 
           newSegments.push({
             ...seg,
-            id: newId,
             startTime: parseFloat((seg.startTime + region.start).toFixed(3)),
             duration: parseFloat(region.duration.toFixed(3)),
             fileOffset: parseFloat(((seg.fileOffset || 0) + region.start).toFixed(3)),
-            fileDuration: seg.fileDuration || seg.duration,
             waveform: slicedWaveform,
             fadeIn: 0.02,
             fadeOut: 0.03,
             timingWarning: undefined,
             timingWarningDetail: undefined
           });
+        } else {
+          newSegments.push({ ...seg });
         }
-      } else if (speechRegions.length === 1 && (speechRegions[0].duration < dur - 0.2)) {
-        // Подрезаем тишину по краям одиночного сегмента
-        const region = speechRegions[0];
-        const pStart = Math.floor((region.start / dur) * peaks.length);
-        const pEnd = Math.min(peaks.length, Math.ceil((region.end / dur) * peaks.length));
-        const slicedWaveform = peaks.slice(pStart, Math.max(pStart + 10, pEnd));
-
-        newSegments.push({
-          ...seg,
-          startTime: parseFloat((seg.startTime + region.start).toFixed(3)),
-          duration: parseFloat(region.duration.toFixed(3)),
-          fileOffset: parseFloat(((seg.fileOffset || 0) + region.start).toFixed(3)),
-          waveform: slicedWaveform,
-          fadeIn: 0.02,
-          fadeOut: 0.03,
-          timingWarning: undefined,
-          timingWarningDetail: undefined
-        });
-      } else {
-        // Сегмент уже компактен
-        newSegments.push({ ...seg });
       }
     }
 
@@ -249,13 +425,14 @@ export class TimingAlignmentService {
   }
 
   /**
-   * Распознавание фразы через Whisper / Web STT / сопоставление со сценарием
+   * Нативное распознавание фразы через Whisper (Rust/whisper-rs) с авто-сопоставлением со сценарием
    */
   static async transcribePhraseWithWhisper(
     seg: AudioSegment,
     subtitles: SubtitleLine[] = [],
-    roleHint?: string
-  ): Promise<{ text: string; confidence: number; matchedSub?: SubtitleLine }> {
+    roleHint?: string,
+    whisperConfig?: { model?: string; language?: string; autoMatchSubtitles?: boolean }
+  ): Promise<{ text: string; confidence: number; matchedSub?: SubtitleLine; similarity?: number }> {
     // 1. Если текст уже был установлен вручную или распознан ранее
     if (seg.whisperText) {
       const matched = subtitles.find(s => s.id === seg.matchedSubId) || 
@@ -263,7 +440,49 @@ export class TimingAlignmentService {
       return { text: seg.whisperText, confidence: seg.whisperConfidence || 0.95, matchedSub: matched };
     }
 
-    // 2. Ищем ближайшую строку субтитров по таймкоду и роли (золотой референс для дабера)
+    // 2. Вызов нативного Rust Whisper-движка в Tauri окружении
+    if (isTauriAvailable() && seg.filePath && !seg.filePath.startsWith('blob:') && !seg.filePath.startsWith('data:')) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+
+        const scriptLines = subtitles.map(s => ({
+          id: s.id,
+          text: s.text,
+          startTimestampMs: Math.round(s.start * 1000),
+          endTimestampMs: Math.round(s.end * 1000),
+          role: s.role
+        }));
+
+        const result = await invoke<WhisperTranscriptionResult>('transcribe_and_match_script', {
+          audioPath: seg.filePath,
+          config: {
+            modelType: whisperConfig?.model || 'whisper-base',
+            language: whisperConfig?.language || 'ru',
+            autoMatchScript: whisperConfig?.autoMatchSubtitles !== false,
+            scriptLines: scriptLines.length > 0 ? scriptLines : undefined,
+            minSimilarityThreshold: 0.35
+          }
+        });
+
+        if (result && result.items && result.items.length > 0) {
+          const firstItem = result.items[0];
+          const matchedSub = firstItem.matchedScriptId 
+            ? subtitles.find(s => s.id === firstItem.matchedScriptId)
+            : this.findClosestSubtitle(seg.startTime, seg.duration, subtitles, roleHint);
+
+          return {
+            text: result.fullText || firstItem.text,
+            confidence: firstItem.confidence || result.averageConfidence || 0.92,
+            matchedSub,
+            similarity: firstItem.matchSimilarity
+          };
+        }
+      } catch (err) {
+        console.warn('Rust Whisper transcription fallback to Web matching:', err);
+      }
+    }
+
+    // 3. Алгоритмическое сопоставление со сценарием (Fuzzy Levenshtein) в Web-режиме
     const closestSub = this.findClosestSubtitle(seg.startTime, seg.duration, subtitles, roleHint);
 
     let recognizedText = seg.text || '';

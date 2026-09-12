@@ -18,6 +18,11 @@ mod uvr_denoise;
 mod uvr_dereverb;
 mod volume_leveler;
 mod source_separation;
+mod silence_split;
+mod whisper_engine;
+mod smart_align;
+mod project_type_rules;
+mod conflict_detection;
 
 use audio_engine::{get_audio_devices, start_recording, stop_recording, force_stop_all, check_crashes, AudioState, AudioRecorder};
 use logger::log_debug;
@@ -36,6 +41,11 @@ use uvr_denoise::process_denoise;
 use uvr_dereverb::process_uvr_dereverb;
 use volume_leveler::level_speech_volume;
 use source_separation::{separate_audio_stems, cancel_source_separation};
+use silence_split::split_by_silence;
+use whisper_engine::transcribe_and_match_script;
+use smart_align::align_vocal_clip;
+use project_type_rules::validate_and_adjust_project_rules;
+use conflict_detection::validate_timeline_compliance;
 use audio_separator::{check_audio_separator_status, install_audio_separator_pkg, run_audio_separator_cmd};
 use export_engine::{export_audio, export_stems, export_all_stems, quick_preview_export, batch_export, export_audio_book, export_backstage_video};
 use db::{AppState, init_db, save_project_to_db, load_project_from_db, migrate_json_to_db, save_subtitles, generate_stress_test, load_segments_in_range, check_project_assets, verify_project_files, cleanup_orphaned_files, relink_segment_file, calculate_file_hash, find_file_by_hash};
@@ -323,7 +333,12 @@ fn main() {
             level_speech_volume,
             ensure_track_audio_wav,
             separate_audio_stems,
-            cancel_source_separation
+            cancel_source_separation,
+            split_by_silence,
+            transcribe_and_match_script,
+            align_vocal_clip,
+            validate_and_adjust_project_rules,
+            validate_timeline_compliance
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

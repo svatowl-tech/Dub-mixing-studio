@@ -1152,7 +1152,7 @@ export class PipelineExecutionService {
             [stepId]: {
               ...prev[stepId],
               progress: 30,
-              log: `Поиск пауз тишины (< ${cfg.thresholdDb} dB, мин. ${cfg.minSilenceDurationMs} мс)...`
+              log: `Быстрый VAD анализ и нарезка пауз (Onset: ${cfg.thresholdDb} dB, Offset: ${cfg.offsetThresholdDb ?? -45} dB, мин. пауза: ${cfg.minSilenceDurationMs} мс, отступы: +${cfg.paddingPreMs ?? 80}/+${cfg.paddingPostMs ?? 150} мс)...`
             }
           }));
 
@@ -1166,9 +1166,13 @@ export class PipelineExecutionService {
               processedTracksCount++;
               const resTrack = await TimingAlignmentService.splitTrackBySilence(track, {
                 thresholdDb: cfg.thresholdDb,
+                offsetThresholdDb: cfg.offsetThresholdDb,
                 minSilenceDurationMs: cfg.minSilenceDurationMs,
                 minSegmentDurationMs: cfg.minSegmentDurationMs,
-                padSilenceMs: cfg.padSilenceMs
+                paddingPreMs: cfg.paddingPreMs,
+                paddingPostMs: cfg.paddingPostMs,
+                padSilenceMs: cfg.padSilenceMs,
+                exportClips: cfg.exportClips
               });
               totalSegments += resTrack.segments.length;
               splitTracks.push(resTrack);
@@ -1180,7 +1184,7 @@ export class PipelineExecutionService {
           onUpdateProject({ tracks: splitTracks });
           await playbackEngine.updateTracks(splitTracks);
 
-          const logMsg = `Нарезка завершена: обработано дорожек: ${processedTracksCount}, сформировано ${totalSegments} фраз по тишине (порог ${cfg.thresholdDb} dB, пауза ${cfg.minSilenceDurationMs} мс).`;
+          const logMsg = `Нарезка VAD завершена: обработано дорожек: ${processedTracksCount}, сформировано ${totalSegments} реплик (Onset: ${cfg.thresholdDb} dB, Offset: ${cfg.offsetThresholdDb ?? -45} dB, пауза ${cfg.minSilenceDurationMs} мс).`;
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
@@ -1193,6 +1197,84 @@ export class PipelineExecutionService {
             stepId: 'silenceSplit',
             status: 'success',
             title: 'Разрезка по тишине',
+            message: logMsg
+          }]);
+
+          showToast(logMsg);
+          return;
+        }
+
+        if (stepId === 'whisper') {
+          const origTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
+          setStepExecution(prev => ({
+            ...prev,
+            [stepId]: {
+              ...prev[stepId],
+              progress: 20,
+              log: 'Распознавание речи через локальный Whisper (GGML) и сопоставление со сценарием...'
+            }
+          }));
+
+          const updatedTracks: AudioTrack[] = [];
+          let totalTranscribed = 0;
+          let matchedScriptCount = 0;
+
+          for (const track of project.tracks) {
+            const isOrig = (track.type === 'original' || (origTrack && track.id === origTrack.id)) && !TimingAlignmentService.isDubTrack(track);
+            if (isOrig || !track.segments || track.segments.length === 0) {
+              updatedTracks.push(track);
+              continue;
+            }
+
+            const newSegs: AudioSegment[] = [];
+            for (const seg of track.segments) {
+              const res = await TimingAlignmentService.transcribePhraseWithWhisper(
+                seg,
+                project.subtitles || [],
+                (track as any).role || track.name,
+                {
+                  model: activePreset.phase2.whisper?.model || 'whisper-base',
+                  language: activePreset.phase2.whisper?.language || 'ru',
+                  autoMatchSubtitles: activePreset.phase2.whisper?.autoMatchSubtitles !== false
+                }
+              );
+
+              if (res.matchedSub) {
+                matchedScriptCount++;
+              }
+              totalTranscribed++;
+
+              newSegs.push({
+                ...seg,
+                whisperText: res.text,
+                whisperConfidence: res.confidence,
+                matchedSubId: res.matchedSub?.id,
+                text: seg.text || res.text
+              });
+            }
+
+            updatedTracks.push({
+              ...track,
+              segments: newSegs
+            });
+          }
+
+          onUpdateProject({ tracks: updatedTracks });
+          await playbackEngine.updateTracks(updatedTracks);
+
+          const logMsg = `Whisper распознавание завершено: обработано ${totalTranscribed} фраз, сопоставлено со сценарием: ${matchedScriptCount}.`;
+          setStepExecution(prev => ({
+            ...prev,
+            [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
+          }));
+
+          addAuditLogs([{
+            id: `audit-whisper-${Date.now()}`,
+            timestamp: Date.now(),
+            stageName: '2. Тайминг',
+            stepId: 'whisper',
+            status: 'success',
+            title: 'Whisper Распознавание речи',
             message: logMsg
           }]);
 

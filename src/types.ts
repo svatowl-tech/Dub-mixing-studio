@@ -511,13 +511,17 @@ export interface TimingAlignmentConfig {
   alignToOriginalStart: boolean; // Старт дабера и оригинала синхронизированы в одну точку
   voiceoverLeadMs: number; // Смещение начала для закадра (мс, по умолчанию 0)
 
-  // Разделение записанной единой дороги на отдельные фразы по тишине
+  // Разделение записанной единой дороги на отдельные фразы по тишине (VAD & Silence Split)
   silenceSplit: {
     enabled: boolean;
-    thresholdDb: number; // порог в dB, например, -45
-    minSilenceDurationMs: number; // минимальная длина тишины для сплита, мс
-    minSegmentDurationMs: number; // минимальная длина фрагмента
-    padSilenceMs: number; // отступ до и после фразы во избежание срезки согласных (мс)
+    thresholdDb: number; // порог включения речи (Onset) в dB, например, -35 dB
+    offsetThresholdDb?: number; // порог выключения речи с гистерезисом (Offset) в dB, например, -45 dB
+    minSilenceDurationMs: number; // минимальная длина тишины для сплита, мс (300 мс)
+    minSegmentDurationMs: number; // минимальная длина фрагмента (200 мс)
+    paddingPreMs?: number; // защитный отступ перед началом фразы (80 мс)
+    paddingPostMs?: number; // защитный отступ после окончания фразы (150 мс)
+    padSilenceMs?: number; // отступ до и после фразы (legacy)
+    exportClips?: boolean; // экспорт нарезанных клипов в отдельные WAV файлы
     bypass: boolean;
   };
   
@@ -563,6 +567,203 @@ export interface TimingAlignmentConfig {
     toleranceMs: number; // допустимое расхождение временных меток субтитров и аудио
     bypass: boolean;
   };
+}
+
+/** Нарезанный речевой сегмент из Rust VAD модуля */
+export interface AudioCueSegment {
+  id: string;
+  startMs: number;
+  endMs: number;
+  sampleStart: number;
+  sampleEnd: number;
+  startSec: number;
+  endSec: number;
+  durationMs: number;
+  filePath?: string;
+  averageDb: number;
+  peakDb: number;
+}
+
+/** Итоговый отчет о работе Rust VAD нарезки по тишине */
+export interface SilenceSplitReport {
+  inputPath: string;
+  sampleRate: number;
+  channels: number;
+  totalDurationSec: number;
+  totalSamples: number;
+  segmentsCount: number;
+  segments: AudioCueSegment[];
+  totalSpeechDurationMs: number;
+  speechRatio: number;
+  noiseFloorDb: number;
+  onsetThresholdDb: number;
+  offsetThresholdDb: number;
+}
+
+/** Элемент транскрипции Whisper */
+export interface TranscriptItem {
+  text: string;
+  startTimestampMs: number;
+  endTimestampMs: number;
+  confidence: number;
+  matchedScriptId?: string;
+  matchedScriptText?: string;
+  matchSimilarity?: number;
+}
+
+/** Конфигурация запуска Whisper транскрибации */
+export interface WhisperTranscribeConfig {
+  modelPath?: string;
+  modelType?: string;
+  language?: string;
+  nThreads?: number;
+  translate?: boolean;
+  temperature?: number;
+  scriptLines?: Array<{
+    id: string;
+    text: string;
+    startTimestampMs?: number;
+    endTimestampMs?: number;
+    role?: string;
+  }>;
+  autoMatchScript?: boolean;
+  minSimilarityThreshold?: number;
+}
+
+/** Результат работы нативного Whisper распознавания речи */
+export interface WhisperTranscriptionResult {
+  audioPath: string;
+  durationMs: number;
+  items: TranscriptItem[];
+  fullText: string;
+  modelUsed: string;
+  averageConfidence: number;
+}
+
+/** Результат нативного тайм-алигнмента Smart Align (GCC-PHAT + WSOLA Time-Stretch) */
+export interface SmartAlignResult {
+  originalPath: string;
+  dubbedPath: string;
+  outputPath: string;
+  originalDurationMs: number;
+  dubbedDurationMs: number;
+  outputDurationMs: number;
+  detectedOffsetMs: number;
+  stretchRatio: number;
+  correlationScore: number;
+  sampleRate: number;
+  wasStretched: boolean;
+}
+
+/** Конфигурация параметров нативного Smart Align */
+export interface SmartAlignNativeConfig {
+  minStretchRatio?: number;
+  maxStretchRatio?: number;
+  stretchThresholdPercent?: number;
+  alignOffset?: boolean;
+  maxSearchOffsetMs?: number;
+}
+
+/** Входной сегмент реплики для валидации правил проекта */
+export interface CueSegment {
+  id: string;
+  startMs: number;
+  endMs: number;
+  text?: string;
+  trackId?: string;
+  subtitleStartMs?: number;
+  subtitleEndMs?: number;
+  matchedOriginalId?: string;
+}
+
+/** Тип проекта для валидации правил (Rust ProjectType) */
+export type ProjectTypeRuleKind = 'voice_over' | 'recast' | 'dubbing';
+
+/** Уровень предупреждения */
+export type WarningLevel = 'info' | 'warning' | 'critical';
+
+/** Инструкция по корректировке тайминга (Rust AdjustmentInstruction) */
+export interface AdjustmentInstruction {
+  segmentId: string;
+  currentStartMs: number;
+  currentEndMs: number;
+  currentDurationMs: number;
+  recommendedStartMs: number;
+  recommendedEndMs: number;
+  recommendedDurationMs: number;
+  offsetShiftMs: number;
+  stretchRatio: number;
+  isValid: boolean;
+  warningLevel: WarningLevel;
+  ruleApplied: string;
+  message: string;
+}
+
+/** Типы коллизий на таймлайне */
+export type ConflictType = 'clashing' | 'script_gap' | 'timing_drift' | 'track_overlap';
+export type ConflictSeverity = 'info' | 'warning' | 'critical';
+
+export interface SuggestedFix {
+  fixType: string;
+  targetSegmentId?: string;
+  targetSubtitleId?: string;
+  recommendedShiftMs: number;
+  recommendedStretchRatio: number;
+  autoApplied: boolean;
+  explanation: string;
+}
+
+export interface ConflictReport {
+  id: string;
+  conflictType: ConflictType;
+  severity: ConflictSeverity;
+  timeStartMs: number;
+  timeEndMs: number;
+  affectedTrackIds: string[];
+  affectedSegmentIds: string[];
+  affectedSubtitleId?: string;
+  characterName?: string;
+  message: string;
+  suggestedFix: SuggestedFix;
+}
+
+export interface TimelineAudioClipInput {
+  id: string;
+  trackId: string;
+  characterId?: string;
+  characterName?: string;
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+  subtitleId?: string;
+  isDialogOverlapAllowed: boolean;
+  isMuted: boolean;
+}
+
+export interface TimelineSubtitleInput {
+  id: string;
+  startMs: number;
+  endMs: number;
+  characterName?: string;
+  text: string;
+}
+
+export interface TimelineValidationOptions {
+  minGapMs?: number;
+  timingDriftThresholdMs?: number;
+  autoResolveMinorClashes?: boolean;
+}
+
+export interface TimelineValidationSummary {
+  executionTimeUs: number;
+  totalCuesAnalyzed: number;
+  totalSubtitlesAnalyzed: number;
+  totalConflicts: number;
+  criticalCount: number;
+  warningCount: number;
+  infoCount: number;
+  conflicts: ConflictReport[];
+  autoResolvedCount: number;
 }
 
 // Этап 3: Сведение и Авто-эффекты (Mixing & Effects)

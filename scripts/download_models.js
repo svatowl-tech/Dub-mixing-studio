@@ -22,17 +22,61 @@ const REQUIRED_MODELS = [
             'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx',
             'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Voc_FT.onnx'
         ],
-        description: 'Vocal / Instrument Stem Separation ONNX Model'
+        description: 'Vocal / Instrument Stem Separation ONNX Model (MDX-Net Voc_FT)'
     },
     {
         name: 'Reverb_HQ_By_FoxJoy.onnx',
-        aliases: ['VR-DeReverb-FoxJoy.onnx', 'UVR-DeReverb.onnx', 'Reverb_HQ_By_FoxJoy.onnx'],
+        aliases: ['VR-DeReverb-FoxJoy.onnx', 'UVR-DeReverb.onnx', 'Reverb_HQ_By_FoxJoy.onnx', 'VR-DeReverb.onnx'],
         urls: [
             'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Reverb_HQ_By_FoxJoy.onnx',
             'https://huggingface.co/Derur/UVR-models/resolve/main/Reverb_HQ_By_FoxJoy.onnx',
             'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx'
         ],
         description: 'Neural Room Acoustics & Reverb Removal Model (FoxJoy HQ)'
+    },
+    {
+        name: 'VR-DeEcho-Normal.onnx',
+        aliases: ['UVR-DeEcho-Normal.onnx', 'UVR-De-Echo-Normal.onnx', 'VR-DeEcho-Normal.onnx'],
+        urls: [
+            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/VR-DeEcho-Normal.onnx',
+            'https://huggingface.co/Derur/UVR-models/resolve/main/VR-DeEcho-Normal.onnx'
+        ],
+        description: 'VR Architecture De-Echo Normal Model'
+    },
+    {
+        name: 'VR-DeEcho-Aggressive.onnx',
+        aliases: ['UVR-DeEcho-Aggressive.onnx', 'UVR-De-Echo-Aggressive.onnx', 'VR-DeEcho-Aggressive.onnx'],
+        urls: [
+            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/VR-DeEcho-Aggressive.onnx',
+            'https://huggingface.co/Derur/UVR-models/resolve/main/VR-DeEcho-Aggressive.onnx'
+        ],
+        description: 'VR Architecture De-Echo Aggressive Model'
+    },
+    {
+        name: 'ggml-base.bin',
+        aliases: ['ggml-base.bin', 'whisper-base.bin'],
+        urls: [
+            'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin',
+            'https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/ggml-base.bin'
+        ],
+        description: 'Whisper Base GGML Model for Offline Speech Recognition & Subtitle Alignment'
+    },
+    {
+        name: 'ggml-tiny.bin',
+        aliases: ['ggml-tiny.bin', 'whisper-tiny.bin'],
+        urls: [
+            'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin'
+        ],
+        description: 'Whisper Tiny GGML Fast Model'
+    },
+    {
+        name: 'silero_vad.onnx',
+        aliases: ['silero_vad.onnx', 'vad.onnx'],
+        urls: [
+            'https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx',
+            'https://huggingface.co/snakers4/silero-vad/resolve/main/silero_vad.onnx'
+        ],
+        description: 'Silero VAD Neural Voice Activity Detection Model'
     }
 ];
 
