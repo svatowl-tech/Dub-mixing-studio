@@ -101,6 +101,7 @@ pub fn find_dereverb_model_path(app_handle: &AppHandle, model_name: &str) -> Opt
 
     // Стандартные имена моделей де-реверберации экосистемы UVR / MDX
     let fallback_names = [
+        "Reverb_HQ_By_FoxJoy.onnx",
         "UVR-De-Echo.onnx",
         "MDX23C-DeReverb.onnx",
         "UVR-De-Echo-Normal.onnx",

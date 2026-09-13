@@ -8,9 +8,7 @@ const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
 
 const MODELS_TARGET_DIRS = [
-    path.join(ROOT_DIR, 'src-tauri', 'models'),
-    path.join(ROOT_DIR, 'src-tauri', 'resources', 'models'),
-    path.join(ROOT_DIR, 'src-tauri', 'ai_env', 'models')
+    path.join(ROOT_DIR, 'src-tauri', 'models')
 ];
 
 // Definition of essential neural models to package into the final installer
@@ -168,20 +166,9 @@ async function main() {
             console.log(`[Model Downloader] Model ${model.name} already exists in ${primaryDir}.`);
         }
 
-        // If file exists in primaryDir, mirror it to the other model search locations and create aliases
+        // Model is saved cleanly under its canonical name in src-tauri/models
         if (fs.existsSync(primaryDest) && fs.statSync(primaryDest).size > 10000) {
-            for (const targetDir of MODELS_TARGET_DIRS) {
-                for (const alias of model.aliases) {
-                    const aliasPath = path.join(targetDir, alias);
-                    if (!fs.existsSync(aliasPath) || fs.statSync(aliasPath).size < 1000) {
-                        try {
-                            fs.copyFileSync(primaryDest, aliasPath);
-                        } catch (copyErr) {
-                            console.warn(`[Model Downloader] Could not mirror to ${aliasPath}:`, copyErr.message);
-                        }
-                    }
-                }
-            }
+            console.log(`[Model Downloader] Verified canonical model asset: ${model.name}`);
         }
     }
 
