@@ -479,10 +479,12 @@ pub async fn run_dereverb_pipeline(
                     let exported_reverb_path_str = reverb_tail_export_path.as_ref().map(|p| p.to_string_lossy().to_string());
 
                     return Ok(DereverbResult {
-                        model_used: format!("Python UVR ({})", py_model),
+                        model_name: format!("Python UVR ({})", py_model),
                         provider_used: if sep_status.cuda_available { "CUDA GPU (Python)" } else { "CPU / ONNX (Python)" }.to_string(),
-                        processed_samples: 0,
+                        sample_rate: 44100,
+                        channels: 2,
                         duration_sec: 0.0,
+                        reverb_reduction_db: 25.0,
                         dry_vocal_path: output_path.to_string_lossy().to_string(),
                         reverb_tail_path: exported_reverb_path_str,
                         is_neural: true,
