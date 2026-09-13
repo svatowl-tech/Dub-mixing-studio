@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState } from 'react';
 
-export type ModalType = 'health' | 'settings' | 'export' | 'quickImport' | 'import' | 'batchImport' | null;
+export type ModalType = 'health' | 'settings' | 'export' | 'quickImport' | 'import' | 'batchImport' | 'singleTrackStudio' | null;
 
 interface UIContextType {
   activeModal: ModalType;

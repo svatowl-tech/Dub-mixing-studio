@@ -430,7 +430,72 @@ pub async fn run_dereverb_pipeline(
     println!("[UVR-DeReverb] Выходной файл: {}", output_path.display());
     println!("[UVR-DeReverb] Модель: '{}', Сила: {:.1}% (фактор: {:.2})", chosen_model, dry_wet_blend * 100.0, dry_wet_blend);
 
-    // 1. Поиск модели UVR De-Echo
+    // 1. Попытка вызова через Python sidecar (audio-separator)
+    if let Ok(sep_status) = crate::audio_separator::check_audio_separator_status(app_handle.clone()).await {
+        if sep_status.python_found && sep_status.separator_installed {
+            let py_model = match chosen_model.as_str() {
+                "reverb_foxjoy" | "foxjoy" | "room_cleaner_neural" | "rt_dereverb_v2" | "adaptive_gate" => "Reverb_HQ_By_FoxJoy.onnx",
+                "uvr_deecho_normal" | "deecho" => "UVR-De-Echo.onnx",
+                "uvr_deecho_aggressive" | "mdx23c" => "MDX23C-DeReverb.onnx",
+                m if m.ends_with(".onnx") => m,
+                _ => "Reverb_HQ_By_FoxJoy.onnx",
+            };
+
+            let out_dir = output_path.parent().unwrap_or_else(|| Path::new("."));
+            let out_dir_str = out_dir.to_string_lossy().to_string();
+            let in_str = input_path.to_string_lossy().to_string();
+
+            println!("[UVR-DeReverb] Запуск через Python Sidecar audio-separator (Модель: {})", py_model);
+            
+            app_handle.emit("dereverb-progress", DereverbProgressPayload {
+                percent: 15.0,
+                current_frame: 0,
+                total_frames: 100,
+                stage: format!("Запуск Python ИИ модели подавления эха ({})", py_model),
+            }).ok();
+
+            match crate::audio_separator::run_audio_separator_cmd(
+                app_handle.clone(),
+                in_str,
+                py_model.to_string(),
+                out_dir_str,
+                sep_status.cuda_available,
+                false,
+            ).await {
+                Ok(generated_file) => {
+                    let gen_path = PathBuf::from(&generated_file);
+                    if gen_path.exists() && gen_path != output_path {
+                        let _ = std::fs::copy(&gen_path, &output_path);
+                    }
+                    println!("[UVR-DeReverb] Успешная обработка через Python sidecar: {}", output_path.display());
+
+                    app_handle.emit("dereverb-progress", DereverbProgressPayload {
+                        percent: 100.0,
+                        current_frame: 100,
+                        total_frames: 100,
+                        stage: "Подавление эха завершено!".to_string(),
+                    }).ok();
+
+                    let exported_reverb_path_str = reverb_tail_export_path.as_ref().map(|p| p.to_string_lossy().to_string());
+
+                    return Ok(DereverbResult {
+                        model_used: format!("Python UVR ({})", py_model),
+                        provider_used: if sep_status.cuda_available { "CUDA GPU (Python)" } else { "CPU / ONNX (Python)" }.to_string(),
+                        processed_samples: 0,
+                        duration_sec: 0.0,
+                        dry_vocal_path: output_path.to_string_lossy().to_string(),
+                        reverb_tail_path: exported_reverb_path_str,
+                        is_neural: true,
+                    });
+                }
+                Err(e) => {
+                    println!("[UVR-DeReverb] Предупреждение: Ошибка Python sidecar ({}), переключение на локальный Rust ONNX/DSP движок...", e);
+                }
+            }
+        }
+    }
+
+    // 2. Поиск модели UVR De-Echo для локального Rust инференса
     let model_path = find_dereverb_model_path(&app_handle, &chosen_model);
     if let Some(ref p) = model_path {
         println!("[UVR-DeReverb] Найдена нейросетевая ONNX модель: {}", p.display());

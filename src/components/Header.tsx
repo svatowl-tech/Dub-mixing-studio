@@ -14,7 +14,8 @@ import {
   Download,
   Play,
   Keyboard,
-  Cpu
+  Cpu,
+  Wrench
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn, formatHotkey, getDefaultKeyMap } from '../lib/utils';
@@ -170,6 +171,16 @@ const Header: React.FC<HeaderProps> = ({
 
         <div className="flex items-center gap-3 shrink-0 ml-auto">
           <HistoryControls />
+          
+          <button 
+            onClick={() => setActiveModal('singleTrackStudio')}
+            className="px-3.5 py-1.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold flex items-center gap-2 transition-all shadow-md shadow-indigo-600/20 cursor-pointer"
+            title="Отдельные инструменты (Лаборатория точечной обработки и спектрального анализа)"
+          >
+            <Wrench className="w-4 h-4 text-purple-200" />
+            <span>Отдельные инструменты</span>
+          </button>
+
           <button 
               onClick={() => setShowImportModal(true)}
               className="px-4 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-xs font-bold flex items-center gap-2 transition-all border border-white/5 cursor-pointer"
