@@ -372,6 +372,21 @@ pub async fn run_audio_separator_cmd(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
+    let model_to_use = match model_filename.trim() {
+        "uvr_v5_vocal" | "uvr_v5" | "uvr" | "UVR-MDX-NET-Voc_FT" => "UVR-MDX-NET-Voc_FT.onnx".to_string(),
+        "htdemucs_vocals_bgm" | "htdemucs" => "htdemucs_ft.yaml".to_string(),
+        "mdx_net_karaoke" | "5_HP-Karaoke-UVR" => "5_HP-Karaoke-UVR.onnx".to_string(),
+        "MDX23C" => "MDX23C-8KFFT-InstVoc_HQ.ckpt".to_string(),
+        "uvr_denoise_foxjoy" | "foxjoy" | "deep_noise" | "intel_ai_denoise" => "VR-DeNoise-FoxJoy.onnx".to_string(),
+        "uvr_denoise_full" | "full" => "UVR-DeNoise-Full.onnx".to_string(),
+        "uvr_denoise_lite" | "lite" => "UVR-DeNoise-Lite.onnx".to_string(),
+        "reverb_foxjoy" | "room_cleaner_neural" | "rt_dereverb_v2" => "Reverb_HQ_By_FoxJoy.onnx".to_string(),
+        "uvr_deecho_normal" | "deecho" => "UVR-De-Echo.onnx".to_string(),
+        "uvr_deecho_aggressive" | "mdx23c" => "MDX23C-DeReverb.onnx".to_string(),
+        "" => "UVR-MDX-NET-Voc_FT.onnx".to_string(),
+        other => other.to_string(),
+    };
+
     // Python runner script: использует API audio_separator.separator.Separator напрямую
     // Это исключает любые ошибки аргументов CLI (--cpu, --use_gpu, --denoise true)
     let py_runner = r#"
@@ -383,6 +398,28 @@ output_dir = sys.argv[3]
 use_gpu = sys.argv[4].lower() == 'true'
 denoise = sys.argv[5].lower() == 'true'
 models_dir = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] != '' else None
+
+# Словарь сопоставления внутренних названий моделей с официальными именами audio-separator
+MODEL_ALIASES = {
+    'uvr_v5_vocal': 'UVR-MDX-NET-Voc_FT.onnx',
+    'uvr_v5': 'UVR-MDX-NET-Voc_FT.onnx',
+    'uvr': 'UVR-MDX-NET-Voc_FT.onnx',
+    'UVR-MDX-NET-Voc_FT': 'UVR-MDX-NET-Voc_FT.onnx',
+    'htdemucs_vocals_bgm': 'htdemucs_ft.yaml',
+    'htdemucs': 'htdemucs_ft.yaml',
+    'mdx_net_karaoke': '5_HP-Karaoke-UVR.onnx',
+    '5_HP-Karaoke-UVR': '5_HP-Karaoke-UVR.onnx',
+    'MDX23C': 'MDX23C-8KFFT-InstVoc_HQ.ckpt',
+    'Kim_Vocal_2': 'Kim_Vocal_2.onnx',
+    'uvr_denoise_foxjoy': 'VR-DeNoise-FoxJoy.onnx',
+    'foxjoy': 'VR-DeNoise-FoxJoy.onnx',
+    'uvr_denoise_full': 'UVR-DeNoise-Full.onnx',
+    'uvr_denoise_lite': 'UVR-DeNoise-Lite.onnx',
+    'reverb_foxjoy': 'Reverb_HQ_By_FoxJoy.onnx',
+    'uvr_deecho_normal': 'UVR-De-Echo.onnx',
+    'uvr_deecho_aggressive': 'MDX23C-DeReverb.onnx',
+}
+model_filename = MODEL_ALIASES.get(model_filename.strip(), model_filename.strip())
 
 if not use_gpu:
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
@@ -423,7 +460,7 @@ except Exception:
         "-c",
         py_runner,
         &norm_input,
-        &model_filename,
+        &model_to_use,
         &norm_output_dir,
         if use_gpu { "true" } else { "false" },
         if denoise { "true" } else { "false" },
@@ -523,11 +560,18 @@ except Exception:
     {
         let parsed_files = output_files_found.lock().await;
         if !parsed_files.is_empty() {
-            if let Some(vocal_file) = parsed_files.iter().find(|f| f.contains("Vocals") || f.contains("vocals") || f.contains("voice")) {
-                let full_path = if Path::new(vocal_file).is_absolute() {
-                    vocal_file.clone()
+            let is_desired_output = |name: &str| {
+                let lower = name.to_lowercase();
+                lower.contains("vocals") || lower.contains("voice") || lower.contains("no noise") || 
+                lower.contains("dry") || lower.contains("no reverb") || lower.contains("clean") ||
+                lower.contains("instrumental")
+            };
+
+            if let Some(desired_file) = parsed_files.iter().find(|f| is_desired_output(f)) {
+                let full_path = if Path::new(desired_file).is_absolute() {
+                    desired_file.clone()
                 } else {
-                    Path::new(&norm_output_dir).join(vocal_file).to_string_lossy().to_string()
+                    Path::new(&norm_output_dir).join(desired_file).to_string_lossy().to_string()
                 };
                 if Path::new(&full_path).exists() {
                     return Ok(full_path);
@@ -559,8 +603,13 @@ except Exception:
         meta_b.cmp(&meta_a)
     });
 
-    if let Some(vocal_file) = new_files.iter().find(|f| f.contains("Vocals") || f.contains("vocals") || f.contains("voice")) {
-        return Ok(vocal_file.clone());
+    if let Some(desired_file) = new_files.iter().find(|f| {
+        let lower = f.to_lowercase();
+        lower.contains("vocals") || lower.contains("voice") || lower.contains("no noise") || 
+        lower.contains("dry") || lower.contains("no reverb") || lower.contains("clean") ||
+        lower.contains("instrumental")
+    }) {
+        return Ok(desired_file.clone());
     }
 
     if let Some(new_file) = new_files.first() {

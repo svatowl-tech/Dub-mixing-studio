@@ -245,38 +245,47 @@ pub fn process_channel(
 
 /// Чтение сэмплов из WAV файла
 pub fn read_wav(path: &Path) -> Result<(Vec<Vec<f32>>, WavSpec), String> {
-    let mut reader = WavReader::open(path)
-        .map_err(|e| format!("Не удалось открыть WAV файл {}: {}", path.display(), e))?;
-    let spec = reader.spec();
+    let (wav_path, is_temp) = crate::file_io::ensure_valid_wav_path(path)?;
+    let res = (|| -> Result<(Vec<Vec<f32>>, WavSpec), String> {
+        let mut reader = WavReader::open(&wav_path)
+            .map_err(|e| format!("Не удалось открыть WAV файл {}: {}", wav_path.display(), e))?;
+        let spec = reader.spec();
 
-    let channels = spec.channels as usize;
-    let mut channel_buffers: Vec<Vec<f32>> = vec![Vec::new(); channels];
+        let channels = spec.channels as usize;
+        let mut channel_buffers: Vec<Vec<f32>> = vec![Vec::new(); channels];
 
-    match spec.sample_format {
-        SampleFormat::Float => {
-            let mut ch = 0;
-            for s in reader.samples::<f32>() {
-                channel_buffers[ch].push(s.unwrap_or(0.0));
-                ch = (ch + 1) % channels;
+        match spec.sample_format {
+            SampleFormat::Float => {
+                let mut ch = 0;
+                for s in reader.samples::<f32>() {
+                    channel_buffers[ch].push(s.unwrap_or(0.0));
+                    ch = (ch + 1) % channels;
+                }
+            }
+            SampleFormat::Int => {
+                let scale = match spec.bits_per_sample {
+                    16 => 32768.0_f32,
+                    24 => 8388608.0_f32,
+                    32 => 2147483648.0_f32,
+                    8  => 128.0_f32,
+                    b => return Err(format!("Неподдерживаемая разрядность сэмпла: {} бит", b)),
+                };
+                let mut ch = 0;
+                for s in reader.samples::<i32>() {
+                    channel_buffers[ch].push(s.unwrap_or(0) as f32 / scale);
+                    ch = (ch + 1) % channels;
+                }
             }
         }
-        SampleFormat::Int => {
-            let scale = match spec.bits_per_sample {
-                16 => 32768.0_f32,
-                24 => 8388608.0_f32,
-                32 => 2147483648.0_f32,
-                8  => 128.0_f32,
-                b => return Err(format!("Неподдерживаемая разрядность сэмпла: {} бит", b)),
-            };
-            let mut ch = 0;
-            for s in reader.samples::<i32>() {
-                channel_buffers[ch].push(s.unwrap_or(0) as f32 / scale);
-                ch = (ch + 1) % channels;
-            }
-        }
+
+        Ok((channel_buffers, spec))
+    })();
+
+    if is_temp {
+        let _ = std::fs::remove_file(&wav_path);
     }
 
-    Ok((channel_buffers, spec))
+    res
 }
 
 /// Запись аудиоданных в файл формата 32-bit Float WAV

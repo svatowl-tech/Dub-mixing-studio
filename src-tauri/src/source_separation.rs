@@ -188,7 +188,21 @@ pub async fn separate_audio_stems(
     std::fs::create_dir_all(&target_out_dir)
         .map_err(|e| format!("Не удалось создать выходную папку {}: {}", target_out_dir.display(), e))?;
 
-    let model_to_use = model_name.unwrap_or_else(|| "UVR-MDX-NET-Voc_FT".to_string());
+    let raw_model = model_name.unwrap_or_else(|| "UVR-MDX-NET-Voc_FT.onnx".to_string());
+    let model_to_use = match raw_model.trim() {
+        "uvr_v5_vocal" | "uvr_v5" | "uvr" | "UVR-MDX-NET-Voc_FT" => "UVR-MDX-NET-Voc_FT.onnx".to_string(),
+        "htdemucs_vocals_bgm" | "htdemucs" => "htdemucs_ft.yaml".to_string(),
+        "mdx_net_karaoke" | "5_HP-Karaoke-UVR" => "5_HP-Karaoke-UVR.onnx".to_string(),
+        "MDX23C" => "MDX23C-8KFFT-InstVoc_HQ.ckpt".to_string(),
+        "uvr_denoise_foxjoy" | "foxjoy" | "deep_noise" | "intel_ai_denoise" => "VR-DeNoise-FoxJoy.onnx".to_string(),
+        "uvr_denoise_full" | "full" => "UVR-DeNoise-Full.onnx".to_string(),
+        "uvr_denoise_lite" | "lite" => "UVR-DeNoise-Lite.onnx".to_string(),
+        "reverb_foxjoy" | "room_cleaner_neural" | "rt_dereverb_v2" => "Reverb_HQ_By_FoxJoy.onnx".to_string(),
+        "uvr_deecho_normal" | "deecho" => "UVR-De-Echo.onnx".to_string(),
+        "uvr_deecho_aggressive" | "mdx23c" => "MDX23C-DeReverb.onnx".to_string(),
+        "" => "UVR-MDX-NET-Voc_FT.onnx".to_string(),
+        other => other.to_string(),
+    };
     let gpu_enabled = use_gpu.unwrap_or(true);
 
     // 1. Поиск встроенного Python
@@ -223,6 +237,27 @@ model_name = sys.argv[2]
 output_dir = sys.argv[3]
 use_gpu = sys.argv[4].lower() == 'true'
 models_dir = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] != '' else None
+
+MODEL_ALIASES = {
+    'uvr_v5_vocal': 'UVR-MDX-NET-Voc_FT.onnx',
+    'uvr_v5': 'UVR-MDX-NET-Voc_FT.onnx',
+    'uvr': 'UVR-MDX-NET-Voc_FT.onnx',
+    'UVR-MDX-NET-Voc_FT': 'UVR-MDX-NET-Voc_FT.onnx',
+    'htdemucs_vocals_bgm': 'htdemucs_ft.yaml',
+    'htdemucs': 'htdemucs_ft.yaml',
+    'mdx_net_karaoke': '5_HP-Karaoke-UVR.onnx',
+    '5_HP-Karaoke-UVR': '5_HP-Karaoke-UVR.onnx',
+    'MDX23C': 'MDX23C-8KFFT-InstVoc_HQ.ckpt',
+    'Kim_Vocal_2': 'Kim_Vocal_2.onnx',
+    'uvr_denoise_foxjoy': 'VR-DeNoise-FoxJoy.onnx',
+    'foxjoy': 'VR-DeNoise-FoxJoy.onnx',
+    'uvr_denoise_full': 'UVR-DeNoise-Full.onnx',
+    'uvr_denoise_lite': 'UVR-DeNoise-Lite.onnx',
+    'reverb_foxjoy': 'Reverb_HQ_By_FoxJoy.onnx',
+    'uvr_deecho_normal': 'UVR-De-Echo.onnx',
+    'uvr_deecho_aggressive': 'MDX23C-DeReverb.onnx',
+}
+model_name = MODEL_ALIASES.get(model_name.strip(), model_name.strip())
 
 if not use_gpu:
     os.environ['CUDA_VISIBLE_DEVICES'] = ''

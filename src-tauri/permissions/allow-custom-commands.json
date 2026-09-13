@@ -81,7 +81,11 @@
           "transcribe_and_match_script",
           "align_vocal_clip",
           "validate_and_adjust_project_rules",
-          "validate_timeline_compliance"
+          "validate_timeline_compliance",
+          "process_media_effect",
+          "process_vad_split",
+          "move_project_folder",
+          "open_path"
         ],
         "deny": []
       }

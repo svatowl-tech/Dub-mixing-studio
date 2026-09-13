@@ -3,12 +3,14 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Wrench, X, Play, Pause, Square, RotateCcw, Volume2, Sparkles, Sliders, 
   Layers, Download, Upload, Check, Activity, Flame, Zap, Music, Scissors, 
-  FileAudio, RefreshCw, BarChart2, ShieldAlert, Cpu, CheckCircle2, AlertCircle, FolderOpen
+  FileAudio, RefreshCw, BarChart2, ShieldAlert, Cpu, CheckCircle2, AlertCircle, 
+  FolderOpen, Mic, CheckSquare, ShieldCheck, Gauge
 } from 'lucide-react';
 import { useUIState } from '../contexts/UIContext';
 import { SpectralAnalysisService, SpectrogramData } from '../services/spectralAnalysisService';
 import { getSafeFileUrl } from '../lib/utils';
 import { open as rawOpen, save as rawSave } from '@tauri-apps/plugin-dialog';
+import SynchronizedAudioVisualizer from './SynchronizedAudioVisualizer';
 
 const safeOpen = async (options?: any): Promise<any> => {
   if (typeof window === 'undefined' || !(window as any).__TAURI_INTERNALS__) return null;
@@ -28,7 +30,7 @@ const safeInvoke = async <T = any>(cmd: string, args?: any): Promise<T> => {
   return await invoke<T>(cmd, args);
 };
 
-type ToolCategory = 'prep' | 'eq_dynamics' | 'mastering';
+type ToolCategory = 'restoration' | 'eq_dynamics' | 'mastering';
 
 export const SingleTrackStudioModal: React.FC = () => {
   const { activeModal, setActiveModal } = useUIState();
@@ -53,35 +55,46 @@ export const SingleTrackStudioModal: React.FC = () => {
   // Spectrogram states
   const [spectrogramDataA, setSpectrogramDataA] = useState<SpectrogramData | null>(null);
   const [spectrogramDataB, setSpectrogramDataB] = useState<SpectrogramData | null>(null);
-  const [fftSize, setFftSize] = useState<number>(2048);
+  const [fftSize] = useState<number>(2048);
   const [palette, setPalette] = useState<'inferno' | 'viridis' | 'turbo' | 'plasma'>('inferno');
-  const [hoverInfo, setHoverInfo] = useState<{ time: number; freq: number; db: number; x: number; y: number } | null>(null);
 
   // Processing UI state
-  const [activeCategory, setActiveCategory] = useState<ToolCategory>('prep');
+  const [activeCategory, setActiveCategory] = useState<ToolCategory>('restoration');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [processStage, setProcessStage] = useState<string>('');
   const [processProgress, setProcessProgress] = useState<number>(0);
   const [lastReport, setLastReport] = useState<string | null>(null);
 
-  // Tool parameter forms
-  // Denoise
+  // --- Tool parameter states ---
+  // 1. Denoise
   const [denoiseModel, setDenoiseModel] = useState<string>('uvr_denoise_foxjoy');
   const [denoiseStrength, setDenoiseStrength] = useState<number>(85);
-  // Dereverb
+  // 2. Dereverb
   const [dereverbModel, setDereverbModel] = useState<string>('reverb_foxjoy');
   const [dereverbStrength, setDereverbStrength] = useState<number>(85);
-  // VAD / Split
+  // 3. De-Click
+  const [declickSensitivity, setDeclickSensitivity] = useState<number>(75);
+  // 4. De-Plosive
+  const [deplosiveThreshold, setDeplosiveThreshold] = useState<number>(-24);
+  // 5. De-Esser
+  const [deesserFrequency, setDeesserFrequency] = useState<number>(6500);
+  const [deesserThreshold, setDeesserThreshold] = useState<number>(-20);
+  const [deesserRatio, setDeesserRatio] = useState<number>(4.0);
+  // 6. Volume Leveler
+  const [levelerTargetRms, setLevelerTargetRms] = useState<number>(-19.0);
+  const [levelerMaxBoost, setLevelerMaxBoost] = useState<number>(12.0);
+  const [levelerGateThreshold, setLevelerGateThreshold] = useState<number>(-50.0);
+  // 7. VAD / Split
   const [vadThresholdDb, setVadThresholdDb] = useState<number>(-42);
   const [minSilenceMs, setMinSilenceMs] = useState<number>(300);
   const [vadResultSegments, setVadResultSegments] = useState<number | null>(null);
-  // Normalization
+  // 8. Normalization
   const [targetLufs, setTargetLufs] = useState<number>(-16);
-  // EQ
+  // 9. EQ
   const [eqLowCut, setEqLowCut] = useState<number>(80);
   const [eqHighCut, setEqHighCut] = useState<number>(18000);
   const [eqMidGain, setEqMidGain] = useState<number>(0);
-  // Compressor
+  // 10. Compressor
   const [compThreshold, setCompThreshold] = useState<number>(-18);
   const [compRatio, setCompRatio] = useState<number>(3);
 
@@ -91,10 +104,6 @@ export const SingleTrackStudioModal: React.FC = () => {
   const startTimeRef = useRef<number>(0);
   const startOffsetRef = useRef<number>(0);
   const animFrameRef = useRef<number | null>(null);
-
-  // Canvas Refs
-  const waveformCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const spectrogramCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const getAudioContext = useCallback(() => {
     if (!audioCtxRef.current) {
@@ -303,175 +312,7 @@ export const SingleTrackStudioModal: React.FC = () => {
     }
   };
 
-  // Render Waveform Canvas
-  useEffect(() => {
-    const canvas = waveformCanvasRef.current;
-    const currentBuf = activeSource === 'B' && processedBuffer ? processedBuffer : originalBuffer;
-    if (!canvas || !currentBuf) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const width = canvas.width = canvas.parentElement?.clientWidth || 800;
-    const height = canvas.height = 100;
-
-    ctx.fillStyle = '#18181b'; // zinc-900
-    ctx.fillRect(0, 0, width, height);
-
-    const channelData = currentBuf.getChannelData(0);
-    const step = Math.ceil(channelData.length / width);
-    const amp = height / 2;
-
-    ctx.beginPath();
-    ctx.strokeStyle = activeSource === 'B' ? '#10b981' : '#6366f1'; // emerald for B, indigo for A
-    ctx.lineWidth = 1;
-
-    for (let i = 0; i < width; i++) {
-      let min = 1.0;
-      let max = -1.0;
-      for (let j = 0; j < step; j++) {
-        const datum = channelData[i * step + j];
-        if (datum < min) min = datum;
-        if (datum > max) max = datum;
-      }
-      ctx.moveTo(i, (1 + min) * amp);
-      ctx.lineTo(i, (1 + max) * amp);
-    }
-    ctx.stroke();
-
-    // Playhead line
-    if (duration > 0) {
-      const playheadX = (currentTime / duration) * width;
-      ctx.fillStyle = '#ef4444'; // red playhead
-      ctx.fillRect(playheadX - 1, 0, 2, height);
-    }
-  }, [originalBuffer, processedBuffer, activeSource, currentTime, duration]);
-
-  // Render Spectrogram Canvas
-  const renderSpectrogram = useCallback(() => {
-    const canvas = spectrogramCanvasRef.current;
-    const activeSpec = activeSource === 'B' && spectrogramDataB ? spectrogramDataB : spectrogramDataA;
-    if (!canvas || !activeSpec || activeSpec.frames.length === 0) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const width = canvas.width = canvas.parentElement?.clientWidth || 800;
-    const height = canvas.height = 220;
-
-    const frames = activeSpec.frames;
-    const numFrames = frames.length;
-    const numBins = activeSpec.fftSize / 2;
-
-    const imgData = ctx.createImageData(width, height);
-    const data = imgData.data;
-
-    const minDb = activeSpec.minDb; // -120
-    const maxDb = activeSpec.maxDb; // 0
-
-    for (let x = 0; x < width; x++) {
-      const frameIdx = Math.min(numFrames - 1, Math.floor((x / width) * numFrames));
-      const frame = frames[frameIdx];
-
-      for (let y = 0; y < height; y++) {
-        // Y=0 is max frequency (top), Y=height is 0Hz (bottom)
-        const binIdx = Math.min(numBins - 1, Math.floor(((height - 1 - y) / height) * numBins));
-        const db = frame.magnitudes[binIdx];
-
-        // Normalize dBFS to 0..1
-        let norm = Math.max(0, Math.min(1, (db - minDb) / (maxDb - minDb)));
-
-        // Color map lookup
-        let r = 0, g = 0, b = 0;
-        if (palette === 'inferno') {
-          r = Math.floor(Math.min(255, norm * 1.5 * 255));
-          g = Math.floor(Math.min(255, Math.pow(norm, 2) * 255));
-          b = Math.floor(Math.min(255, Math.pow(norm, 4) * 255));
-        } else if (palette === 'turbo') {
-          r = Math.floor(255 * Math.sin(norm * Math.PI));
-          g = Math.floor(255 * Math.sin(norm * Math.PI * 0.8));
-          b = Math.floor(255 * Math.cos(norm * Math.PI * 0.5));
-        } else if (palette === 'viridis') {
-          r = Math.floor(255 * (0.2 + 0.8 * Math.pow(norm, 3)));
-          g = Math.floor(255 * norm);
-          b = Math.floor(255 * (0.5 + 0.5 * Math.sin(norm * Math.PI)));
-        } else { // plasma
-          r = Math.floor(255 * Math.pow(norm, 0.7));
-          g = Math.floor(255 * Math.sin(norm * Math.PI * 0.5));
-          b = Math.floor(255 * (1 - norm));
-        }
-
-        const pixelIdx = (y * width + x) * 4;
-        data[pixelIdx] = r;
-        data[pixelIdx + 1] = g;
-        data[pixelIdx + 2] = b;
-        data[pixelIdx + 3] = 255;
-      }
-    }
-
-    ctx.putImageData(imgData, 0, 0);
-
-    // Render Cutoff Frequency Line if present (e.g. MP3 16kHz cut)
-    if (activeSpec.detectedCutoffFreq < 20000 && activeSpec.detectedCutoffFreq > 8000) {
-      const cutoffY = height - (activeSpec.detectedCutoffFreq / activeSpec.maxFreq) * height;
-      ctx.strokeStyle = 'rgba(239, 68, 68, 0.8)'; // red dashed
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(0, cutoffY);
-      ctx.lineTo(width, cutoffY);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      ctx.fillStyle = '#ef4444';
-      ctx.font = '10px monospace';
-      ctx.fillText(`▲ MP3/Lossy Срез: ${SpectralAnalysisService.formatFreqLabel(activeSpec.detectedCutoffFreq)}`, 8, cutoffY - 4);
-    }
-
-    // Playhead line
-    if (duration > 0) {
-      const playheadX = (currentTime / duration) * width;
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(playheadX - 1, 0, 2, height);
-    }
-  }, [spectrogramDataA, spectrogramDataB, activeSource, palette, duration, currentTime]);
-
-  useEffect(() => {
-    renderSpectrogram();
-  }, [renderSpectrogram]);
-
-  // Mouse Inspection on Spectrogram
-  const handleSpectrogramMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = spectrogramCanvasRef.current;
-    const activeSpec = activeSource === 'B' && spectrogramDataB ? spectrogramDataB : spectrogramDataA;
-    if (!canvas || !activeSpec) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    const timeRatio = x / rect.width;
-    const freqRatio = (rect.height - y) / rect.height;
-
-    const time = timeRatio * activeSpec.duration;
-    const freq = Math.round(freqRatio * activeSpec.maxFreq);
-
-    const frameIdx = Math.min(activeSpec.frames.length - 1, Math.max(0, Math.floor(timeRatio * activeSpec.frames.length)));
-    const frame = activeSpec.frames[frameIdx];
-    const binIdx = Math.min(activeSpec.fftSize / 2 - 1, Math.max(0, Math.round(freq / activeSpec.freqStep)));
-    const db = frame ? Math.round(frame.magnitudes[binIdx] * 10) / 10 : -120;
-
-    setHoverInfo({ time, freq, db, x, y });
-  };
-
-  const handleSpectrogramMouseLeave = () => {
-    setHoverInfo(null);
-  };
-
-  const handleCanvasSeek = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const ratio = (e.clientX - rect.left) / rect.width;
-    const targetTime = ratio * duration;
+  const handleSeek = (targetTime: number) => {
     setCurrentTime(targetTime);
     if (isPlaying) {
       startPlayback(targetTime);
@@ -500,13 +341,13 @@ export const SingleTrackStudioModal: React.FC = () => {
     setIsProcessing(false);
   };
 
-  // --- TOOL EXECUTION HANDLERS (Calling unified backend commands) ---
+  // --- TOOL EXECUTION HANDLERS ---
 
-  // 1. Run AI Denoise
+  // 1. Run AI Denoise (Python UVR / Sidecar)
   const handleRunDenoise = async () => {
     if (!filePath) return;
     setIsProcessing(true);
-    setProcessStage('Запуск AI Шумоподавления...');
+    setProcessStage('Запуск AI Шумоподавления (Python UVR)...');
     setProcessProgress(20);
 
     try {
@@ -526,11 +367,11 @@ export const SingleTrackStudioModal: React.FC = () => {
     }
   };
 
-  // 2. Run AI Dereverb
+  // 2. Run AI Dereverb (Python UVR / Sidecar)
   const handleRunDereverb = async () => {
     if (!filePath) return;
     setIsProcessing(true);
-    setProcessStage('Запуск AI Подавления эха...');
+    setProcessStage('Запуск AI Подавления эха (Python UVR)...');
     setProcessProgress(20);
 
     try {
@@ -551,7 +392,107 @@ export const SingleTrackStudioModal: React.FC = () => {
     }
   };
 
-  // 3. Run VAD Silence Cut
+  // 3. Run De-Click (Устранение щелчков)
+  const handleRunDeclick = async () => {
+    if (!filePath) return;
+    setIsProcessing(true);
+    setProcessStage('Устранение щелчков и артефактов речи (De-Click)...');
+    setProcessProgress(25);
+
+    try {
+      const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_declicked.wav');
+      const rep: any = await safeInvoke('clean_clicks', {
+        inputWav: filePath,
+        outputWav: outPath,
+        sensitivity: declickSensitivity
+      });
+
+      const detected = rep?.clicks_detected ?? rep?.clicksDetected ?? 0;
+      const restored = rep?.samples_restored ?? rep?.samplesRestored ?? 0;
+      const reportStr = `De-Click завершен: устранено ${detected} щелчков, восстановлено ${restored} сэмплов (чувствительность: ${declickSensitivity}%).`;
+      await updateProcessedResult(outPath, reportStr);
+    } catch (e: any) {
+      setIsProcessing(false);
+      alert('Ошибка De-Click: ' + e.toString());
+    }
+  };
+
+  // 4. Run De-Plosive (Подавление задувов П/Б/Т)
+  const handleRunDeplosive = async () => {
+    if (!filePath) return;
+    setIsProcessing(true);
+    setProcessStage('Подавление задувов микрофона и взрывных согласных (De-Plosive)...');
+    setProcessProgress(25);
+
+    try {
+      const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_deplosived.wav');
+      const rep: any = await safeInvoke('apply_deplosive', {
+        filePath: filePath,
+        outPath: outPath,
+        thresholdDb: deplosiveThreshold
+      });
+
+      const maxRed = rep?.max_reduction_db ?? rep?.maxReductionDb ?? 0;
+      const reportStr = `De-Plosive завершен: подавлены низкочастотные задувы (порог: ${deplosiveThreshold} dB, макс. срез: -${Number(maxRed).toFixed(1)} dB).`;
+      await updateProcessedResult(outPath, reportStr);
+    } catch (e: any) {
+      setIsProcessing(false);
+      alert('Ошибка De-Plosive: ' + e.toString());
+    }
+  };
+
+  // 5. Run De-Esser (Подавление сибилянтов С/Ш)
+  const handleRunDeesser = async () => {
+    if (!filePath) return;
+    setIsProcessing(true);
+    setProcessStage('Подавление резких сибилянтов и свистящих (De-Esser)...');
+    setProcessProgress(25);
+
+    try {
+      const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_deessed.wav');
+      const rep: any = await safeInvoke('process_deesser', {
+        inputPath: filePath,
+        outputPath: outPath,
+        frequency: deesserFrequency,
+        threshold: deesserThreshold,
+        ratio: deesserRatio
+      });
+
+      const maxRed = rep?.max_reduction_db ?? rep?.maxReductionDb ?? 0;
+      const reportStr = `De-Esser применен: сжатие свистящих на ${deesserFrequency} Гц (порог: ${deesserThreshold} dB, макс. срез: -${Number(maxRed).toFixed(1)} dB).`;
+      await updateProcessedResult(outPath, reportStr);
+    } catch (e: any) {
+      setIsProcessing(false);
+      alert('Ошибка De-Esser: ' + e.toString());
+    }
+  };
+
+  // 6. Run Volume Leveler (Выравнивание громкости речи)
+  const handleRunVolumeLeveler = async () => {
+    if (!filePath) return;
+    setIsProcessing(true);
+    setProcessStage('Интеллектуальное выравнивание громкости речи (Volume Leveler)...');
+    setProcessProgress(25);
+
+    try {
+      const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_leveled.wav');
+      await safeInvoke('level_speech_volume', {
+        inputPath: filePath,
+        outputPath: outPath,
+        targetRms: levelerTargetRms,
+        gateThresholdDb: levelerGateThreshold,
+        maxBoostDb: levelerMaxBoost
+      });
+
+      const reportStr = `Volume Leveler завершен: Целевой уровень ${levelerTargetRms} dB RMS, макс. усиление +${levelerMaxBoost} dB. Речь сбалансирована.`;
+      await updateProcessedResult(outPath, reportStr);
+    } catch (e: any) {
+      setIsProcessing(false);
+      alert('Ошибка Volume Leveler: ' + e.toString());
+    }
+  };
+
+  // 7. Run VAD Silence Cut
   const handleRunVadSplit = async () => {
     if (!filePath) return;
     setIsProcessing(true);
@@ -566,8 +507,9 @@ export const SingleTrackStudioModal: React.FC = () => {
         speechPadMs: 100
       });
 
-      setVadResultSegments(res?.segments?.length || 0);
-      setLastReport(`Silero VAD обнаружил ${res?.segments?.length || 0} речевых сегментов.`);
+      const count = res?.segments?.length ?? res?.segmentsCount ?? 0;
+      setVadResultSegments(count);
+      setLastReport(`Silero VAD обнаружил ${count} речевых сегментов.`);
     } catch (e: any) {
       alert('Ошибка VAD: ' + e.toString());
     } finally {
@@ -575,30 +517,44 @@ export const SingleTrackStudioModal: React.FC = () => {
     }
   };
 
-  // 4. Run Normalization
+  // 8. Run Normalization
   const handleRunNormalize = async () => {
     if (!filePath) return;
     setIsProcessing(true);
-    setProcessStage('Нормализация громкости...');
+    setProcessStage('Нормализация громкости (EBU R128)...');
     setProcessProgress(30);
 
     try {
       const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_normalized.wav');
-      await safeInvoke('process_media_effect', {
-        inputPath: filePath,
-        outputPath: outPath,
-        effectType: 'normalize',
-        params: { targetLufs }
-      });
+      let reportStr = `Нормализация до ${targetLufs} LUFS завершена.`;
 
-      await updateProcessedResult(outPath, `Нормализация до ${targetLufs} LUFS завершена.`);
+      try {
+        const stats: any = await safeInvoke('normalize_audio', {
+          inputPath: filePath,
+          outputPath: outPath,
+          targetLufs: targetLufs
+        });
+        if (stats && stats.final_lufs !== undefined) {
+          const gainPrefix = stats.gain_applied_db > 0 ? '+' : '';
+          reportStr = `Нормализация EBU R128: Итог ${stats.final_lufs.toFixed(1)} LUFS (Gain: ${gainPrefix}${stats.gain_applied_db.toFixed(1)} dB, True Peak: ${stats.final_true_peak_db.toFixed(1)} dBTP)`;
+        }
+      } catch (_e) {
+        await safeInvoke('process_media_effect', {
+          inputPath: filePath,
+          outputPath: outPath,
+          effectType: 'normalize',
+          params: { targetLufs }
+        });
+      }
+
+      await updateProcessedResult(outPath, reportStr);
     } catch (e: any) {
       setIsProcessing(false);
       alert('Ошибка нормализации: ' + e.toString());
     }
   };
 
-  // 5. Run EQ & Compression
+  // 9. Run EQ & Compression
   const handleRunEqComp = async () => {
     if (!filePath) return;
     setIsProcessing(true);
@@ -671,30 +627,28 @@ export const SingleTrackStudioModal: React.FC = () => {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
   };
 
-  const activeSpec = activeSource === 'B' && spectrogramDataB ? spectrogramDataB : spectrogramDataA;
-
   return (
-    <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[200] flex items-center justify-center p-4 sm:p-6">
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[200] flex items-center justify-center p-3 sm:p-5">
       <motion.div
         initial={{ opacity: 0, scale: 0.96 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.96 }}
-        className="bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-7xl h-[92vh] flex flex-col overflow-hidden"
+        className="bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-7xl h-[94vh] flex flex-col overflow-hidden"
       >
         {/* Header */}
-        <div className="px-6 py-4 border-b border-white/10 bg-zinc-900/90 flex items-center justify-between shrink-0">
+        <div className="px-6 py-3.5 border-b border-white/10 bg-zinc-900/90 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
               <Wrench className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+              <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
                 Отдельные инструменты
                 <span className="text-[10px] font-extrabold uppercase tracking-wider bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded-full">
-                  Лаборатория точечной обработки
+                  Спектральная лаборатория
                 </span>
               </h2>
-              <p className="text-xs text-zinc-400">Тестирование и спектральный анализ отдельных аудиофайлов через единый движок</p>
+              <p className="text-xs text-zinc-400">Точечная обработка и синхронизированный анализ звуковой волны и спектрограммы</p>
             </div>
           </div>
 
@@ -726,7 +680,7 @@ export const SingleTrackStudioModal: React.FC = () => {
             </div>
             <h3 className="text-xl font-bold text-white mb-2">Загрузите аудиофайл для точечной обработки</h3>
             <p className="text-sm text-zinc-400 max-w-md mb-8">
-              Загрузите любой WAV, MP3, FLAC или AAC файл, чтобы применить нейросетевое шумоподавление, удаление эха, VAD или эквалайзер с мгновенным спектральным контролем.
+              Загрузите любой WAV, MP3, FLAC или AAC файл, чтобы применить нейросетевое шумоподавление, устранение эха, удаление щелчков, деплосив, выравнивание громкости и эквалайзер с масштабируемой спектрограммой.
             </p>
 
             <div className="flex items-center gap-4">
@@ -734,43 +688,37 @@ export const SingleTrackStudioModal: React.FC = () => {
                 onClick={handleSelectFile}
                 className="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm rounded-xl transition-all shadow-lg shadow-indigo-600/30 flex items-center gap-2 cursor-pointer"
               >
-                <Upload className="w-5 h-5" />
-                Выбрать аудиофайл
+                <Upload className="w-4 h-4" />
+                Выбрать файл через проводник
               </button>
 
-              <label className="px-6 py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold text-sm rounded-xl transition-all border border-white/10 flex items-center gap-2 cursor-pointer">
-                <FileAudio className="w-5 h-5 text-purple-400" />
-                Обзор диска
-                <input type="file" accept="audio/*" onChange={handleFileInputChange} className="hidden" />
+              <label className="px-5 py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-bold text-sm rounded-xl transition-all border border-white/5 flex items-center gap-2 cursor-pointer">
+                <FileAudio className="w-4 h-4 text-indigo-400" />
+                Из папки браузера
+                <input
+                  type="file"
+                  accept="audio/*"
+                  onChange={handleFileInputChange}
+                  className="hidden"
+                />
               </label>
             </div>
           </div>
         ) : (
-          /* Main Workspace Grid */
+          /* Active Processing Studio Workspace */
           <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 overflow-hidden">
-            {/* Left Column: Waveform, Spectrogram & Player (7 cols) */}
-            <div className="lg:col-span-7 border-r border-white/10 flex flex-col p-4 gap-4 overflow-y-auto bg-zinc-950/40 custom-scrollbar">
-              
-              {/* File Info & A/B Switch Toolbar */}
-              <div className="bg-zinc-900/80 border border-white/10 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
-                    <Music className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <div className="text-xs font-bold text-white truncate max-w-[220px]" title={fileName}>
-                      {fileName}
-                    </div>
-                    <div className="text-[10px] text-zinc-400 flex items-center gap-2">
-                      <span>Длительность: {formatTime(duration)}</span>
-                      <span>•</span>
-                      <span>{(originalBuffer?.sampleRate || 44100) / 1000} kHz</span>
-                    </div>
-                  </div>
+            {/* Left Column: Waveform, Spectrogram, A/B Transport Controls (7 cols) */}
+            <div className="lg:col-span-7 flex flex-col p-4 border-r border-white/10 gap-3 overflow-y-auto custom-scrollbar">
+              {/* Top Bar: File Info & A/B Toggle */}
+              <div className="flex items-center justify-between bg-zinc-950 p-2.5 rounded-xl border border-white/5">
+                <div className="flex items-center gap-2 truncate pr-2">
+                  <FileAudio className="w-4 h-4 text-indigo-400 shrink-0" />
+                  <span className="text-xs font-bold text-zinc-200 truncate">{fileName}</span>
+                  <span className="text-[10px] text-zinc-500 font-mono">({duration.toFixed(2)} сек)</span>
                 </div>
 
-                {/* A/B Comparison Switch */}
-                <div className="flex items-center bg-zinc-950 p-1 rounded-xl border border-white/10">
+                {/* Seamless A / B Source Switcher */}
+                <div className="flex items-center bg-zinc-900 p-1 rounded-lg border border-white/10 shrink-0">
                   <button
                     onClick={() => handleToggleAB('A')}
                     className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
@@ -779,7 +727,7 @@ export const SingleTrackStudioModal: React.FC = () => {
                         : 'text-zinc-400 hover:text-white'
                     }`}
                   >
-                    <span className="w-2 h-2 rounded-full bg-indigo-300" />
+                    <span className="w-2 h-2 rounded-full bg-indigo-400" />
                     А: Исходник
                   </button>
 
@@ -801,18 +749,18 @@ export const SingleTrackStudioModal: React.FC = () => {
               </div>
 
               {/* Player Transport Controls */}
-              <div className="bg-zinc-900/60 border border-white/5 rounded-xl p-3 flex items-center justify-between gap-4">
+              <div className="bg-zinc-900/60 border border-white/5 rounded-xl p-2.5 flex items-center justify-between gap-4">
                 <div className="flex items-center gap-2">
                   <button
                     onClick={togglePlay}
-                    className="w-10 h-10 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center transition-all shadow-lg shadow-indigo-600/30"
+                    className="w-10 h-10 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center transition-all shadow-lg shadow-indigo-600/30 cursor-pointer"
                   >
                     {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
                   </button>
 
                   <button
                     onClick={stopPlayback}
-                    className="p-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-all"
+                    className="p-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-all cursor-pointer"
                     title="Стоп"
                   >
                     <Square className="w-4 h-4" />
@@ -820,7 +768,7 @@ export const SingleTrackStudioModal: React.FC = () => {
 
                   <button
                     onClick={() => setIsLooping(!isLooping)}
-                    className={`p-2.5 rounded-xl transition-all ${
+                    className={`p-2.5 rounded-xl transition-all cursor-pointer ${
                       isLooping ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/40' : 'bg-zinc-800 text-zinc-400 hover:text-white'
                     }`}
                     title="Зациклить воспроизведение"
@@ -830,101 +778,27 @@ export const SingleTrackStudioModal: React.FC = () => {
                 </div>
 
                 {/* Time Display */}
-                <div className="font-mono text-sm font-bold text-white bg-zinc-950 px-3 py-1.5 rounded-lg border border-white/5">
+                <div className="font-mono text-xs sm:text-sm font-bold text-white bg-zinc-950 px-3 py-1.5 rounded-lg border border-white/5">
                   <span className="text-indigo-400">{formatTime(currentTime)}</span>
                   <span className="text-zinc-600 mx-1.5">/</span>
                   <span className="text-zinc-400">{formatTime(duration)}</span>
                 </div>
               </div>
 
-              {/* Sound Waveform Display */}
-              <div className="bg-zinc-900/90 border border-white/10 rounded-xl p-3 relative flex flex-col gap-2">
-                <div className="flex items-center justify-between text-xs font-bold text-zinc-300">
-                  <span className="flex items-center gap-1.5">
-                    <Activity className="w-4 h-4 text-indigo-400" />
-                    Звуковая волна (Waveform)
-                  </span>
-                  <span className="text-[10px] text-zinc-500 font-mono">Нажмите для перехода</span>
-                </div>
-
-                <div className="relative rounded-lg overflow-hidden border border-white/5 cursor-pointer" onClick={handleCanvasSeek}>
-                  <canvas ref={waveformCanvasRef} className="w-full h-[90px] block bg-zinc-950" />
-                </div>
-              </div>
-
-              {/* Spectrogram Display */}
-              <div className="bg-zinc-900/90 border border-white/10 rounded-xl p-3 relative flex flex-col gap-2 flex-1 min-h-[260px]">
-                <div className="flex items-center justify-between text-xs font-bold text-zinc-300">
-                  <span className="flex items-center gap-1.5">
-                    <Flame className="w-4 h-4 text-amber-400" />
-                    Спектральный анализ (STFT Spectrogram)
-                  </span>
-
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={palette}
-                      onChange={(e) => setPalette(e.target.value as any)}
-                      className="bg-zinc-800 border border-white/10 text-zinc-300 text-[10px] font-bold rounded-md px-2 py-1"
-                    >
-                      <option value="inferno">Палитра: Inferno</option>
-                      <option value="turbo">Палитра: Turbo</option>
-                      <option value="viridis">Палитра: Viridis</option>
-                      <option value="plasma">Палитра: Plasma</option>
-                    </select>
-                  </div>
-                </div>
-
-                {/* Spectrogram Canvas */}
-                <div
-                  className="relative rounded-lg overflow-hidden border border-white/5 flex-1 min-h-[180px] bg-zinc-950 cursor-crosshair"
-                  onMouseMove={handleSpectrogramMouseMove}
-                  onMouseLeave={handleSpectrogramMouseLeave}
-                  onClick={handleCanvasSeek}
-                >
-                  <canvas ref={spectrogramCanvasRef} className="w-full h-full block" />
-
-                  {/* Hover Inspector Crosshair Tooltip */}
-                  {hoverInfo && (
-                    <div
-                      className="absolute pointer-events-none bg-black/90 border border-white/20 px-2 py-1 rounded text-[10px] font-mono text-white shadow-xl z-20 flex items-center gap-2"
-                      style={{
-                        left: Math.min(hoverInfo.x + 10, 480),
-                        top: Math.max(hoverInfo.y - 30, 10)
-                      }}
-                    >
-                      <span className="text-amber-400">{hoverInfo.freq} Гц</span>
-                      <span className="text-zinc-500">|</span>
-                      <span className="text-indigo-300">{formatTime(hoverInfo.time)}</span>
-                      <span className="text-zinc-500">|</span>
-                      <span className="text-emerald-400">{hoverInfo.db} dBFS</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Diagnostics Badge Bar */}
-                {activeSpec && (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] font-medium text-zinc-400 pt-1">
-                    <div className="bg-zinc-950 p-2 rounded-lg border border-white/5 flex flex-col">
-                      <span className="text-zinc-500">Шум (Noise Floor)</span>
-                      <span className="text-white font-bold font-mono">{activeSpec.estimatedNoiseFloorDb} dBFS</span>
-                    </div>
-                    <div className="bg-zinc-950 p-2 rounded-lg border border-white/5 flex flex-col">
-                      <span className="text-zinc-500">Пик спектра</span>
-                      <span className="text-amber-400 font-bold font-mono">{SpectralAnalysisService.formatFreqLabel(activeSpec.globalPeakFreq)}</span>
-                    </div>
-                    <div className="bg-zinc-950 p-2 rounded-lg border border-white/5 flex flex-col">
-                      <span className="text-zinc-500">Верхний срез</span>
-                      <span className="text-indigo-300 font-bold font-mono">{SpectralAnalysisService.formatFreqLabel(activeSpec.detectedCutoffFreq)}</span>
-                    </div>
-                    <div className="bg-zinc-950 p-2 rounded-lg border border-white/5 flex flex-col">
-                      <span className="text-zinc-500">НЧ-гул (&lt;60Hz)</span>
-                      <span className={activeSpec.hasLowRumble ? "text-red-400 font-bold" : "text-emerald-400 font-bold"}>
-                        {activeSpec.hasLowRumble ? "Обнаружен" : "Чисто"}
-                      </span>
-                    </div>
-                  </div>
-                )}
-              </div>
+              {/* Synchronized Visualizer (Waveform + Spectrogram with Linked Zoom & Frequency Zoom) */}
+              <SynchronizedAudioVisualizer
+                originalBuffer={originalBuffer}
+                processedBuffer={processedBuffer}
+                activeSource={activeSource}
+                spectrogramDataA={spectrogramDataA}
+                spectrogramDataB={spectrogramDataB}
+                currentTime={currentTime}
+                duration={duration}
+                isPlaying={isPlaying}
+                onSeek={handleSeek}
+                palette={palette}
+                onPaletteChange={setPalette}
+              />
 
               {/* Report & Chain Action Bar */}
               {lastReport && (
@@ -938,15 +812,15 @@ export const SingleTrackStudioModal: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <button
                         onClick={handleMakeProcessedPrimary}
-                        className="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold transition-all text-[11px] flex items-center gap-1.5 shadow-md"
+                        className="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold transition-all text-[11px] flex items-center gap-1.5 shadow-md cursor-pointer"
                       >
                         <RefreshCw className="w-3.5 h-3.5" />
-                        Назначить как новый исходник
+                        Сделать исходником
                       </button>
 
                       <button
                         onClick={handleExportResult}
-                        className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold transition-all text-[11px] flex items-center gap-1.5 shadow-md"
+                        className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold transition-all text-[11px] flex items-center gap-1.5 shadow-md cursor-pointer"
                       >
                         <Download className="w-3.5 h-3.5" />
                         Сохранить WAV
@@ -962,13 +836,13 @@ export const SingleTrackStudioModal: React.FC = () => {
               {/* Category Tabs */}
               <div className="flex items-center bg-zinc-950 p-1 rounded-xl border border-white/10 mb-4">
                 <button
-                  onClick={() => setActiveCategory('prep')}
+                  onClick={() => setActiveCategory('restoration')}
                   className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
-                    activeCategory === 'prep' ? 'bg-indigo-600 text-white shadow-md' : 'text-zinc-400 hover:text-white'
+                    activeCategory === 'restoration' ? 'bg-indigo-600 text-white shadow-md' : 'text-zinc-400 hover:text-white'
                   }`}
                 >
                   <Sparkles className="w-3.5 h-3.5" />
-                  Предподготовка
+                  Реставрация
                 </button>
 
                 <button
@@ -988,7 +862,7 @@ export const SingleTrackStudioModal: React.FC = () => {
                   }`}
                 >
                   <Zap className="w-3.5 h-3.5" />
-                  Мастеринг
+                  Мастеринг & VAD
                 </button>
               </div>
 
@@ -1008,15 +882,15 @@ export const SingleTrackStudioModal: React.FC = () => {
                 </div>
               )}
 
-              {/* CATEGORY 1: PREP & CLEANUP */}
-              {activeCategory === 'prep' && (
+              {/* CATEGORY 1: RESTORATION & CLEANUP */}
+              {activeCategory === 'restoration' && (
                 <div className="space-y-4">
-                  {/* AI Denoise Tool Box */}
+                  {/* 1. AI Denoise Tool Box */}
                   <div className="bg-zinc-900 border border-white/10 rounded-xl p-4 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2 font-bold text-xs text-white">
                         <Sparkles className="w-4 h-4 text-indigo-400" />
-                        AI Шумоподавление (Python UVR)
+                        AI Шумоподавление (Python UVR Sidecar)
                       </div>
                       <span className="text-[10px] text-zinc-500 font-mono">VR / MDX Architecture</span>
                     </div>
@@ -1031,7 +905,6 @@ export const SingleTrackStudioModal: React.FC = () => {
                         <option value="uvr_denoise_foxjoy">VR-DeNoise FoxJoy (Универсальная чистка речи)</option>
                         <option value="uvr_denoise_full">UVR-DeNoise Full (Глубокое подавление фонового шума)</option>
                         <option value="uvr_denoise_lite">UVR-DeNoise Lite (Быстрая легкая очистка)</option>
-                        <option value="spectral_gate">Spectral Gate (DSP Спектральный гейт)</option>
                       </select>
                     </div>
 
@@ -1060,12 +933,12 @@ export const SingleTrackStudioModal: React.FC = () => {
                     </button>
                   </div>
 
-                  {/* AI Dereverb Tool Box */}
+                  {/* 2. AI Dereverb Tool Box */}
                   <div className="bg-zinc-900 border border-white/10 rounded-xl p-4 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2 font-bold text-xs text-white">
                         <Flame className="w-4 h-4 text-amber-400" />
-                        AI Подавление эха (Python UVR)
+                        AI Подавление эха (Python UVR Sidecar)
                       </div>
                       <span className="text-[10px] text-zinc-500 font-mono">De-Reverb HQ</span>
                     </div>
@@ -1108,50 +981,148 @@ export const SingleTrackStudioModal: React.FC = () => {
                     </button>
                   </div>
 
-                  {/* Silero VAD Tool Box */}
+                  {/* 3. De-Click Tool Box */}
                   <div className="bg-zinc-900 border border-white/10 rounded-xl p-4 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2 font-bold text-xs text-white">
-                        <Scissors className="w-4 h-4 text-purple-400" />
-                        Silero VAD (Разрез по тишине)
+                        <CheckSquare className="w-4 h-4 text-emerald-400" />
+                        Устранение щелчков (De-Click)
                       </div>
-                      <span className="text-[10px] text-zinc-500 font-mono">Neural VAD</span>
+                      <span className="text-[10px] text-zinc-500 font-mono">LPC Interpolator</span>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[11px] text-zinc-400">
+                        <span>Чувствительность обнаружения щелчков:</span>
+                        <span className="font-bold text-emerald-400 font-mono">{declickSensitivity}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="10"
+                        max="100"
+                        value={declickSensitivity}
+                        onChange={(e) => setDeclickSensitivity(Number(e.target.value))}
+                        className="w-full accent-emerald-500"
+                      />
+                      <p className="text-[10px] text-zinc-500">
+                        Устраняет клики слюны, импульсные щелчки рта и короткие помехи микрофона с интерполяцией.
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={handleRunDeclick}
+                      disabled={isProcessing}
+                      className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-all shadow-md shadow-emerald-600/20 flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <CheckSquare className="w-4 h-4" />
+                      Устранить щелчки (De-Click)
+                    </button>
+                  </div>
+
+                  {/* 4. De-Plosive Tool Box */}
+                  <div className="bg-zinc-900 border border-white/10 rounded-xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 font-bold text-xs text-white">
+                        <ShieldCheck className="w-4 h-4 text-rose-400" />
+                        Подавление задувов (De-Plosive)
+                      </div>
+                      <span className="text-[10px] text-zinc-500 font-mono">Dynamic Sub-Bass</span>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[11px] text-zinc-400">
+                        <span>Порог срабатывания задувов (Threshold):</span>
+                        <span className="font-bold text-rose-400 font-mono">{deplosiveThreshold} dB</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="-40"
+                        max="-10"
+                        step="1"
+                        value={deplosiveThreshold}
+                        onChange={(e) => setDeplosiveThreshold(Number(e.target.value))}
+                        className="w-full accent-rose-500"
+                      />
+                      <p className="text-[10px] text-zinc-500">
+                        Устраняет резкие взрывные согласные «П», «Б», «Т» и задувы капсюля микрофона.
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={handleRunDeplosive}
+                      disabled={isProcessing}
+                      className="w-full py-2.5 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-all shadow-md shadow-rose-600/20 flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <ShieldCheck className="w-4 h-4" />
+                      Подавить задувы (De-Plosive)
+                    </button>
+                  </div>
+
+                  {/* 5. De-Esser Tool Box */}
+                  <div className="bg-zinc-900 border border-white/10 rounded-xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 font-bold text-xs text-white">
+                        <Mic className="w-4 h-4 text-cyan-400" />
+                        Диэссер сибилянтов (De-Esser)
+                      </div>
+                      <span className="text-[10px] text-zinc-500 font-mono">Sidechain Bandpass</span>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-[11px] text-zinc-400">
+                        <span>Центральная частота:</span>
+                        <span className="font-mono text-cyan-400 font-bold">{deesserFrequency} Гц</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="3000"
+                        max="9000"
+                        step="100"
+                        value={deesserFrequency}
+                        onChange={(e) => setDeesserFrequency(Number(e.target.value))}
+                        className="w-full accent-cyan-500"
+                      />
                     </div>
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="text-[11px] text-zinc-400 block mb-1">Порог шума (dB):</label>
+                        <div className="flex justify-between text-[11px] text-zinc-400 mb-1">
+                          <span>Порог (dB):</span>
+                          <span className="font-mono text-cyan-400 font-bold">{deesserThreshold}</span>
+                        </div>
                         <input
-                          type="number"
-                          value={vadThresholdDb}
-                          onChange={(e) => setVadThresholdDb(Number(e.target.value))}
-                          className="w-full bg-zinc-950 border border-white/10 rounded-lg p-2 text-xs text-white font-mono"
+                          type="range"
+                          min="-35"
+                          max="-10"
+                          value={deesserThreshold}
+                          onChange={(e) => setDeesserThreshold(Number(e.target.value))}
+                          className="w-full accent-cyan-500"
                         />
                       </div>
                       <div>
-                        <label className="text-[11px] text-zinc-400 block mb-1">Мин тишина (ms):</label>
+                        <div className="flex justify-between text-[11px] text-zinc-400 mb-1">
+                          <span>Сжатие (Ratio):</span>
+                          <span className="font-mono text-cyan-400 font-bold">{deesserRatio}:1</span>
+                        </div>
                         <input
-                          type="number"
-                          value={minSilenceMs}
-                          onChange={(e) => setMinSilenceMs(Number(e.target.value))}
-                          className="w-full bg-zinc-950 border border-white/10 rounded-lg p-2 text-xs text-white font-mono"
+                          type="range"
+                          min="2"
+                          max="8"
+                          step="0.5"
+                          value={deesserRatio}
+                          onChange={(e) => setDeesserRatio(Number(e.target.value))}
+                          className="w-full accent-cyan-500"
                         />
                       </div>
                     </div>
 
-                    {vadResultSegments !== null && (
-                      <div className="text-xs text-purple-300 bg-purple-500/10 p-2 rounded-lg border border-purple-500/20">
-                        Найдено речевых фрагментов: <strong>{vadResultSegments}</strong>
-                      </div>
-                    )}
-
                     <button
-                      onClick={handleRunVadSplit}
+                      onClick={handleRunDeesser}
                       disabled={isProcessing}
-                      className="w-full py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-all shadow-md shadow-purple-600/20 flex items-center justify-center gap-2 cursor-pointer"
+                      className="w-full py-2.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-all shadow-md shadow-cyan-600/20 flex items-center justify-center gap-2 cursor-pointer"
                     >
-                      <Scissors className="w-4 h-4" />
-                      Анализировать паузы и тишину
+                      <Mic className="w-4 h-4" />
+                      Применить Диэссер
                     </button>
                   </div>
                 </div>
@@ -1160,7 +1131,74 @@ export const SingleTrackStudioModal: React.FC = () => {
               {/* CATEGORY 2: EQ & DYNAMICS */}
               {activeCategory === 'eq_dynamics' && (
                 <div className="space-y-4">
-                  {/* EQ & Filter Settings */}
+                  {/* Volume Leveler Tool Box */}
+                  <div className="bg-zinc-900 border border-white/10 rounded-xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 font-bold text-xs text-white">
+                        <Gauge className="w-4 h-4 text-amber-400" />
+                        Выравнивание громкости речи (Volume Leveler)
+                      </div>
+                      <span className="text-[10px] text-zinc-500 font-mono">Dynamic RMS AGC</span>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-[11px] text-zinc-400">
+                        <span>Целевая средняя громкость речи (Target RMS):</span>
+                        <span className="font-mono text-amber-400 font-bold">{levelerTargetRms} dB</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="-28"
+                        max="-12"
+                        step="0.5"
+                        value={levelerTargetRms}
+                        onChange={(e) => setLevelerTargetRms(Number(e.target.value))}
+                        className="w-full accent-amber-500"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <div className="flex justify-between text-[11px] text-zinc-400 mb-1">
+                          <span>Макс. усиление:</span>
+                          <span className="font-mono text-amber-400 font-bold">+{levelerMaxBoost} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="3"
+                          max="18"
+                          value={levelerMaxBoost}
+                          onChange={(e) => setLevelerMaxBoost(Number(e.target.value))}
+                          className="w-full accent-amber-500"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-[11px] text-zinc-400 mb-1">
+                          <span>Порог гейта:</span>
+                          <span className="font-mono text-amber-400 font-bold">{levelerGateThreshold} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-60"
+                          max="-35"
+                          value={levelerGateThreshold}
+                          onChange={(e) => setLevelerGateThreshold(Number(e.target.value))}
+                          className="w-full accent-amber-500"
+                        />
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={handleRunVolumeLeveler}
+                      disabled={isProcessing}
+                      className="w-full py-2.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-all shadow-md shadow-amber-600/20 flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <Gauge className="w-4 h-4" />
+                      Выровнять громкость речи
+                    </button>
+                  </div>
+
+                  {/* Parametric EQ Settings */}
                   <div className="bg-zinc-900 border border-white/10 rounded-xl p-4 space-y-3">
                     <div className="flex items-center gap-2 font-bold text-xs text-white">
                       <Sliders className="w-4 h-4 text-emerald-400" />
@@ -1254,9 +1292,56 @@ export const SingleTrackStudioModal: React.FC = () => {
                 </div>
               )}
 
-              {/* CATEGORY 3: MASTERING */}
+              {/* CATEGORY 3: MASTERING & VAD */}
               {activeCategory === 'mastering' && (
                 <div className="space-y-4">
+                  {/* Silero VAD Tool Box */}
+                  <div className="bg-zinc-900 border border-white/10 rounded-xl p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 font-bold text-xs text-white">
+                        <Scissors className="w-4 h-4 text-purple-400" />
+                        Silero VAD (Разрез по тишине)
+                      </div>
+                      <span className="text-[10px] text-zinc-500 font-mono">Neural VAD</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-[11px] text-zinc-400 block mb-1">Порог шума (dB):</label>
+                        <input
+                          type="number"
+                          value={vadThresholdDb}
+                          onChange={(e) => setVadThresholdDb(Number(e.target.value))}
+                          className="w-full bg-zinc-950 border border-white/10 rounded-lg p-2 text-xs text-white font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[11px] text-zinc-400 block mb-1">Мин тишина (ms):</label>
+                        <input
+                          type="number"
+                          value={minSilenceMs}
+                          onChange={(e) => setMinSilenceMs(Number(e.target.value))}
+                          className="w-full bg-zinc-950 border border-white/10 rounded-lg p-2 text-xs text-white font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    {vadResultSegments !== null && (
+                      <div className="text-xs text-purple-300 bg-purple-500/10 p-2 rounded-lg border border-purple-500/20">
+                        Найдено речевых фрагментов: <strong>{vadResultSegments}</strong>
+                      </div>
+                    )}
+
+                    <button
+                      onClick={handleRunVadSplit}
+                      disabled={isProcessing}
+                      className="w-full py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition-all shadow-md shadow-purple-600/20 flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <Scissors className="w-4 h-4" />
+                      Анализировать паузы и тишину
+                    </button>
+                  </div>
+
                   {/* LUFS Normalizer Box */}
                   <div className="bg-zinc-900 border border-white/10 rounded-xl p-4 space-y-3">
                     <div className="flex items-center justify-between">

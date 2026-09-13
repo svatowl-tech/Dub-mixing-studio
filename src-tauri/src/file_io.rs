@@ -391,3 +391,95 @@ pub async fn ensure_track_audio_wav(app_handle: AppHandle, file_path: String) ->
 
     Ok(dest_str)
 }
+
+/// Гарантирует, что по указанному пути находится валидный WAV файл с RIFF заголовком.
+/// Если файл имеет другой формат (FLAC, MP3, AAC, M4A, OGG) или невалидный RIFF заголовок,
+/// он автоматически декодируется через FFmpeg во временный WAV файл.
+pub fn ensure_valid_wav_path(path: &Path) -> Result<(PathBuf, bool), String> {
+    let norm_path_str = normalize_windows_path(&path.to_string_lossy());
+    let src = PathBuf::from(&norm_path_str);
+    if !src.exists() {
+        return Err(format!("Аудиофайл не найден: {}", norm_path_str));
+    }
+
+    // 1. Быстрая проверка: можно ли открыть через hound::WavReader
+    if hound::WavReader::open(&src).is_ok() {
+        return Ok((src, false));
+    }
+
+    println!("[ensure_valid_wav_path] Файл {} не является валидным WAV. Автоматическая конвертация через FFmpeg...", norm_path_str);
+
+    // 2. Генерация пути для временного WAV файла
+    let epoch_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp_dir = std::env::temp_dir();
+    let temp_wav = temp_dir.join(format!("dubstudio_conv_{}.wav", epoch_nanos));
+
+    let ffmpeg_bin = find_ffmpeg_path();
+    let output = std::process::Command::new(&ffmpeg_bin)
+        .args(&[
+            "-y",
+            "-i", &norm_path_str,
+            "-ar", "44100",
+            "-ac", "2",
+            "-c:a", "pcm_s16le",
+            &temp_wav.to_string_lossy().to_string(),
+        ])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() && temp_wav.exists() => {
+            if hound::WavReader::open(&temp_wav).is_ok() {
+                println!("[ensure_valid_wav_path] Файл успешно конвертирован во временный WAV: {}", temp_wav.display());
+                Ok((temp_wav, true))
+            } else {
+                let _ = std::fs::remove_file(&temp_wav);
+                Err(format!("FFmpeg создал файл {}, но он не распознан как WAV", temp_wav.display()))
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            Err(format!("Ошибка FFmpeg при декодировании {}: {}", norm_path_str, stderr))
+        }
+        Err(e) => {
+            Err(format!("Не удалось запустить FFmpeg ({}): {}", ffmpeg_bin, e))
+        }
+    }
+}
+
+#[tauri::command]
+pub fn move_project_folder(old_path: String, new_path: String) -> Result<(), String> {
+    let norm_old = normalize_windows_path(&old_path);
+    let norm_new = normalize_windows_path(&new_path);
+    std::fs::rename(&norm_old, &norm_new).map_err(|e| format!("Не удалось переместить папку проекта: {}", e))
+}
+
+#[tauri::command]
+pub fn open_path(path: String) -> Result<(), String> {
+    let norm = normalize_windows_path(&path);
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&norm)
+            .spawn()
+            .map_err(|e| format!("Не удалось открыть путь в проводнике: {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&norm)
+            .spawn()
+            .map_err(|e| format!("Не удалось открыть путь: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&norm)
+            .spawn()
+            .map_err(|e| format!("Не удалось открыть путь: {}", e))?;
+    }
+    Ok(())
+}
+

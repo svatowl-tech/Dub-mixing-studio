@@ -148,42 +148,51 @@ pub fn init_onnx_session(model_path: &Path) -> Result<(Session, String), String>
 
 /// Чтение сэмплов из WAV файла в нормализованный буфер f32 [-1.0, 1.0] с разделением по каналам
 pub fn read_wav_channels_f32(path: &Path) -> Result<(Vec<Vec<f32>>, WavSpec), String> {
-    let mut reader = WavReader::open(path)
-        .map_err(|e| format!("Не удалось открыть WAV файл {}: {}", path.display(), e))?;
-    let spec = reader.spec();
+    let (wav_path, is_temp) = crate::file_io::ensure_valid_wav_path(path)?;
+    let res = (|| -> Result<(Vec<Vec<f32>>, WavSpec), String> {
+        let mut reader = WavReader::open(&wav_path)
+            .map_err(|e| format!("Не удалось открыть WAV файл {}: {}", wav_path.display(), e))?;
+        let spec = reader.spec();
 
-    if spec.channels == 0 || spec.sample_rate == 0 {
-        return Err("Некорректный WAV: нулевое число каналов или нулевая частота дискретизации".to_string());
-    }
+        if spec.channels == 0 || spec.sample_rate == 0 {
+            return Err("Некорректный WAV: нулевое число каналов или нулевая частота дискретизации".to_string());
+        }
 
-    let channels = spec.channels as usize;
-    let mut channel_buffers: Vec<Vec<f32>> = vec![Vec::new(); channels];
+        let channels = spec.channels as usize;
+        let mut channel_buffers: Vec<Vec<f32>> = vec![Vec::new(); channels];
 
-    match spec.sample_format {
-        SampleFormat::Float => {
-            let mut ch = 0;
-            for s in reader.samples::<f32>() {
-                channel_buffers[ch].push(s.unwrap_or(0.0));
-                ch = (ch + 1) % channels;
+        match spec.sample_format {
+            SampleFormat::Float => {
+                let mut ch = 0;
+                for s in reader.samples::<f32>() {
+                    channel_buffers[ch].push(s.unwrap_or(0.0));
+                    ch = (ch + 1) % channels;
+                }
+            }
+            SampleFormat::Int => {
+                let scale = match spec.bits_per_sample {
+                    16 => 32768.0_f32,
+                    24 => 8388608.0_f32,
+                    32 => 2147483648.0_f32,
+                    8  => 128.0_f32,
+                    b => return Err(format!("Неподдерживаемая разрядность: {} бит", b)),
+                };
+                let mut ch = 0;
+                for s in reader.samples::<i32>() {
+                    channel_buffers[ch].push(s.unwrap_or(0) as f32 / scale);
+                    ch = (ch + 1) % channels;
+                }
             }
         }
-        SampleFormat::Int => {
-            let scale = match spec.bits_per_sample {
-                16 => 32768.0_f32,
-                24 => 8388608.0_f32,
-                32 => 2147483648.0_f32,
-                8  => 128.0_f32,
-                b => return Err(format!("Неподдерживаемая разрядность: {} бит", b)),
-            };
-            let mut ch = 0;
-            for s in reader.samples::<i32>() {
-                channel_buffers[ch].push(s.unwrap_or(0) as f32 / scale);
-                ch = (ch + 1) % channels;
-            }
-        }
+
+        Ok((channel_buffers, spec))
+    })();
+
+    if is_temp {
+        let _ = std::fs::remove_file(&wav_path);
     }
 
-    Ok((channel_buffers, spec))
+    res
 }
 
 /// Ресэмплинг многоканального аудиосигнала с помощью rubato::SincFixedIn

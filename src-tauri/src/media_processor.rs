@@ -831,3 +831,103 @@ pub async fn apply_audio_effect(
         }
     }
 }
+
+/// Универсальная обработка аудиоэффектов (SingleTrackStudio, EQ, Vocal DSP Chain, Normalization)
+#[tauri::command]
+pub async fn process_media_effect(
+    app_handle: AppHandle,
+    input_path: String,
+    output_path: String,
+    effect_type: String,
+    params: Option<serde_json::Value>,
+) -> Result<String, String> {
+    log_info(&format!(
+        "[process_media_effect] ▶ Тип: {}, Вход: {}, Выход: {}",
+        effect_type, input_path, output_path
+    ));
+
+    let in_norm = crate::file_io::normalize_windows_path(&input_path);
+    let out_norm = crate::file_io::normalize_windows_path(&output_path);
+
+    if effect_type == "normalize" || effect_type == "normalization" {
+        let target_lufs = params.as_ref()
+            .and_then(|p| p.get("targetLufs").or_else(|| p.get("target_lufs")))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(-16.0);
+
+        let in_buf = std::path::PathBuf::from(&in_norm);
+        let out_buf = std::path::PathBuf::from(&out_norm);
+        return tokio::task::spawn_blocking(move || {
+            crate::normalization::process_normalization(&in_buf, &out_buf, target_lufs)
+                .map(|s| s.output_path)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
+    let mut filters = Vec::new();
+
+    if effect_type == "vocal_dsp_chain" || effect_type == "eq_comp" {
+        let low_cut = params.as_ref()
+            .and_then(|p| p.get("lowCut").or_else(|| p.get("low_cut")))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(80.0);
+        let high_cut = params.as_ref()
+            .and_then(|p| p.get("highCut").or_else(|| p.get("high_cut")))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(18000.0);
+        let mid_gain_db = params.as_ref()
+            .and_then(|p| p.get("midGainDb").or_else(|| p.get("mid_gain_db")))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let comp_threshold = params.as_ref()
+            .and_then(|p| p.get("compThreshold").or_else(|| p.get("comp_threshold")))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(-18.0);
+        let comp_ratio = params.as_ref()
+            .and_then(|p| p.get("compRatio").or_else(|| p.get("comp_ratio")))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(3.0);
+
+        if low_cut > 15.0 {
+            filters.push(format!("highpass=f={}", low_cut));
+        }
+        if high_cut < 22000.0 {
+            filters.push(format!("lowpass=f={}", high_cut));
+        }
+        if mid_gain_db.abs() > 0.05 {
+            filters.push(format!("equalizer=f=3000:width_type=o:width=1.5:g={}", mid_gain_db));
+        }
+        if comp_ratio > 1.05 {
+            filters.push(format!("acompressor=threshold={}dB:ratio={}:attack=10:release=100:makeup=2", comp_threshold, comp_ratio));
+        }
+    }
+
+    let filter_str = filters.join(",");
+    let args = if filter_str.is_empty() {
+        vec![
+            "-y".to_string(),
+            "-i".to_string(), in_norm.clone(),
+            "-c:a".to_string(), "pcm_s16le".to_string(),
+            out_norm.clone(),
+        ]
+    } else {
+        vec![
+            "-y".to_string(),
+            "-i".to_string(), in_norm.clone(),
+            "-af".to_string(), filter_str,
+            out_norm.clone(),
+        ]
+    };
+
+    crate::media_processor::run_ffmpeg_with_progress(
+        app_handle,
+        args,
+        format!("Применение эффекта {}", effect_type),
+        None,
+    ).await?;
+
+    Ok(out_norm)
+}
+

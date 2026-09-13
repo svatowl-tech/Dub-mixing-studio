@@ -319,30 +319,39 @@ impl DeEsser {
 
 /// Чтение сэмплов из WAV файла в нормализованный буфер f32 [-1.0, 1.0] с чередованием каналов
 fn read_wav_interleaved_f32(path: &Path) -> Result<(Vec<f32>, WavSpec), String> {
-    let mut reader = WavReader::open(path)
-        .map_err(|e| format!("Не удалось открыть WAV файл {}: {}", path.display(), e))?;
-    let spec = reader.spec();
+    let (wav_path, is_temp) = crate::file_io::ensure_valid_wav_path(path)?;
+    let res = (|| -> Result<(Vec<f32>, WavSpec), String> {
+        let mut reader = WavReader::open(&wav_path)
+            .map_err(|e| format!("Не удалось открыть WAV файл {}: {}", wav_path.display(), e))?;
+        let spec = reader.spec();
 
-    if spec.channels == 0 || spec.sample_rate == 0 {
-        return Err("Некорректный WAV: число каналов или sample rate равен нулю".to_string());
+        if spec.channels == 0 || spec.sample_rate == 0 {
+            return Err("Некорректный WAV: число каналов или sample rate равен нулю".to_string());
+        }
+
+        let samples: Vec<f32> = match spec.sample_format {
+            SampleFormat::Float => {
+                reader.samples::<f32>().map(|s| s.unwrap_or(0.0)).collect()
+            }
+            SampleFormat::Int => {
+                match spec.bits_per_sample {
+                    16 => reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / 32768.0).collect(),
+                    24 => reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 8388608.0).collect(),
+                    32 => reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 2147483648.0).collect(),
+                    8  => reader.samples::<i8>().map(|s| s.unwrap_or(0) as f32 / 128.0).collect(),
+                    b => return Err(format!("Неподдерживаемая разрядность: {} бит", b)),
+                }
+            }
+        };
+
+        Ok((samples, spec))
+    })();
+
+    if is_temp {
+        let _ = std::fs::remove_file(&wav_path);
     }
 
-    let samples: Vec<f32> = match spec.sample_format {
-        SampleFormat::Float => {
-            reader.samples::<f32>().map(|s| s.unwrap_or(0.0)).collect()
-        }
-        SampleFormat::Int => {
-            match spec.bits_per_sample {
-                16 => reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / 32768.0).collect(),
-                24 => reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 8388608.0).collect(),
-                32 => reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 2147483648.0).collect(),
-                8  => reader.samples::<i8>().map(|s| s.unwrap_or(0) as f32 / 128.0).collect(),
-                b => return Err(format!("Неподдерживаемая разрядность: {} бит", b)),
-            }
-        }
-    };
-
-    Ok((samples, spec))
+    res
 }
 
 /// Выполняет синхронную обработку WAV файла деэссером

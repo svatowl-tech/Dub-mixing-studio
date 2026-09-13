@@ -95,7 +95,8 @@ pub fn process_normalization(
     }
 
     // 1. Open reader and extract format specification
-    let mut reader = WavReader::open(input_path)?;
+    let (wav_path, is_temp) = crate::file_io::ensure_valid_wav_path(input_path).map_err(|e| AudioError::InvalidData(e))?;
+    let mut reader = WavReader::open(&wav_path)?;
     let spec = reader.spec();
 
     if spec.channels == 0 || spec.sample_rate == 0 {
@@ -297,7 +298,7 @@ pub fn process_normalization(
     }
     writer.finalize()?;
 
-    Ok(NormalizationStats {
+    let res_stats = NormalizationStats {
         initial_lufs: (initial_lufs * 10.0).round() / 10.0,
         final_lufs: (final_lufs * 10.0).round() / 10.0,
         initial_true_peak_db: (initial_true_peak_db * 10.0).round() / 10.0,
@@ -308,7 +309,13 @@ pub fn process_normalization(
         channels: channels as u16,
         duration_sec: (duration_sec * 100.0).round() / 100.0,
         output_path: output_path.to_string_lossy().to_string(),
-    })
+    };
+
+    if is_temp {
+        let _ = std::fs::remove_file(&wav_path);
+    }
+
+    Ok(res_stats)
 }
 
 /// Tauri command exposing the normalization & upward compression module to frontend.
