@@ -41,31 +41,59 @@ pub struct SeparationProgressPayload {
     pub log_line: String,
 }
 
-/// Поиск каталога с локально вшитыми или скачанными моделями UVR
+/// Поиск и создание каталога для моделей UVR
+/// Для скачивания и записи моделей ВСЕГДА используется доступный на запись каталог (app_data_dir/models),
+/// чтобы избежать ошибки `PermissionError: [Errno 13] Permission denied: C:\Program Files\...`.
 pub fn find_models_dir(app_handle: &AppHandle) -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut readonly_candidates: Vec<PathBuf> = Vec::new();
+
     if let Ok(res_dir) = app_handle.path().resource_dir() {
-        candidates.push(res_dir.join("models"));
-        candidates.push(res_dir.join("resources").join("models"));
-        candidates.push(res_dir.join("ai_env").join("models"));
+        readonly_candidates.push(res_dir.join("models"));
+        readonly_candidates.push(res_dir.join("resources").join("models"));
+        readonly_candidates.push(res_dir.join("ai_env").join("models"));
     }
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            candidates.push(exe_dir.join("models"));
-            candidates.push(exe_dir.join("resources").join("models"));
-            candidates.push(exe_dir.join("ai_env").join("models"));
+            readonly_candidates.push(exe_dir.join("models"));
+            readonly_candidates.push(exe_dir.join("resources").join("models"));
+            readonly_candidates.push(exe_dir.join("ai_env").join("models"));
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("models"));
-        candidates.push(cwd.join("resources").join("models"));
-        candidates.push(cwd.join("src-tauri").join("models"));
-        candidates.push(cwd.join("src-tauri").join("resources").join("models"));
+        readonly_candidates.push(cwd.join("models"));
+        readonly_candidates.push(cwd.join("resources").join("models"));
+        readonly_candidates.push(cwd.join("src-tauri").join("models"));
+        readonly_candidates.push(cwd.join("src-tauri").join("resources").join("models"));
     }
+
     if let Ok(data_dir) = app_handle.path().app_data_dir() {
-        candidates.push(data_dir.join("models"));
+        let writable_models_dir = data_dir.join("models");
+        let _ = std::fs::create_dir_all(&writable_models_dir);
+
+        if writable_models_dir.is_dir() {
+            for src_dir in readonly_candidates {
+                if src_dir.is_dir() && src_dir != writable_models_dir {
+                    if let Ok(entries) = std::fs::read_dir(&src_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_file() {
+                                if let Some(file_name) = path.file_name() {
+                                    let dest_path = writable_models_dir.join(file_name);
+                                    if !dest_path.exists() {
+                                        println!("[MODELS] Копирование вшитой модели {:?} -> {:?}", path, dest_path);
+                                        let _ = std::fs::copy(&path, &dest_path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return Some(writable_models_dir);
+        }
     }
-    candidates.into_iter().find(|p| p.is_dir())
+
+    readonly_candidates.into_iter().find(|p| p.is_dir())
 }
 
 /// Поиск встроенного интерпретатора Python (`bin/python` в каталоге приложения)
