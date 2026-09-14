@@ -355,13 +355,11 @@ export const useAudioEngine = (
           source.connect(gainNode);
       }
 
-      // More aggressive fade-in (300ms) to hide hardware surges and AGC settling
-      // We start at true zero and ramp up
+      // Fade-in to smoothly ramp in
       gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
       gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.05); // Initial silence
       gainNode.gain.linearRampToValueAtTime(1, audioCtx.currentTime + 0.3); // Smooth ramp
       
-      source.connect(gainNode);
       gainNode.connect(destination);
       
       const processedAudioTrack = destination.stream.getAudioTracks()[0];

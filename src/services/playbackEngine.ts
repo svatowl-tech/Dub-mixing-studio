@@ -2,6 +2,40 @@ import { getSafeFileUrl } from '../lib/utils';
 import { VSTAudioWorkletNode } from '../lib/vstHost';
 import { IOLogger } from '../lib/ioLogger';
 
+async function callTauri(cmd: string, args?: Record<string, any>): Promise<any> {
+  if (typeof window === 'undefined') return null;
+  const isTauri = Boolean((window as any).__TAURI_INTERNALS__);
+  if (!isTauri) return null;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke(cmd, args);
+  } catch (err) {
+    console.warn(`[PlaybackEngine] Tauri invoke ${cmd} error:`, err);
+    return null;
+  }
+}
+
+function formatNativeTracks(tracks: any[]) {
+  return tracks.map(t => ({
+    id: String(t.id),
+    name: String(t.name || ''),
+    volume: typeof t.volume === 'number' ? t.volume : 1.0,
+    isMuted: Boolean(t.isMuted),
+    isSolo: Boolean(t.isSolo),
+    segments: (t.segments || [])
+      .filter((s: any) => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:'))
+      .map((s: any) => ({
+        id: String(s.id),
+        filePath: String(s.filePath),
+        startTime: Number(s.startTime || 0),
+        duration: Number(s.duration || 0),
+        fileOffset: Number(s.fileOffset || 0),
+        gain: typeof s.gain === 'number' ? s.gain : 1.0,
+        panning: typeof s.panning === 'number' ? s.panning : 0.0,
+      }))
+  }));
+}
+
 function makeDistortionCurve(amount: number): Float32Array {
   const k = typeof amount === 'number' ? amount : 50;
   const n_samples = 44100;
@@ -86,6 +120,7 @@ export class PlaybackEngine {
   private currentTracks: any[] = [];
   private playOriginalTrackSegments = false;
   private workletInitialized = false;
+  private isNativePlaying = false;
   private playingMetadata: Map<string, {
     videoStartTime: number;
     ctxStartTime: number;
@@ -104,6 +139,15 @@ export class PlaybackEngine {
     inputNode: AudioNode,
     destinationNode: AudioNode
   ) {
+    if (!processing || !processing.enabled) {
+      inputNode.connect(destinationNode);
+      return {
+        cleanup: () => {
+          try { inputNode.disconnect(); } catch (e) {}
+        }
+      };
+    }
+
     let activeInput = inputNode;
     let gateNode: DynamicsCompressorNode | undefined;
     let deesserNode: BiquadFilterNode | undefined;
@@ -121,16 +165,9 @@ export class PlaybackEngine {
     const vstChains: Array<any> = [];
 
     // --- 1. Noise gate ---
-    if (processing.noiseGate?.enabled) {
-      gateNode = ctx.createDynamicsCompressor();
-      gateNode.threshold.value = processing.noiseGate.threshold ?? -45;
-      gateNode.ratio.value = 12;
-      gateNode.knee.value = 0;
-      gateNode.attack.value = 0.002;
-      gateNode.release.value = 0.100;
-      activeInput.connect(gateNode);
-      activeInput = gateNode;
-    }
+    // Note: Do NOT use a downward compressor as a noise gate. Downward compressors
+    // boost quiet signals with makeup gain and squash dynamic range. A noise gate
+    // in Web Audio without worklet is bypassed cleanly to avoid severe noise floor pumping.
 
     // --- 2. De-esser ---
     if (processing.deesser?.enabled) {
@@ -408,8 +445,41 @@ export class PlaybackEngine {
     } else {
       this.bufferCache.clear();
       this.pendingBuffers.clear();
+      callTauri('clear_native_playback_cache').catch(() => {});
     }
     console.log("[PlaybackEngine] Cache cleared", targetUrlOrPath || 'ALL');
+  }
+
+  /**
+   * Proactively preloads and decodes audio buffers for all project tracks into memory
+   * so playback starts instantly with 0ms buffering latency.
+   */
+  public async preloadProjectBuffers(tracks: any[]): Promise<void> {
+    const filePaths: string[] = [];
+    const urlsToPreload: { url: string; filePath?: string }[] = [];
+
+    for (const track of tracks) {
+      for (const seg of (track.segments || [])) {
+        if (seg.filePath && !seg.filePath.startsWith('blob:') && !seg.filePath.startsWith('data:')) {
+          filePaths.push(seg.filePath);
+        }
+        const u = (seg as any).url || seg.blobUrl || (seg.filePath ? getSafeFileUrl(seg.filePath) : null);
+        if (u) {
+          urlsToPreload.push({ url: u, filePath: seg.filePath });
+        }
+      }
+    }
+
+    if (filePaths.length > 0) {
+      callTauri('preload_playback_buffers', { filePaths: Array.from(new Set(filePaths)) }).catch(console.warn);
+    }
+
+    // Preload in batches of 8 to avoid clogging the network/disk
+    const chunkSize = 8;
+    for (let i = 0; i < urlsToPreload.length; i += chunkSize) {
+      const chunk = urlsToPreload.slice(i, i + chunkSize);
+      await Promise.allSettled(chunk.map(item => this.loadBuffer(item.url, item.filePath)));
+    }
   }
 
   public async bindVideoElement(video: HTMLMediaElement) {
@@ -548,21 +618,6 @@ export class PlaybackEngine {
         let audioBuffer = await ctx.decodeAudioData(arrayBuffer);
         IOLogger.log('MEDIA', 'loadBuffer', 'SUCCESS', { url, duration: audioBuffer.duration, channels: audioBuffer.numberOfChannels });
         
-        // Manual resampling if decodeAudioData didn't match (though it usually does)
-        if (audioBuffer.sampleRate !== ctx.sampleRate) {
-          console.warn(`[PlaybackEngine] Resampling buffer from ${audioBuffer.sampleRate} to ${ctx.sampleRate}`);
-          const offlineCtx = new OfflineAudioContext(
-            audioBuffer.numberOfChannels,
-            Math.max(1, Math.ceil(audioBuffer.duration * ctx.sampleRate)),
-            ctx.sampleRate
-          );
-          const source = offlineCtx.createBufferSource();
-          source.buffer = audioBuffer;
-          source.connect(offlineCtx.destination);
-          source.start(0);
-          audioBuffer = await offlineCtx.startRendering();
-        }
-        
         this.bufferCache.set(url, audioBuffer);
         return audioBuffer;
       } catch (e) {
@@ -590,6 +645,19 @@ export class PlaybackEngine {
     this.startVideoTime = currentTime;
     this.scheduledSegments.clear();
     this.currentTracks = tracks;
+
+    // Start Native Rust Playback when running in Tauri desktop environment
+    if (typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__)) {
+      const nativeTracks = formatNativeTracks(tracks);
+      const hasDiskSegments = nativeTracks.some(t => t.segments.length > 0);
+      if (hasDiskSegments) {
+        this.isNativePlaying = true;
+        callTauri('start_native_playback', { tracks: nativeTracks, startTime: currentTime }).catch(err => {
+          console.warn("[PlaybackEngine] Native playback failed:", err);
+          this.isNativePlaying = false;
+        });
+      }
+    }
     
     // Log context latency for debugging sync issues
     const outputLatency = (ctx as any).outputLatency || 0;
@@ -902,24 +970,13 @@ export class PlaybackEngine {
             gainNode.gain.linearRampToValueAtTime(baseVolume, when + FADE_TIME);
 
             source.connect(gainNode);
-            
-            let currentMonoNode: GainNode | undefined;
-            const lowerTrackName = track.name?.toLowerCase() || '';
-            if (lowerTrackName.includes('озвучк') || lowerTrackName.includes('dub') || buffer.numberOfChannels === 1) {
-              const monoNode = ctx.createGain();
-              monoNode.channelCount = 1;
-              monoNode.channelCountMode = 'explicit';
-              source.disconnect(gainNode);
-              source.connect(monoNode);
-              monoNode.connect(gainNode);
-              currentMonoNode = monoNode;
-            }
 
             const pannerNode = ctx.createStereoPanner();
             pannerNode.pan.setValueAtTime(seg.panning !== undefined ? seg.panning : 0.0, when);
             this.pannerNodes.set(seg.id, pannerNode);
             gainNode.connect(pannerNode);
 
+            const lowerTrackName = (track.name || '').toLowerCase();
             const isOriginalOrRefTrack = lowerTrackName.includes('оригинал') || lowerTrackName.includes('original') || track.id === 'reference-track' || lowerTrackName.includes('reference');
             const destNode = isOriginalOrRefTrack 
               ? (this.videoGain || ctx.destination) 
@@ -949,7 +1006,6 @@ export class PlaybackEngine {
               basePlaybackRate: baseRate,
               seg,
               track,
-              monoNode: currentMonoNode
             });
           });
         }
@@ -962,6 +1018,11 @@ export class PlaybackEngine {
     this.currentSessionId = Date.now();
     this.scheduledSegments.clear();
     this.currentTracks = [];
+
+    if (this.isNativePlaying) {
+      this.isNativePlaying = false;
+      callTauri('stop_native_playback').catch(() => {});
+    }
     
     this.sources.forEach((source, segId) => {
       try {
@@ -1043,6 +1104,15 @@ export class PlaybackEngine {
     if (wasPlaying) {
       this.isPlaying = true;
       this.currentSessionId = Date.now();
+      if (typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__)) {
+        const nativeTracks = formatNativeTracks(tracks);
+        if (nativeTracks.some(t => t.segments.length > 0)) {
+          this.isNativePlaying = true;
+          callTauri('start_native_playback', { tracks: nativeTracks, startTime: currentTime }).catch(() => {});
+        }
+      }
+    } else if (this.isNativePlaying) {
+      callTauri('seek_native_playback', { time: currentTime }).catch(() => {});
     }
     
     this.currentTracks = tracks;
@@ -1051,6 +1121,12 @@ export class PlaybackEngine {
 
   public async updateTracks(tracks: any[]) {
     this.currentTracks = tracks;
+
+    if (this.isNativePlaying) {
+      const nativeTracks = formatNativeTracks(tracks);
+      callTauri('update_native_playback_tracks', { tracks: nativeTracks }).catch(() => {});
+    }
+
     if (!this.isPlaying) return;
 
     const ctx = await this.getContext();

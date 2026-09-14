@@ -7,7 +7,7 @@ import { FinalRenderService } from './finalRenderService';
 import { PlaybackEngine } from './playbackEngine';
 import { AudioSeparatorService } from './audioSeparatorService';
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import { invalidateFileUrl } from '../lib/utils';
+import { invalidateFileUrl, createPrefixedAudioPath } from '../lib/utils';
 
 export interface ExecuteStepParams {
   stepId: string;
@@ -173,14 +173,22 @@ export class PipelineExecutionService {
                   const inputPath = seg.filePath;
                   if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
                     try {
+                      const outPath = createPrefixedAudioPath('norm', inputPath);
                       const stats = await invoke<NormalizationStats>('normalize_audio', {
                         inputPath,
-                        outputPath: inputPath,
+                        outputPath: outPath,
                         targetLufs,
                       });
                       if (stats) {
                         lastNativeNorm = stats;
                         processedTracksCount++;
+                      }
+                      seg.filePath = outPath;
+                      invalidateFileUrl(inputPath);
+                      invalidateFileUrl(outPath);
+                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                        (window as any).webFileCache.delete(inputPath);
+                        (window as any).webFileCache.delete(outPath);
                       }
                     } catch (e) {
                       lastNativeError = String(e);
@@ -272,11 +280,19 @@ export class PipelineExecutionService {
                   const inputPath = seg.filePath;
                   if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
                     try {
+                      const outPath = createPrefixedAudioPath('eq', inputPath);
                       await invoke('match_eq_profile', {
                         inputPath,
-                        outputPath: inputPath,
+                        outputPath: outPath,
                         profileName: profileParam,
                       });
+                      seg.filePath = outPath;
+                      invalidateFileUrl(inputPath);
+                      invalidateFileUrl(outPath);
+                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                        (window as any).webFileCache.delete(inputPath);
+                        (window as any).webFileCache.delete(outPath);
+                      }
                       nativeSuccessCount++;
                     } catch (e) {
                       lastNativeError = String(e);
@@ -361,15 +377,23 @@ export class PipelineExecutionService {
                   const inputPath = seg.filePath;
                   if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
                     try {
+                      const outPath = createPrefixedAudioPath('declick', inputPath);
                       const rep = await invoke<DeclickReport>('clean_clicks', {
                         inputWav: inputPath,
-                        outputWav: inputPath,
+                        outputWav: outPath,
                         sensitivity,
                       });
                       if (rep) {
                         nativeClicksCount += rep.clicksDetected;
                         nativeSamplesRestored += rep.samplesRestored;
                         processedTracksCount++;
+                      }
+                      seg.filePath = outPath;
+                      invalidateFileUrl(inputPath);
+                      invalidateFileUrl(outPath);
+                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                        (window as any).webFileCache.delete(inputPath);
+                        (window as any).webFileCache.delete(outPath);
                       }
                     } catch (e) {
                       lastNativeError = String(e);
@@ -454,9 +478,10 @@ export class PipelineExecutionService {
                   const inputPath = seg.filePath;
                   if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
                     try {
+                      const outPath = createPrefixedAudioPath('deplosive', inputPath);
                       const rep = await invoke<DeplosiveReport>('apply_deplosive', {
                         filePath: inputPath,
-                        outPath: inputPath,
+                        outPath: outPath,
                         thresholdDb,
                       });
                       if (rep) {
@@ -465,6 +490,13 @@ export class PipelineExecutionService {
                           maxReductionDb = rep.maxReductionDb;
                         }
                         processedTracksCount++;
+                      }
+                      seg.filePath = outPath;
+                      invalidateFileUrl(inputPath);
+                      invalidateFileUrl(outPath);
+                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                        (window as any).webFileCache.delete(inputPath);
+                        (window as any).webFileCache.delete(outPath);
                       }
                     } catch (e) {
                       lastNativeError = String(e);
@@ -552,9 +584,10 @@ export class PipelineExecutionService {
                   const inputPath = seg.filePath;
                   if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
                     try {
+                      const outPath = createPrefixedAudioPath('deesser', inputPath);
                       const rep = await invoke<DeEsserReport>('process_deesser', {
                         inputPath,
-                        outputPath: inputPath,
+                        outputPath: outPath,
                         frequency,
                         threshold,
                         ratio,
@@ -565,6 +598,13 @@ export class PipelineExecutionService {
                           maxReductionDb = rep.maxReductionDb;
                         }
                         processedTracksCount++;
+                      }
+                      seg.filePath = outPath;
+                      invalidateFileUrl(inputPath);
+                      invalidateFileUrl(outPath);
+                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                        (window as any).webFileCache.delete(inputPath);
+                        (window as any).webFileCache.delete(outPath);
                       }
                     } catch (e) {
                       lastNativeError = String(e);
@@ -651,10 +691,11 @@ export class PipelineExecutionService {
                   const inputPath = seg.filePath;
                   if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
                     try {
-                      console.log(`[Pipeline] → Запуск process_denoise для: ${inputPath}`);
+                      const outPath = createPrefixedAudioPath('denoise', inputPath);
+                      console.log(`[Pipeline] → Запуск process_denoise для: ${inputPath} -> ${outPath}`);
                       const rep = await invoke<DenoiseReport>('process_denoise', {
                         inputPath,
-                        outputPath: inputPath,
+                        outputPath: outPath,
                         modelName: activePreset.phase1.denoise.model || 'UVR-DeNoise',
                         strength: activePreset.phase1.denoise.strength,
                       });
@@ -663,11 +704,16 @@ export class PipelineExecutionService {
                         processedTracksCount++;
                         console.log(`[Pipeline] ✓ Шумоподавление завершено:`, rep);
                       }
+                      seg.filePath = outPath;
                       invalidateFileUrl(inputPath);
+                      invalidateFileUrl(outPath);
                       if (typeof window !== 'undefined' && (window as any).webFileCache) {
                         (window as any).webFileCache.delete(inputPath);
-                        const basename = inputPath.split(/[/\\]/).pop();
-                        if (basename) (window as any).webFileCache.delete(basename);
+                        (window as any).webFileCache.delete(outPath);
+                        const basenameIn = inputPath.split(/[/\\]/).pop();
+                        const basenameOut = outPath.split(/[/\\]/).pop();
+                        if (basenameIn) (window as any).webFileCache.delete(basenameIn);
+                        if (basenameOut) (window as any).webFileCache.delete(basenameOut);
                       }
                     } catch (e) {
                       lastNativeError = String(e);
@@ -771,10 +817,11 @@ export class PipelineExecutionService {
                   const inputPath = seg.filePath;
                   if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
                     try {
-                      console.log(`[Pipeline] → Запуск process_uvr_dereverb для: ${inputPath}`);
+                      const outPath = createPrefixedAudioPath('dereverb', inputPath);
+                      console.log(`[Pipeline] → Запуск process_uvr_dereverb для: ${inputPath} -> ${outPath}`);
                       const rep = await invoke<DereverbResult>('process_uvr_dereverb', {
                         inputPath,
-                        outputPath: inputPath,
+                        outputPath: outPath,
                         modelName: activePreset.phase1.dereverb.model || 'rt_dereverb_v2',
                         reverbTailExportPath: null,
                         strength: (activePreset.phase1.dereverb.strength || 85) / 100.0,
@@ -784,11 +831,16 @@ export class PipelineExecutionService {
                         processedTracksCount++;
                         console.log(`[Pipeline] ✓ Подавление реверберации завершено:`, rep);
                       }
+                      seg.filePath = outPath;
                       invalidateFileUrl(inputPath);
+                      invalidateFileUrl(outPath);
                       if (typeof window !== 'undefined' && (window as any).webFileCache) {
                         (window as any).webFileCache.delete(inputPath);
-                        const basename = inputPath.split(/[/\\]/).pop();
-                        if (basename) (window as any).webFileCache.delete(basename);
+                        (window as any).webFileCache.delete(outPath);
+                        const basenameIn = inputPath.split(/[/\\]/).pop();
+                        const basenameOut = outPath.split(/[/\\]/).pop();
+                        if (basenameIn) (window as any).webFileCache.delete(basenameIn);
+                        if (basenameOut) (window as any).webFileCache.delete(basenameOut);
                       }
                     } catch (e) {
                       lastNativeError = String(e);
@@ -888,9 +940,10 @@ export class PipelineExecutionService {
                   const inputPath = seg.filePath;
                   if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
                     try {
+                      const outPath = createPrefixedAudioPath('leveler', inputPath);
                       const rep = await invoke<VolumeLevelerReport>('level_speech_volume', {
                         inputPath,
-                        outputPath: inputPath,
+                        outputPath: outPath,
                         targetRms: activePreset.phase1.volumeLeveler.targetRms || -19.0,
                         gateThresholdDb: -50.0,
                         maxBoostDb: 12.0,
@@ -899,6 +952,17 @@ export class PipelineExecutionService {
                       if (rep) {
                         lastNativeReport = rep;
                         processedTracksCount++;
+                      }
+                      seg.filePath = outPath;
+                      invalidateFileUrl(inputPath);
+                      invalidateFileUrl(outPath);
+                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                        (window as any).webFileCache.delete(inputPath);
+                        (window as any).webFileCache.delete(outPath);
+                        const basenameIn = inputPath.split(/[/\\]/).pop();
+                        const basenameOut = outPath.split(/[/\\]/).pop();
+                        if (basenameIn) (window as any).webFileCache.delete(basenameIn);
+                        if (basenameOut) (window as any).webFileCache.delete(basenameOut);
                       }
                     } catch (e) {
                       lastNativeError = String(e);

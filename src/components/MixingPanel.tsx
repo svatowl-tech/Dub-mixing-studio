@@ -75,7 +75,7 @@ import {
   DEFAULT_PHASE3_ORDER,
   DEFAULT_PHASE4_ORDER
 } from '../lib/defaultPresets';
-import { cn, getGlobalAudioSettings, invalidateFileUrl } from '../lib/utils';
+import { cn, getGlobalAudioSettings, invalidateFileUrl, createPrefixedAudioPath } from '../lib/utils';
 import { AudioSeparatorService } from '../services/audioSeparatorService';
 import { TimingAlignmentService } from '../services/timingAlignmentService';
 import { MixingService } from '../services/mixingService';
@@ -2550,79 +2550,89 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                 const inPath = seg.filePath;
                 if (inPath && !inPath.startsWith('blob:') && !inPath.startsWith('data:')) {
                   try {
+                    let outPath = inPath;
                     if (stepId === 'normalization') {
+                      outPath = createPrefixedAudioPath('norm', inPath);
                       await invoke('normalize_audio', {
                         inputPath: inPath,
-                        outputPath: inPath,
+                        outputPath: outPath,
                         targetLufs: activePreset.phase1.normalization.targetLufs || -16.0,
                       });
                     } else if (stepId === 'eqMatching') {
+                      outPath = createPrefixedAudioPath('eq', inPath);
                       const profileModel = activePreset.phase1.eqMatching.profileModel || 'vocal_presence';
                       const targetPath = activePreset.phase1.eqMatching.targetProfilePath;
                       await invoke('match_eq_profile', {
                         inputPath: inPath,
-                        outputPath: inPath,
+                        outputPath: outPath,
                         profileName: (profileModel === 'reference_match' && targetPath) ? targetPath : profileModel,
                       });
                     } else if (stepId === 'deClick') {
+                      outPath = createPrefixedAudioPath('declick', inPath);
                       await invoke('clean_clicks', {
                         inputWav: inPath,
-                        outputWav: inPath,
+                        outputWav: outPath,
                         sensitivity: activePreset.phase1.deClick.sensitivity ?? 75,
                       });
                     } else if (stepId === 'dePlosive') {
+                      outPath = createPrefixedAudioPath('deplosive', inPath);
                       await invoke('apply_deplosive', {
                         filePath: inPath,
-                        outPath: inPath,
+                        outPath: outPath,
                         thresholdDb: activePreset.phase1.dePlosive.threshold ?? -24,
                       });
                     } else if (stepId === 'deEsser') {
+                      outPath = createPrefixedAudioPath('deesser', inPath);
                       await invoke('process_deesser', {
                         inputPath: inPath,
-                        outputPath: inPath,
+                        outputPath: outPath,
                         frequency: activePreset.phase1.deEsser.frequency ?? 6500,
                         threshold: activePreset.phase1.deEsser.threshold ?? -20,
                         ratio: activePreset.phase1.deEsser.ratio ?? 4.0,
                       });
                     } else if (stepId === 'denoise') {
-                      console.log(`[MixingPanel Pipeline] Запуск Denoise для ${inPath} (модель: ${activePreset.phase1.denoise.model}, сила: ${activePreset.phase1.denoise.strength}%)`);
+                      outPath = createPrefixedAudioPath('denoise', inPath);
+                      console.log(`[MixingPanel Pipeline] Запуск Denoise для ${inPath} -> ${outPath} (модель: ${activePreset.phase1.denoise.model}, сила: ${activePreset.phase1.denoise.strength}%)`);
                       await invoke('process_denoise', {
                         inputPath: inPath,
-                        outputPath: inPath,
+                        outputPath: outPath,
                         modelName: activePreset.phase1.denoise.model || 'UVR-DeNoise',
                         strength: activePreset.phase1.denoise.strength,
                       });
-                      invalidateFileUrl(inPath);
-                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
-                        (window as any).webFileCache.delete(inPath);
-                      }
                     } else if (stepId === 'dereverb') {
-                      console.log(`[MixingPanel Pipeline] Запуск De-Reverb для ${inPath} (модель: ${activePreset.phase1.dereverb.model}, сила: ${activePreset.phase1.dereverb.strength}%)`);
+                      outPath = createPrefixedAudioPath('dereverb', inPath);
+                      console.log(`[MixingPanel Pipeline] Запуск De-Reverb для ${inPath} -> ${outPath} (модель: ${activePreset.phase1.dereverb.model}, сила: ${activePreset.phase1.dereverb.strength}%)`);
                       await invoke('process_uvr_dereverb', {
                         inputPath: inPath,
-                        outputPath: inPath,
+                        outputPath: outPath,
                         modelName: activePreset.phase1.dereverb.model || 'rt_dereverb_v2',
                         reverbTailExportPath: null,
                         strength: (activePreset.phase1.dereverb.strength || 85) / 100.0,
                       });
-                      invalidateFileUrl(inPath);
-                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
-                        (window as any).webFileCache.delete(inPath);
-                      }
                     } else if (stepId === 'volumeLeveler') {
-                      console.log(`[MixingPanel Pipeline] Запуск Volume Leveler для ${inPath}`);
+                      outPath = createPrefixedAudioPath('leveler', inPath);
+                      console.log(`[MixingPanel Pipeline] Запуск Volume Leveler для ${inPath} -> ${outPath}`);
                       await invoke('level_speech_volume', {
                         inputPath: inPath,
-                        outputPath: inPath,
+                        outputPath: outPath,
                         targetRms: activePreset.phase1.volumeLeveler.targetRms || -19.0,
                         gateThresholdDb: -50.0,
                         maxBoostDb: 12.0,
                         maxAttenuationDb: 15.0,
                       });
-                      invalidateFileUrl(inPath);
-                      if (typeof window !== 'undefined' && (window as any).webFileCache) {
-                        (window as any).webFileCache.delete(inPath);
-                      }
+                    }
+
+                    // Update segment file path to the newly generated prefixed file
+                    seg.filePath = outPath;
+                    invalidateFileUrl(inPath);
+                    invalidateFileUrl(outPath);
+                    if (typeof window !== 'undefined' && (window as any).webFileCache) {
+                      (window as any).webFileCache.delete(inPath);
+                      (window as any).webFileCache.delete(outPath);
+                      const baseIn = inPath.split(/[/\\]/).pop();
+                      const baseOut = outPath.split(/[/\\]/).pop();
+                      if (baseIn) (window as any).webFileCache.delete(baseIn);
+                      if (baseOut) (window as any).webFileCache.delete(baseOut);
                     }
                   } catch (dspErr) {
                     console.error(`[MixingPanel Pipeline] ❌ Step ${stepId} error on ${inPath}:`, dspErr);

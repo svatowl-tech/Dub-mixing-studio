@@ -85,7 +85,14 @@
           "process_media_effect",
           "process_vad_split",
           "move_project_folder",
-          "open_path"
+          "open_path",
+          "preload_playback_buffers",
+          "start_native_playback",
+          "stop_native_playback",
+          "seek_native_playback",
+          "update_native_playback_tracks",
+          "get_native_playback_position",
+          "clear_native_playback_cache"
         ],
         "deny": []
       }

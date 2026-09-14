@@ -233,11 +233,10 @@ export const BatchImportModal = () => {
           isArmed: false,
           segments: [segment],
           processing: {
-            enabled: af.isDenoised,
-            denoise: af.isDenoised ? { enabled: true, strength: 75, model: 'cascade_net' } : undefined,
-            lufsNormalize: { enabled: true, target: -16 },
-            noiseGate: { enabled: true, threshold: -45 },
-            compressor: { enabled: true, threshold: -20, ratio: 4 }
+            enabled: false,
+            lufsNormalize: { enabled: false, target: -16 },
+            noiseGate: { enabled: false, threshold: -45 },
+            compressor: { enabled: false, threshold: -20, ratio: 4 }
           }
         });
         

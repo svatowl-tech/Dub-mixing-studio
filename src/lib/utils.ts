@@ -190,3 +190,21 @@ export const getAbsoluteFilePath = (filePath: string | undefined | null, project
   return `${normProjectPath}/${cleanPath}`.replace(/\\/g, '/');
 };
 
+/**
+ * Generates a sequentially prefixed audio file path for DSP effect processing.
+ * e.g., "denoise" + "C:/proj/audio.wav" -> "C:/proj/denoise_audio.wav"
+ * In chains: "dereverb" + "C:/proj/denoise_audio.wav" -> "C:/proj/dereverb_denoise_audio.wav"
+ */
+export const createPrefixedAudioPath = (prefix: string, fullPath: string): string => {
+  if (!fullPath) return fullPath;
+  const normalized = fullPath.replace(/\\/g, '/');
+  const lastSlash = normalized.lastIndexOf('/');
+  const dir = lastSlash !== -1 ? normalized.substring(0, lastSlash) : '';
+  const fileWithExt = lastSlash !== -1 ? normalized.substring(lastSlash + 1) : normalized;
+
+  // Clean prefix: lowercase alphanumeric and underscore
+  const cleanPrefix = prefix.toLowerCase().replace(/[^a-z0-9_]/g, '');
+  const newFileName = `${cleanPrefix}_${fileWithExt}`;
+  return dir ? `${dir}/${newFileName}` : newFileName;
+};
+

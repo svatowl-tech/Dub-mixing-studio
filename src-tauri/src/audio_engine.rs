@@ -88,6 +88,350 @@ impl Default for AudioRecorder {
 // Global state for Tauri
 pub struct AudioState {
     pub recorder: Mutex<AudioRecorder>,
+    pub player: Mutex<NativeAudioPlayer>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct NativePlaybackSegment {
+    pub id: String,
+    #[serde(rename = "filePath")]
+    pub file_path: String,
+    #[serde(rename = "startTime")]
+    pub start_time: f64,
+    pub duration: f64,
+    #[serde(rename = "fileOffset", default)]
+    pub file_offset: f64,
+    #[serde(default = "default_gain")]
+    pub gain: f32,
+    #[serde(default)]
+    pub panning: f32,
+}
+
+fn default_gain() -> f32 {
+    1.0
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct NativePlaybackTrack {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_gain")]
+    pub volume: f32,
+    #[serde(rename = "isMuted", default)]
+    pub is_muted: bool,
+    #[serde(rename = "isSolo", default)]
+    pub is_solo: bool,
+    pub segments: Vec<NativePlaybackSegment>,
+}
+
+#[derive(Clone)]
+pub struct CachedAudioFile {
+    pub samples: Vec<f32>,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub duration: f64,
+}
+
+impl CachedAudioFile {
+    pub fn load_from_path(path_str: &str) -> Result<Self, String> {
+        let path = std::path::Path::new(path_str);
+        if !path.exists() {
+            return Err(format!("Audio file does not exist: {}", path_str));
+        }
+
+        let mut reader = hound::WavReader::open(path)
+            .map_err(|e| format!("Failed to read WAV {}: {}", path_str, e))?;
+        let spec = reader.spec();
+        let channels = spec.channels;
+        let sample_rate = spec.sample_rate;
+
+        let samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Float => {
+                reader.samples::<f32>().map(|s| s.unwrap_or(0.0)).collect()
+            }
+            hound::SampleFormat::Int => {
+                let bits = spec.bits_per_sample;
+                if bits <= 16 {
+                    let max_val = 32768.0f32;
+                    reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / max_val).collect()
+                } else if bits <= 24 {
+                    let max_val = 8388608.0f32;
+                    reader.samples::<i32>().map(|s| (s.unwrap_or(0) >> 8) as f32 / max_val).collect()
+                } else {
+                    let max_val = 2147483648.0f32;
+                    reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / max_val).collect()
+                }
+            }
+        };
+
+        let duration = if channels > 0 && sample_rate > 0 {
+            (samples.len() / channels as usize) as f64 / sample_rate as f64
+        } else {
+            0.0
+        };
+
+        Ok(Self {
+            samples,
+            channels,
+            sample_rate,
+            duration,
+        })
+    }
+}
+
+pub struct NativeAudioPlayer {
+    pub is_playing: Arc<AtomicBool>,
+    pub current_sample_frame: Arc<std::sync::atomic::AtomicU64>,
+    pub device_sample_rate: Arc<std::sync::atomic::AtomicU32>,
+    pub tracks: Arc<std::sync::RwLock<Vec<NativePlaybackTrack>>>,
+    pub audio_cache: Arc<std::sync::RwLock<std::collections::HashMap<String, Arc<CachedAudioFile>>>>,
+    pub stream: Option<cpal::Stream>,
+}
+
+unsafe impl Send for NativeAudioPlayer {}
+unsafe impl Sync for NativeAudioPlayer {}
+
+impl Default for NativeAudioPlayer {
+    fn default() -> Self {
+        Self {
+            is_playing: Arc::new(AtomicBool::new(false)),
+            current_sample_frame: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            device_sample_rate: Arc::new(std::sync::atomic::AtomicU32::new(48000)),
+            tracks: Arc::new(std::sync::RwLock::new(Vec::new())),
+            audio_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            stream: None,
+        }
+    }
+}
+
+impl NativeAudioPlayer {
+    pub fn preload_buffers(&self, paths: Vec<String>) -> Result<Vec<String>, String> {
+        let mut loaded = Vec::new();
+        for p in paths {
+            if p.is_empty() {
+                continue;
+            }
+            {
+                if let Ok(cache) = self.audio_cache.read() {
+                    if cache.contains_key(&p) {
+                        loaded.push(p);
+                        continue;
+                    }
+                }
+            }
+            match CachedAudioFile::load_from_path(&p) {
+                Ok(cached) => {
+                    if let Ok(mut cache) = self.audio_cache.write() {
+                        cache.insert(p.clone(), Arc::new(cached));
+                        loaded.push(p);
+                    }
+                }
+                Err(e) => {
+                    log_debug(&format!("Failed to preload buffer {}: {}", p, e));
+                }
+            }
+        }
+        Ok(loaded)
+    }
+
+    pub fn clear_cache(&self) {
+        if let Ok(mut cache) = self.audio_cache.write() {
+            cache.clear();
+        }
+    }
+
+    pub fn ensure_stream(&mut self) -> Result<(), String> {
+        if self.stream.is_some() {
+            return Ok(());
+        }
+
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .ok_or_else(|| "No default audio output device available".to_string())?;
+
+        let config = device
+            .default_output_config()
+            .map_err(|e| format!("Failed to get default output config: {}", e))?;
+
+        let sample_rate = config.sample_rate().0;
+        let channels = config.channels() as usize;
+        self.device_sample_rate.store(sample_rate, Ordering::SeqCst);
+
+        let is_playing = Arc::clone(&self.is_playing);
+        let current_sample_frame = Arc::clone(&self.current_sample_frame);
+        let tracks = Arc::clone(&self.tracks);
+        let cache = Arc::clone(&self.audio_cache);
+
+        let stream_config: StreamConfig = config.into();
+
+        let stream = device.build_output_stream(
+            &stream_config,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                mix_audio_buffer(data, channels, sample_rate, &is_playing, &current_sample_frame, &tracks, &cache);
+            },
+            |err| log_debug(&format!("Rust audio output stream error: {}", err)),
+            None,
+        ).map_err(|e| format!("Failed to build audio output stream: {}", e))?;
+
+        stream.play().map_err(|e| format!("Failed to start output stream: {}", e))?;
+        self.stream = Some(stream);
+        Ok(())
+    }
+
+    pub fn play(&mut self, tracks: Vec<NativePlaybackTrack>, start_time: f64) -> Result<(), String> {
+        let mut paths_to_load = Vec::new();
+        for t in &tracks {
+            for s in &t.segments {
+                if !s.file_path.is_empty() {
+                    paths_to_load.push(s.file_path.clone());
+                }
+            }
+        }
+        let _ = self.preload_buffers(paths_to_load);
+
+        {
+            let mut tr = self.tracks.write().map_err(|e| e.to_string())?;
+            *tr = tracks;
+        }
+
+        self.ensure_stream()?;
+
+        let sr = self.device_sample_rate.load(Ordering::SeqCst);
+        let frame = (start_time.max(0.0) * sr as f64).round() as u64;
+        self.current_sample_frame.store(frame, Ordering::SeqCst);
+        self.is_playing.store(true, Ordering::SeqCst);
+
+        Ok(())
+    }
+
+    pub fn stop(&mut self) -> Result<(), String> {
+        self.is_playing.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn seek(&mut self, time: f64) -> Result<(), String> {
+        let sr = self.device_sample_rate.load(Ordering::SeqCst);
+        let frame = (time.max(0.0) * sr as f64).round() as u64;
+        self.current_sample_frame.store(frame, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn update_tracks(&mut self, tracks: Vec<NativePlaybackTrack>) -> Result<(), String> {
+        let mut tr = self.tracks.write().map_err(|e| e.to_string())?;
+        *tr = tracks;
+        Ok(())
+    }
+
+    pub fn get_position(&self) -> f64 {
+        let frame = self.current_sample_frame.load(Ordering::Relaxed);
+        let sr = self.device_sample_rate.load(Ordering::Relaxed).max(1);
+        frame as f64 / sr as f64
+    }
+}
+
+fn mix_audio_buffer(
+    data: &mut [f32],
+    channels: usize,
+    device_sample_rate: u32,
+    is_playing: &Arc<AtomicBool>,
+    current_sample_frame: &Arc<std::sync::atomic::AtomicU64>,
+    tracks_lock: &Arc<std::sync::RwLock<Vec<NativePlaybackTrack>>>,
+    cache_lock: &Arc<std::sync::RwLock<std::collections::HashMap<String, Arc<CachedAudioFile>>>>,
+) {
+    if !is_playing.load(Ordering::Relaxed) {
+        data.fill(0.0);
+        return;
+    }
+
+    let num_frames = data.len() / channels.max(1);
+    let start_frame = current_sample_frame.load(Ordering::Relaxed);
+    data.fill(0.0);
+
+    let tracks = match tracks_lock.read() {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let cache = match cache_lock.read() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let any_solo = tracks.iter().any(|t| t.is_solo);
+
+    for track in tracks.iter() {
+        let is_active = if any_solo { track.is_solo } else { !track.is_muted };
+        if !is_active || track.volume <= 0.0 {
+            continue;
+        }
+
+        let track_gain = track.volume;
+
+        for seg in &track.segments {
+            let seg_gain = seg.gain * track_gain;
+            if seg_gain <= 0.0 {
+                continue;
+            }
+
+            let cached = match cache.get(&seg.file_path) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            let seg_start_frame = (seg.start_time * device_sample_rate as f64).round() as u64;
+            let seg_duration_frames = (seg.duration * device_sample_rate as f64).round() as u64;
+            let seg_end_frame = seg_start_frame + seg_duration_frames;
+            let buf_end_frame = start_frame + num_frames as u64;
+
+            if start_frame >= seg_end_frame || buf_end_frame <= seg_start_frame {
+                continue;
+            }
+
+            let pan = seg.panning.clamp(-1.0, 1.0);
+            let left_pan_gain = ((1.0 - pan) * 0.5).sqrt();
+            let right_pan_gain = ((1.0 + pan) * 0.5).sqrt();
+
+            let file_offset_sec = seg.file_offset;
+            let cached_sr = cached.sample_rate as f64;
+
+            for f in 0..num_frames {
+                let timeline_frame = start_frame + f as u64;
+                if timeline_frame < seg_start_frame || timeline_frame >= seg_end_frame {
+                    continue;
+                }
+
+                let time_in_seg_sec = (timeline_frame - seg_start_frame) as f64 / device_sample_rate as f64;
+                let sample_pos_sec = file_offset_sec + time_in_seg_sec;
+                let sample_idx = (sample_pos_sec * cached_sr).round() as usize;
+
+                let (s_left, s_right) = if cached.channels == 1 {
+                    if sample_idx < cached.samples.len() {
+                        let v = cached.samples[sample_idx];
+                        (v, v)
+                    } else {
+                        (0.0, 0.0)
+                    }
+                } else {
+                    let stereo_idx = sample_idx * 2;
+                    if stereo_idx + 1 < cached.samples.len() {
+                        (cached.samples[stereo_idx], cached.samples[stereo_idx + 1])
+                    } else {
+                        (0.0, 0.0)
+                    }
+                };
+
+                let out_idx = f * channels;
+                if channels >= 2 {
+                    data[out_idx] += s_left * seg_gain * left_pan_gain;
+                    data[out_idx + 1] += s_right * seg_gain * right_pan_gain;
+                } else {
+                    data[out_idx] += ((s_left + s_right) * 0.5) * seg_gain;
+                }
+            }
+        }
+    }
+
+    current_sample_frame.fetch_add(num_frames as u64, Ordering::Relaxed);
 }
 
 // --- NOISE GATE LOGIC ---
@@ -1117,6 +1461,70 @@ fn fix_wav_header(path: &std::path::Path) -> Result<(), String> {
     file.seek(SeekFrom::Start(40)).map_err(|e| e.to_string())?;
     file.write_all(&data_size.to_le_bytes()).map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+// --- NATIVE PLAYBACK TAURI COMMANDS ---
+
+#[tauri::command]
+pub async fn preload_playback_buffers(
+    state: State<'_, AudioState>,
+    file_paths: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let player = state.player.lock().map_err(|e| e.to_string())?;
+    player.preload_buffers(file_paths)
+}
+
+#[tauri::command]
+pub async fn start_native_playback(
+    state: State<'_, AudioState>,
+    tracks: Vec<NativePlaybackTrack>,
+    start_time: f64,
+) -> Result<(), String> {
+    let mut player = state.player.lock().map_err(|e| e.to_string())?;
+    player.play(tracks, start_time)
+}
+
+#[tauri::command]
+pub async fn stop_native_playback(
+    state: State<'_, AudioState>,
+) -> Result<(), String> {
+    let mut player = state.player.lock().map_err(|e| e.to_string())?;
+    player.stop()
+}
+
+#[tauri::command]
+pub async fn seek_native_playback(
+    state: State<'_, AudioState>,
+    time: f64,
+) -> Result<(), String> {
+    let mut player = state.player.lock().map_err(|e| e.to_string())?;
+    player.seek(time)
+}
+
+#[tauri::command]
+pub async fn update_native_playback_tracks(
+    state: State<'_, AudioState>,
+    tracks: Vec<NativePlaybackTrack>,
+) -> Result<(), String> {
+    let mut player = state.player.lock().map_err(|e| e.to_string())?;
+    player.update_tracks(tracks)
+}
+
+#[tauri::command]
+pub async fn get_native_playback_position(
+    state: State<'_, AudioState>,
+) -> Result<f64, String> {
+    let player = state.player.lock().map_err(|e| e.to_string())?;
+    Ok(player.get_position())
+}
+
+#[tauri::command]
+pub async fn clear_native_playback_cache(
+    state: State<'_, AudioState>,
+) -> Result<(), String> {
+    let player = state.player.lock().map_err(|e| e.to_string())?;
+    player.clear_cache();
     Ok(())
 }
 

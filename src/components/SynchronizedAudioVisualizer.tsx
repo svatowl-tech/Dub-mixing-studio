@@ -39,6 +39,9 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
   const panStartXRef = useRef<number>(0);
   const panStartScrollRef = useRef<number>(0);
 
+  // Vertical Amplitude Zoom (Waveform - inspect quiet noise floor)
+  const [ampZoom, setAmpZoom] = useState<number>(1.0); // 1x to 16x (gain boost for visual inspection of noise)
+
   // Vertical Frequency Band Zoom (Spectrogram)
   const [freqMin, setFreqMin] = useState<number>(0); // Hz
   const [freqMax, setFreqMax] = useState<number>(22050); // Hz
@@ -190,8 +193,11 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
         max = val;
       }
 
-      ctx.moveTo(i, (1 + min) * amp);
-      ctx.lineTo(i, (1 + max) * amp);
+      const scaledMin = Math.max(-1.0, Math.min(1.0, min * ampZoom));
+      const scaledMax = Math.max(-1.0, Math.min(1.0, max * ampZoom));
+
+      ctx.moveTo(i, (1 + scaledMin) * amp);
+      ctx.lineTo(i, (1 + scaledMax) * amp);
     }
     ctx.stroke();
 
@@ -216,7 +222,7 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
       ctx.fillStyle = '#ef4444'; // Red playhead
       ctx.fillRect(playheadX - 1, 0, 2, height);
     }
-  }, [currentBuf, startTime, endTime, visibleDuration, currentTime, activeSource, duration]);
+  }, [currentBuf, startTime, endTime, visibleDuration, currentTime, activeSource, duration, ampZoom]);
 
   // 3. Render Synchronized Spectrogram with Frequency Zoom & Contrast
   const renderSpectrogram = useCallback(() => {
@@ -705,9 +711,51 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
             <Activity className="w-4 h-4 text-indigo-400" />
             Звуковая волна (Waveform)
           </span>
-          <span className="text-[10px] text-zinc-500 font-mono">
-            {timeZoom > 1.0 ? `Масштаб ${timeZoom.toFixed(1)}x • Колесико мыши: зум` : 'Нажмите для перехода'}
-          </span>
+          <div className="flex items-center gap-3">
+            {/* Amplitude Zoom for inspecting quiet noise */}
+            <div className="flex items-center gap-1.5 bg-zinc-950 px-2 py-0.5 rounded-lg border border-white/10 text-[10px]">
+              <span className="text-zinc-400 font-medium">Вертикальный масштаб (шум):</span>
+              <button
+                onClick={() => setAmpZoom(1.0)}
+                className={`px-1.5 py-0.5 rounded font-mono ${ampZoom === 1.0 ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:text-white'}`}
+                title="Обычный масштаб (1x)"
+              >
+                1x
+              </button>
+              <button
+                onClick={() => setAmpZoom(2.0)}
+                className={`px-1.5 py-0.5 rounded font-mono ${ampZoom === 2.0 ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:text-white'}`}
+                title="Увеличение амплитуды 2x"
+              >
+                2x
+              </button>
+              <button
+                onClick={() => setAmpZoom(4.0)}
+                className={`px-1.5 py-0.5 rounded font-mono ${ampZoom === 4.0 ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:text-white'}`}
+                title="Увеличение амплитуды 4x (просмотр тихого шума)"
+              >
+                4x
+              </button>
+              <button
+                onClick={() => setAmpZoom(8.0)}
+                className={`px-1.5 py-0.5 rounded font-mono ${ampZoom === 8.0 ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:text-white'}`}
+                title="Увеличение амплитуды 8x (детальный шум паузы)"
+              >
+                8x
+              </button>
+              <button
+                onClick={() => setAmpZoom(16.0)}
+                className={`px-1.5 py-0.5 rounded font-mono ${ampZoom === 16.0 ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:text-white'}`}
+                title="Максимальное увеличение амплитуды 16x"
+              >
+                16x
+              </button>
+            </div>
+
+            <span className="text-[10px] text-zinc-500 font-mono hidden sm:inline">
+              {timeZoom > 1.0 ? `Время ${timeZoom.toFixed(1)}x • Скролл: зум` : 'Нажмите для перехода'}
+            </span>
+          </div>
         </div>
 
         <div

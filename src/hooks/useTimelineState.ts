@@ -60,76 +60,50 @@ export const useTimelineState = (
         playbackEngine.stop();
         setIsPlaying(false);
       } else {
+        setIsPlaying(true);
         if (videoRef.current && !videoError) {
           try {
             await videoRef.current.play();
-            setIsPlaying(true);
-            if (project) {
-              const tracksToPlay = [...project.tracks];
-              const originalsTrack = project.tracks.find(t => t.name === 'Оригинал');
-              
-              if (project.referenceAudioPath && (!originalsTrack || originalsTrack.segments.length === 0)) {
-                const refPath = project.referenceAudioPath;
-                const fullPath = refPath.startsWith('./') && project.projectPath 
-                  ? `${project.projectPath}/${refPath.slice(2)}` 
-                  : refPath;
-                
-                tracksToPlay.push({
-                  id: 'reference-track',
-                  name: 'Reference',
-                  volume: originalsTrack?.volume ?? 1.0,
-                  isMuted: originalsTrack?.isMuted ?? false,
-                  isSolo: originalsTrack?.isSolo ?? false,
-                  segments: [{
-                    id: 'reference-seg',
-                    startTime: 0,
-                    duration: duration,
-                    filePath: fullPath
-                  }]
-                } as any);
-              }
-              playbackEngine.play(tracksToPlay, currentTimeRef.current).catch(console.error);
-            }
           } catch (error: any) {
             if (error.name !== 'AbortError') {
-              console.error("Playback failed:", error);
-              setVideoError(`Playback failed: ${error.message || "Unknown error"}`);
-              setIsPlaying(false);
+              console.warn("Video element play failed, continuing with audio playback:", error);
             }
           }
-        } else {
-          setIsPlaying(true);
-          if (project) {
-            const tracksToPlay = [...project.tracks];
-            const originalsTrack = project.tracks.find(t => t.name === 'Оригинал');
+        }
+        if (referenceAudioRef.current) {
+          referenceAudioRef.current.play().catch(() => {});
+        }
+        if (project) {
+          const tracksToPlay = [...project.tracks];
+          const originalsTrack = project.tracks.find(t => t.name === 'Оригинал');
+          
+          if (project.referenceAudioPath && (!originalsTrack || originalsTrack.segments.length === 0)) {
+            const refPath = project.referenceAudioPath;
+            const fullPath = refPath.startsWith('./') && project.projectPath 
+              ? `${project.projectPath}/${refPath.slice(2)}` 
+              : refPath;
             
-            if (project.referenceAudioPath && (!originalsTrack || originalsTrack.segments.length === 0)) {
-              const refPath = project.referenceAudioPath;
-              const fullPath = refPath.startsWith('./') && project.projectPath 
-                ? `${project.projectPath}/${refPath.slice(2)}` 
-                : refPath;
-              tracksToPlay.push({
-                id: 'reference-track',
-                name: 'Reference',
-                volume: originalsTrack?.volume ?? 1.0,
-                isMuted: originalsTrack?.isMuted ?? false,
-                isSolo: originalsTrack?.isSolo ?? false,
-                segments: [{
-                  id: 'reference-seg',
-                  startTime: 0,
-                  duration: duration,
-                  filePath: fullPath
-                }]
-              } as any);
-            }
-            playbackEngine.play(tracksToPlay, currentTimeRef.current).catch(console.error);
+            tracksToPlay.push({
+              id: 'reference-track',
+              name: 'Reference',
+              volume: originalsTrack?.volume ?? 1.0,
+              isMuted: originalsTrack?.isMuted ?? false,
+              isSolo: originalsTrack?.isSolo ?? false,
+              segments: [{
+                id: 'reference-seg',
+                startTime: 0,
+                duration: duration,
+                filePath: fullPath
+              }]
+            } as any);
           }
+          playbackEngine.play(tracksToPlay, currentTimeRef.current).catch(console.error);
         }
       }
     } finally {
       setTimeout(() => {
         isTogglingPlayRef.current = false;
-      }, 150);
+      }, 100);
     }
   }, [project, duration, videoError, videoRef, referenceAudioRef]);
 
@@ -141,38 +115,64 @@ export const useTimelineState = (
     }
   }, [duration]);
 
-  // Sync playback engine with video currentTime periodically
+  // Sync playback engine and timeline with video or master audio clock
   useEffect(() => {
-    if (!isPlaying || !videoRef.current) return;
+    if (!isPlaying) return;
 
     let rafId: number;
-    let lastLoggedId: string | null = null;
+    let lastClock = performance.now();
+    let lastRenderTime = 0;
     
     const sync = async () => {
-      if (videoRef.current && isPlaying) {
-        let time = videoRef.current.currentTime;
-        
-        // Loop Logic
-        if (isLooping && loopRange && time >= loopRange.end) {
-          time = loopRange.start;
-          videoRef.current.currentTime = time;
-          if (referenceAudioRef.current) referenceAudioRef.current.currentTime = time;
-          await playbackEngine.seek(time, tracksRef.current);
-        }
+      if (!isPlayingRef.current) return;
 
-        await playbackEngine.tick(time, tracksRef.current);
-        setCurrentTime(time);
-        
-        // Sync Logic for logging/subtitles could go here if needed, 
-        // but it was mostly for debug in App.tsx
-        
-        rafId = requestAnimationFrame(sync);
+      const now = performance.now();
+      const deltaSec = (now - lastClock) / 1000;
+      lastClock = now;
+
+      let time: number;
+      if (videoRef.current && !videoRef.current.paused && !isNaN(videoRef.current.currentTime)) {
+        time = videoRef.current.currentTime;
+      } else {
+        time = currentTimeRef.current + deltaSec;
       }
+      
+      // Loop Logic
+      if (isLooping && loopRange && time >= loopRange.end) {
+        time = loopRange.start;
+        if (videoRef.current) videoRef.current.currentTime = time;
+        if (referenceAudioRef.current) referenceAudioRef.current.currentTime = time;
+        await playbackEngine.seek(time, tracksRef.current);
+      }
+
+      // Check if reached duration limit without video
+      if (duration > 0 && time > duration) {
+        togglePlay();
+        return;
+      }
+
+      currentTimeRef.current = time;
+      await playbackEngine.tick(time, tracksRef.current);
+
+      // Throttle React state render to ~40fps (25ms) to prevent JS thread stalls
+      if (Math.abs(time - lastRenderTime) >= 0.025) {
+        lastRenderTime = time;
+        setCurrentTime(time);
+      }
+      
+      rafId = requestAnimationFrame(sync);
     };
 
     rafId = requestAnimationFrame(sync);
     return () => cancelAnimationFrame(rafId);
-  }, [isPlaying, isLooping, loopRange, videoRef, referenceAudioRef]); // Removed project?.tracks to avoid constant re-runs if project object changes reference
+  }, [isPlaying, isLooping, loopRange, duration, togglePlay, videoRef, referenceAudioRef]);
+
+  // Preload audio buffers for project tracks in the background
+  useEffect(() => {
+    if (project?.tracks && project.tracks.length > 0) {
+      playbackEngine.preloadProjectBuffers(project.tracks).catch(console.warn);
+    }
+  }, [project?.tracks]);
 
   // Update playback engine when video playback rate changes
   useEffect(() => {

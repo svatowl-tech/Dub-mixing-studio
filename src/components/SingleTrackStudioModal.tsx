@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { useUIState } from '../contexts/UIContext';
 import { SpectralAnalysisService, SpectrogramData } from '../services/spectralAnalysisService';
-import { getSafeFileUrl } from '../lib/utils';
+import { getSafeFileUrl, createPrefixedAudioPath, invalidateFileUrl } from '../lib/utils';
 import { open as rawOpen, save as rawSave } from '@tauri-apps/plugin-dialog';
 import SynchronizedAudioVisualizer from './SynchronizedAudioVisualizer';
 
@@ -351,7 +351,7 @@ export const SingleTrackStudioModal: React.FC = () => {
     setProcessProgress(20);
 
     try {
-      const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_denoised.wav');
+      const outPath = createPrefixedAudioPath('denoise', filePath);
       const report: any = await safeInvoke('process_denoise', {
         inputPath: filePath,
         outputPath: outPath,
@@ -375,7 +375,7 @@ export const SingleTrackStudioModal: React.FC = () => {
     setProcessProgress(20);
 
     try {
-      const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_dereverbed.wav');
+      const outPath = createPrefixedAudioPath('dereverb', filePath);
       const report: any = await safeInvoke('process_uvr_dereverb', {
         inputPath: filePath,
         outputPath: outPath,
@@ -400,7 +400,7 @@ export const SingleTrackStudioModal: React.FC = () => {
     setProcessProgress(25);
 
     try {
-      const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_declicked.wav');
+      const outPath = createPrefixedAudioPath('declick', filePath);
       const rep: any = await safeInvoke('clean_clicks', {
         inputWav: filePath,
         outputWav: outPath,
@@ -425,7 +425,7 @@ export const SingleTrackStudioModal: React.FC = () => {
     setProcessProgress(25);
 
     try {
-      const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_deplosived.wav');
+      const outPath = createPrefixedAudioPath('deplosive', filePath);
       const rep: any = await safeInvoke('apply_deplosive', {
         filePath: filePath,
         outPath: outPath,
@@ -449,7 +449,7 @@ export const SingleTrackStudioModal: React.FC = () => {
     setProcessProgress(25);
 
     try {
-      const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_deessed.wav');
+      const outPath = createPrefixedAudioPath('deesser', filePath);
       const rep: any = await safeInvoke('process_deesser', {
         inputPath: filePath,
         outputPath: outPath,
@@ -475,7 +475,7 @@ export const SingleTrackStudioModal: React.FC = () => {
     setProcessProgress(25);
 
     try {
-      const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_leveled.wav');
+      const outPath = createPrefixedAudioPath('leveler', filePath);
       await safeInvoke('level_speech_volume', {
         inputPath: filePath,
         outputPath: outPath,
@@ -525,7 +525,7 @@ export const SingleTrackStudioModal: React.FC = () => {
     setProcessProgress(30);
 
     try {
-      const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_normalized.wav');
+      const outPath = createPrefixedAudioPath('norm', filePath);
       let reportStr = `Нормализация до ${targetLufs} LUFS завершена.`;
 
       try {
@@ -562,7 +562,7 @@ export const SingleTrackStudioModal: React.FC = () => {
     setProcessProgress(40);
 
     try {
-      const outPath = filePath.replace(/\.([a-zA-Z0-9]+)$/, '_eq_comp.wav');
+      const outPath = createPrefixedAudioPath('eq', filePath);
       await safeInvoke('process_media_effect', {
         inputPath: filePath,
         outputPath: outPath,

@@ -24,7 +24,12 @@ mod smart_align;
 mod project_type_rules;
 mod conflict_detection;
 
-use audio_engine::{get_audio_devices, start_recording, stop_recording, force_stop_all, check_crashes, AudioState, AudioRecorder};
+use audio_engine::{
+    get_audio_devices, start_recording, stop_recording, force_stop_all, check_crashes,
+    preload_playback_buffers, start_native_playback, stop_native_playback,
+    seek_native_playback, update_native_playback_tracks, get_native_playback_position,
+    clear_native_playback_cache, AudioState, AudioRecorder, NativeAudioPlayer
+};
 use logger::log_debug;
 use vst_host::{
     scan_plugins, load_plugin, unload_plugin, process_audio_block,
@@ -261,6 +266,7 @@ fn main() {
         .manage(vst_state)
         .manage(AudioState {
             recorder: std::sync::Mutex::new(AudioRecorder::default()),
+            player: std::sync::Mutex::new(NativeAudioPlayer::default()),
         })
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -270,6 +276,13 @@ fn main() {
             stop_recording,
             force_stop_all,
             check_crashes,
+            preload_playback_buffers,
+            start_native_playback,
+            stop_native_playback,
+            seek_native_playback,
+            update_native_playback_tracks,
+            get_native_playback_position,
+            clear_native_playback_cache,
             scan_plugins,
             load_plugin,
             unload_plugin,
