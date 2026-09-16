@@ -215,7 +215,7 @@ export const BatchImportModal = () => {
           duration: af.duration,
           fileOffset: 0,
           fileDuration: af.duration,
-          blobUrl: finalPath ? getSafeFileUrl(finalPath) : '#local-mock',
+          blobUrl: finalPath ? getSafeFileUrl(finalPath) : '',
           filePath: finalPath,
           waveform: [], // ПУСТОЙ МАССИВ - триггер для реальной отрисовки волн в App.tsx!
           gain: 1.0,

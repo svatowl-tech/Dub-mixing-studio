@@ -332,14 +332,8 @@ pub async fn generate_waveform_peaks(app_handle: AppHandle, file_path: String, p
     }
     
     if !success {
-        // If ffmpeg extract failed, we generate graceful dummy peaks so the UI works
-        log_debug(&format!("FFmpeg failed to extract peaks for non-wav file, returning fallback peaks."));
-        let mut dummy = Vec::with_capacity(points);
-        for i in 0..points {
-            let val = 0.05 + ((i as f32 * 0.1).sin().abs() * 0.3) + (i % 3) as f32 * 0.05;
-            dummy.push(val.min(1.0));
-        }
-        return Ok(dummy);
+        log_debug(&format!("FFmpeg failed to extract audio track for waveform generation: {}", file_path));
+        return Err(format!("Не удалось извлечь аудиодорожку через FFmpeg для файла: {}", file_path));
     }
     
     // Peaks calculations on the temporary wav file

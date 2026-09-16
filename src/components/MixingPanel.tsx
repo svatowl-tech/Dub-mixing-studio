@@ -58,6 +58,7 @@ import {
   TimingIssue,
   MixingAuditEntry,
   QualityControlIssue,
+  QaAuditReport,
   FinalRenderResult,
   DeclickReport,
   DeplosiveReport,
@@ -286,14 +287,14 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     setAuditLogs(prev => [...prev, ...newLogs]);
   };
 
-  const handleRunGainMatchingStep = (notify = true) => {
+  const handleRunGainMatchingStep = async (notify = true) => {
     if (!project || !project.tracks || project.tracks.length === 0) {
       if (notify) showToast('В проекте нет дорожек для выравнивания');
       return;
     }
     setIsExecutingPhase3Step('gainMatching');
     try {
-      const res = MixingService.matchLoudnessBySubtitles(
+      const res = await MixingService.matchLoudnessBySubtitles(
         project.tracks,
         project.subtitles || [],
         activePreset.phase3.gainMatching
@@ -312,14 +313,14 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     }
   };
 
-  const handleRunDuckingStep = (notify = true) => {
+  const handleRunDuckingStep = async (notify = true) => {
     if (!project || !project.tracks || project.tracks.length === 0) {
       if (notify) showToast('В проекте нет дорожек для автодакинга');
       return;
     }
     setIsExecutingPhase3Step('ducking');
     try {
-      const res = MixingService.applyAutoDucking(
+      const res = await MixingService.applyAutoDucking(
         project.tracks,
         project.mixingType || MixingType.DUBBING,
         activePreset.phase3.ducking
@@ -340,14 +341,14 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     }
   };
 
-  const handleRunAutoFxStep = (notify = true) => {
+  const handleRunAutoFxStep = async (notify = true) => {
     if (!project || !project.tracks || project.tracks.length === 0) {
       if (notify) showToast('В проекте нет дорожек для анализа эффектов');
       return;
     }
     setIsExecutingPhase3Step('autoFxAnalysis');
     try {
-      const res = MixingService.detectAndApplyOriginalEffects(
+      const res = await MixingService.detectAndApplyOriginalEffects(
         project.tracks,
         activePreset.phase3.autoFxAnalysis
       );
@@ -365,32 +366,24 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     }
   };
 
-  const handleRunVocalBusStep = (notify = true) => {
+  const handleRunVocalBusStep = async (notify = true) => {
     if (!project || !project.tracks || project.tracks.length === 0) {
       if (notify) showToast('В проекте нет дорожек для шины вокала');
       return;
     }
     setIsExecutingPhase3Step('vocalBusProcessing');
     try {
-      const res = MixingService.applyMasterVocalBusChain(
+      const busConfig = activePreset.phase3.vocalBusProcessing;
+      const res = await MixingService.applyMasterVocalBusChain(
         project.tracks,
-        activePreset.phase3.vocalBusProcessing.chain || {
-          presetName: 'Audition Master VO Chain',
-          ozoneStabilizer: { enabled: true, shape: 65, speed: 50, smoothness: 70, bypass: false },
-          rCompressor: { enabled: true, threshold: -12.2, ratio: 4.7, attackMs: 149.6, releaseMs: 120, gainDb: 3.44, warmth: 60, bypass: false },
-          soothe2: { enabled: true, depth: 5.27, sharpness: 3.31, selectivity: 4.07, band1Freq: 328.8, band1Sens: 5.94, band3Freq: 3489.5, band3Sens: 6.20, bypass: false },
-          proQ4: { enabled: true, highPassFreq: 80, lowCutSlope: 12, airShelfFreq: 12000, airShelfGain: 1.5, notchResonanceFreq: 3200, notchCutDb: -2.0, bypass: false },
-          rBass: { enabled: true, frequency: 43, intensity: 5.0, originalBassDb: -2.0, bypass: false },
-          freshAir: { enabled: true, midAir: 24, highAir: 32, bypass: false },
-          rVox: { enabled: true, compression: -9.5, gateThreshold: -80, gainDb: 0.0, bypass: false },
-          proDS: { enabled: true, threshold: -24, range: -8, frequency: 10000, wideBand: true, bypass: false }
-        }
+        busConfig
       );
       addAuditLogs(res.logs);
       onUpdateProject({ tracks: res.updatedTracks });
       playbackEngine.updateTracks(res.updatedTracks).catch(console.error);
       if (notify) {
-        showToast(`Мастер-шина VO скоммутирована: ${res.activePluginsCount} активных плагинов применено к дорожкам.`);
+        const modeLabel = busConfig.mode === 'rustDsp' ? 'Rust DSP рэк (6 звеньев)' : 'пользовательский VST-рэк';
+        showToast(`Мастер-шина вокала скоммутирована: ${res.activePluginsCount} активных модулей (${modeLabel}).`);
       }
     } catch (e: any) {
       console.error(e);
@@ -400,7 +393,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     }
   };
 
-  const handleRunAllPhase3 = () => {
+  const handleRunAllPhase3 = async () => {
     if (!project || !project.tracks || project.tracks.length === 0) {
       showToast('В проекте нет дорожек для сведения');
       return;
@@ -412,7 +405,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       const allLogs: MixingAuditEntry[] = [];
 
       // Step 1: Gain matching
-      const gmRes = MixingService.matchLoudnessBySubtitles(
+      const gmRes = await MixingService.matchLoudnessBySubtitles(
         currentTracks,
         project.subtitles || [],
         activePreset.phase3.gainMatching
@@ -421,7 +414,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       allLogs.push(...gmRes.logs);
 
       // Step 2: Auto-ducking
-      const duckRes = MixingService.applyAutoDucking(
+      const duckRes = await MixingService.applyAutoDucking(
         currentTracks,
         project.mixingType || MixingType.DUBBING,
         activePreset.phase3.ducking
@@ -430,7 +423,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       allLogs.push(...duckRes.logs);
 
       // Step 3: Auto-FX
-      const fxRes = MixingService.detectAndApplyOriginalEffects(
+      const fxRes = await MixingService.detectAndApplyOriginalEffects(
         currentTracks,
         activePreset.phase3.autoFxAnalysis
       );
@@ -438,19 +431,9 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       allLogs.push(...fxRes.logs);
 
       // Step 4: Master Vocal Bus
-      const busRes = MixingService.applyMasterVocalBusChain(
+      const busRes = await MixingService.applyMasterVocalBusChain(
         currentTracks,
-        activePreset.phase3.vocalBusProcessing.chain || {
-          presetName: 'Audition Master VO Chain',
-          ozoneStabilizer: { enabled: true, shape: 65, speed: 50, smoothness: 70, bypass: false },
-          rCompressor: { enabled: true, threshold: -12.2, ratio: 4.7, attackMs: 149.6, releaseMs: 120, gainDb: 3.44, warmth: 60, bypass: false },
-          soothe2: { enabled: true, depth: 5.27, sharpness: 3.31, selectivity: 4.07, band1Freq: 328.8, band1Sens: 5.94, band3Freq: 3489.5, band3Sens: 6.20, bypass: false },
-          proQ4: { enabled: true, highPassFreq: 80, lowCutSlope: 12, airShelfFreq: 12000, airShelfGain: 1.5, notchResonanceFreq: 3200, notchCutDb: -2.0, bypass: false },
-          rBass: { enabled: true, frequency: 43, intensity: 5.0, originalBassDb: -2.0, bypass: false },
-          freshAir: { enabled: true, midAir: 24, highAir: 32, bypass: false },
-          rVox: { enabled: true, compression: -9.5, gateThreshold: -80, gainDb: 0.0, bypass: false },
-          proDS: { enabled: true, threshold: -24, range: -8, frequency: 10000, wideBand: true, bypass: false }
-        }
+        activePreset.phase3.vocalBusProcessing
       );
       currentTracks = busRes.updatedTracks;
       allLogs.push(...busRes.logs);
@@ -477,17 +460,21 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   const [finalRenderResult, setFinalRenderResult] = useState<FinalRenderResult | null>(null);
   const [qaLufs, setQaLufs] = useState<number>(-14.0);
   const [qaTruePeak, setQaTruePeak] = useState<number>(-1.0);
+  const [qaAuditReport, setQaAuditReport] = useState<QaAuditReport | null>(null);
 
   // Phase 4: Quality Control (QA) handler
-  const handleRunQualityControl = (showModal = true) => {
+  const handleRunQualityControl = async (showModal = true) => {
     if (!project || !project.tracks || project.tracks.length === 0) {
       showToast('В проекте нет дорожек для анализа качества');
       return;
     }
-    const res = FinalRenderService.runQualityControlAnalysis(project, activePreset.phase4);
+    const res = await FinalRenderService.runFullQualityControlAsync(project, activePreset.phase4);
     setQaIssues(res.issues);
     setQaLufs(res.integratedLufs);
     setQaTruePeak(res.maxTruePeakDb);
+    if (res.qaReport) {
+      setQaAuditReport(res.qaReport);
+    }
     addAuditLogs(res.logs);
 
     const errorsCount = res.issues.filter(i => i.severity === 'error').length;
@@ -2780,7 +2767,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         if (!activePreset.phase3.gainMatching?.bypass) {
           setProcessingStep('Этап 3: Выравнивание громкости смысловых фраз и звуков физики...');
           setIsExecutingPhase3Step('gainMatching');
-          const res = MixingService.matchLoudnessBySubtitles(
+          const res = await MixingService.matchLoudnessBySubtitles(
             currentTracks,
             project.subtitles || [],
             activePreset.phase3.gainMatching
@@ -2797,7 +2784,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         if (!activePreset.phase3.ducking?.bypass) {
           setProcessingStep('Этап 3: Автодакинг оригинального голоса (опенинги/эндинги сохранены)...');
           setIsExecutingPhase3Step('ducking');
-          const res = MixingService.applyAutoDucking(
+          const res = await MixingService.applyAutoDucking(
             currentTracks,
             project.mixingType || MixingType.DUBBING,
             activePreset.phase3.ducking
@@ -2814,7 +2801,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         if (!activePreset.phase3.autoFxAnalysis?.bypass) {
           setProcessingStep('Этап 3: Анализ пространственных эффектов и фильтров оригинала...');
           setIsExecutingPhase3Step('autoFxAnalysis');
-          const res = MixingService.detectAndApplyOriginalEffects(
+          const res = await MixingService.detectAndApplyOriginalEffects(
             currentTracks,
             activePreset.phase3.autoFxAnalysis
           );
@@ -2828,21 +2815,11 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
         // 3.4 Master Vocal Bus Chain
         if (!activePreset.phase3.vocalBusProcessing?.bypass) {
-          setProcessingStep('Этап 3: Мастер-шина вокала (Audition: эквалайзер, компрессия, сатурация)...');
+          setProcessingStep('Этап 3: Мастер-шина вокала (эквалайзер, de-esser, сатурация, компрессор, лимитер)...');
           setIsExecutingPhase3Step('vocalBusProcessing');
-          const res = MixingService.applyMasterVocalBusChain(
+          const res = await MixingService.applyMasterVocalBusChain(
             currentTracks,
-            activePreset.phase3.vocalBusProcessing.chain || {
-              presetName: 'Audition Master VO Chain',
-              ozoneStabilizer: { enabled: true, shape: 65, speed: 50, smoothness: 70, bypass: false },
-              rCompressor: { enabled: true, threshold: -12.2, ratio: 4.7, attackMs: 149.6, releaseMs: 120, gainDb: 3.44, warmth: 60, bypass: false },
-              soothe2: { enabled: true, depth: 5.27, sharpness: 3.31, selectivity: 4.07, band1Freq: 328.8, band1Sens: 5.94, band3Freq: 3489.5, band3Sens: 6.20, bypass: false },
-              proQ4: { enabled: true, highPassFreq: 80, lowCutSlope: 12, airShelfFreq: 12000, airShelfGain: 1.5, notchResonanceFreq: 3200, notchCutDb: -2.0, bypass: false },
-              rBass: { enabled: true, frequency: 43, intensity: 5.0, originalBassDb: -2.0, bypass: false },
-              freshAir: { enabled: true, midAir: 24, highAir: 32, bypass: false },
-              rVox: { enabled: true, compression: -9.5, gateThreshold: -80, gainDb: 0.0, bypass: false },
-              proDS: { enabled: true, threshold: -24, range: -8, frequency: 10000, wideBand: true, bypass: false }
-            }
+            activePreset.phase3.vocalBusProcessing
           );
           addAuditLogs(res.logs);
           setIsExecutingPhase3Step(null);
@@ -5747,50 +5724,83 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                           </div>
                         );
                       } else if (stepKey === "vocalBusProcessing") {
-                        stepName = "Мастер-шина голосов (8-Slot Audition Rack)";
-                        stepBypass = activePreset.phase3.vocalBusProcessing.bypass;
+                        const bus = activePreset.phase3.vocalBusProcessing;
+                        const isRustDsp = bus.mode === 'rustDsp';
+                        stepName = isRustDsp 
+                          ? "Мастер-шина вокала (Студийный Rust DSP рэк)" 
+                          : "Мастер-шина вокала (Пользовательский VST-рэк)";
+                        stepBypass = bus.bypass;
                         handleBypassToggle = () => updatePhase3({
-                          vocalBusProcessing: { ...activePreset.phase3.vocalBusProcessing, bypass: !stepBypass }
+                          vocalBusProcessing: { ...bus, bypass: !stepBypass }
                         });
-                        const chain = activePreset.phase3.vocalBusProcessing.chain;
+                        const nativeRack = bus.nativeRack;
+                        const vstPlugins = bus.vstRack?.plugins || [];
+
                         stepElement = (
                           <div className="space-y-2.5 text-xs">
-                            {/* Audition 8 Slot Chain Badge Grid */}
-                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 text-[9px] font-mono">
-                              <div className={cn("p-1.5 rounded border text-center", chain?.ozoneStabilizer?.enabled ? "bg-blue-950/40 border-blue-500/40 text-blue-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
-                                1. Stabilizer
+                            {isRustDsp ? (
+                              <div className="space-y-1.5">
+                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 text-[9px] font-mono">
+                                  <div className={cn("p-1.5 rounded border text-center transition-colors", nativeRack?.eq?.enabled ? "bg-emerald-950/40 border-emerald-500/40 text-emerald-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                    1. HPF 75Hz & Notch
+                                  </div>
+                                  <div className={cn("p-1.5 rounded border text-center transition-colors", nativeRack?.deesser?.enabled ? "bg-cyan-950/40 border-cyan-500/40 text-cyan-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                    2. De-Esser (5-8kHz)
+                                  </div>
+                                  <div className={cn("p-1.5 rounded border text-center transition-colors", nativeRack?.saturation?.enabled ? "bg-amber-950/40 border-amber-500/40 text-amber-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                    3. Tanh Warmth (+3.5dB)
+                                  </div>
+                                  <div className={cn("p-1.5 rounded border text-center transition-colors", nativeRack?.compressor?.enabled ? "bg-purple-950/40 border-purple-500/40 text-purple-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                    4. Opto LA-2A Comp
+                                  </div>
+                                  <div className={cn("p-1.5 rounded border text-center transition-colors", nativeRack?.exciter?.enabled ? "bg-blue-950/40 border-blue-500/40 text-blue-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                    5. Presence Air (10kHz)
+                                  </div>
+                                  <div className={cn("p-1.5 rounded border text-center transition-colors", nativeRack?.limiter?.enabled ? "bg-rose-950/40 border-rose-500/40 text-rose-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
+                                    6. True-Peak (-1 dBTP)
+                                  </div>
+                                </div>
+                                <div className="text-[10px] text-zinc-400 flex items-center justify-between px-1">
+                                  <span>Аппаратный движок Rust DSP (Rayon, SIMD)</span>
+                                  <span className="text-emerald-400 font-mono text-[9px]">НАТИВНО</span>
+                                </div>
                               </div>
-                              <div className={cn("p-1.5 rounded border text-center", chain?.rCompressor?.enabled ? "bg-amber-950/40 border-amber-500/40 text-amber-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
-                                2. RComp
+                            ) : (
+                              <div className="space-y-1.5">
+                                {vstPlugins.length > 0 ? (
+                                  <div className="flex flex-wrap gap-1 text-[9px] font-mono">
+                                    {vstPlugins.map((p, idx) => (
+                                      <div 
+                                        key={p.id || idx} 
+                                        className={cn(
+                                          "px-2 py-1 rounded border",
+                                          !p.bypass ? "bg-indigo-950/40 border-indigo-500/40 text-indigo-300" : "bg-zinc-950 border-white/5 text-zinc-600 line-through"
+                                        )}
+                                      >
+                                        {idx + 1}. {p.name}
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="p-2 rounded bg-zinc-950/60 border border-dashed border-white/10 text-[10px] text-zinc-400 text-center">
+                                    Цепочка VST пуста. Нажмите «Настроить рэк», чтобы добавить плагины из системы.
+                                  </div>
+                                )}
+                                <div className="text-[10px] text-zinc-400 flex items-center justify-between px-1">
+                                  <span>Пользовательская цепочка плагинов VST2 / VST3</span>
+                                  <span className="text-indigo-400 font-mono text-[9px]">{vstPlugins.length} плагинов</span>
+                                </div>
                               </div>
-                              <div className={cn("p-1.5 rounded border text-center", chain?.soothe2?.enabled ? "bg-purple-950/40 border-purple-500/40 text-purple-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
-                                3. soothe2
-                              </div>
-                              <div className={cn("p-1.5 rounded border text-center", chain?.proQ4?.enabled ? "bg-cyan-950/40 border-cyan-500/40 text-cyan-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
-                                4. Pro-Q 4
-                              </div>
-                              <div className={cn("p-1.5 rounded border text-center", chain?.rBass?.enabled ? "bg-rose-950/40 border-rose-500/40 text-rose-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
-                                5. RBass
-                              </div>
-                              <div className={cn("p-1.5 rounded border text-center", chain?.freshAir?.enabled ? "bg-emerald-950/40 border-emerald-500/40 text-emerald-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
-                                6. Fresh Air
-                              </div>
-                              <div className={cn("p-1.5 rounded border text-center", chain?.rVox?.enabled ? "bg-orange-950/40 border-orange-500/40 text-orange-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
-                                7. RVox
-                              </div>
-                              <div className={cn("p-1.5 rounded border text-center", chain?.proDS?.enabled ? "bg-teal-950/40 border-teal-500/40 text-teal-300" : "bg-zinc-950 border-white/5 text-zinc-600")}>
-                                8. Pro-DS
-                              </div>
-                            </div>
+                            )}
 
                             <div className="flex items-center gap-2 pt-1">
                               <button
                                 type="button"
                                 onClick={() => setActiveStepSettingsModal('vocalBusProcessing')}
-                                className="flex-1 py-1 px-2 bg-gradient-to-r from-indigo-900/60 to-purple-900/60 hover:from-indigo-800/80 hover:to-purple-800/80 border border-indigo-500/30 rounded-lg text-[10px] font-bold text-white flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow"
+                                className="flex-1 py-1 px-2 bg-zinc-900 hover:bg-zinc-800 border border-white/10 rounded-lg text-[10px] font-bold text-zinc-200 flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow"
                               >
-                                <Sliders className="w-3 h-3 text-indigo-300" />
-                                <span>Открыть рэк 8 плагинов Audition</span>
+                                <Sliders className="w-3 h-3 text-indigo-400" />
+                                <span>{isRustDsp ? 'Настроить рэк Rust DSP' : 'Настроить цепочку VST'}</span>
                               </button>
                               <button
                                 type="button"
@@ -6803,6 +6813,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           issues={qaIssues}
           integratedLufs={qaLufs}
           maxTruePeakDb={qaTruePeak}
+          qaReport={qaAuditReport}
           onSeekToTime={(time) => handleSeek(time)}
           onAutoFixIssue={handleAutoFixQaIssue}
           onRerunQa={() => handleRunQualityControl(false)}

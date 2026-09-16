@@ -136,28 +136,11 @@ pub async fn init_db(db_path: &str) -> Result<Pool<Sqlite>, sqlx::Error> {
         .connect_with(options)
         .await?;
 
-    // MIGRATION: Schema Setup
+    // MIGRATION: Schema Setup for Legacy and Modern Project Repository
+    crate::project_repository::run_project_migrations(&pool).await?;
+
+    // Maintain backwards compatibility for legacy segments table if needed
     sqlx::query("
-        CREATE TABLE IF NOT EXISTS projects (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            config_json TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS subtitles (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            start_time REAL NOT NULL,
-            end_time REAL NOT NULL,
-            text TEXT NOT NULL,
-            role TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS tracks (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            name TEXT NOT NULL,
-            volume REAL NOT NULL DEFAULT 1.0,
-            is_muted BOOLEAN NOT NULL DEFAULT 0
-        );
         CREATE TABLE IF NOT EXISTS segments (
             id TEXT PRIMARY KEY,
             track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
@@ -171,7 +154,6 @@ pub async fn init_db(db_path: &str) -> Result<Pool<Sqlite>, sqlx::Error> {
         );
     ").execute(&pool).await?;
 
-    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN audio_offset_ms REAL NOT NULL DEFAULT 0.0;").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE segments ADD COLUMN backstage_video_path TEXT;").execute(&pool).await;
 
     Ok(pool)

@@ -119,6 +119,8 @@ export interface AudioTrack {
   id: string;
   name: string;
   type?: 'original' | 'voice' | 'music' | 'effects' | 'dub';
+  filePath?: string;
+  audioUrl?: string;
   segments: AudioSegment[];
   volume: number;
   isMuted: boolean;
@@ -183,6 +185,17 @@ export interface TrackProcessing {
   fades?: {
     enabled: boolean;
     duration?: number; // ms
+  };
+  limiter?: {
+    enabled: boolean;
+    ceilingDb?: number;
+    releaseMs?: number;
+  };
+  saturation?: {
+    enabled: boolean;
+    driveDb?: number;
+    blend?: number;
+    warmthBias?: number;
   };
 }
 
@@ -263,6 +276,20 @@ export interface AudioSegment {
     delayFeedback?: number; // 0..1
     specialFxType?: 'none' | 'telephone' | 'radio' | 'tv' | 'robot' | 'megaphone';
     panning?: number; // -1..1
+    acousticPreset?: {
+      pan: number;
+      reverbWet: number;
+      reverbDecayMs: number;
+      highPassHz: number;
+      lowPassHz: number;
+    };
+    ildDb?: number;
+    phaseCorrelation?: number;
+    drrDb?: number;
+    t60Ms?: number;
+    spectralCentroidHz?: number;
+    bandwidthHz?: number;
+    detectedEnvironment?: string;
   };
 }
 
@@ -640,6 +667,66 @@ export interface WhisperTranscriptionResult {
   averageConfidence: number;
 }
 
+/** Точка деформации времени в оптимальном пути DTW */
+export interface DtwPoint {
+  origIndex: number;
+  dubIndex: number;
+  origTimeMs: number;
+  dubTimeMs: number;
+  cost: number;
+}
+
+/** Сегментная подгонка фразы */
+export interface SegmentAdjustment {
+  segmentIndex: number;
+  origStartMs: number;
+  origEndMs: number;
+  dubStartMs: number;
+  dubEndMs: number;
+  timeStretchRatio: number;
+  pitchShiftSemitones: number;
+  energySimilarity: number;
+  deviationPercent: number;
+}
+
+/** Итоговая структура подгонки таймингов (Alignment Adjustment) из Rust GCC-PHAT + DTW */
+export interface AlignmentAdjustment {
+  originalCueId: string;
+  dubCueId: string;
+  detectedLagMs: number;
+  detectedLagSamples: number;
+  correlationScore: number;
+  averageStretchRatio: number;
+  maxDeviationPercent: number;
+  requiresActorReRecording: boolean;
+  warningMessage?: string;
+  segmentAdjustments: SegmentAdjustment[];
+  dtwDistance: number;
+  sampleRate: number;
+  originalDurationMs: number;
+  dubDurationMs: number;
+}
+
+/** Кадр спектра реального времени (60 FPS) из нативного Rust FFT */
+export interface SpectrumFramePayload {
+  bands: number[];
+  peak: number;
+  rms: number;
+  dominantFreqHz: number;
+  timestampMs: number;
+}
+
+/** Набор уровней детализации волновой формы (LOD Mipmap: 1x, 10x, 100x, 1000x) */
+export interface WaveformMipmap {
+  sampleRate: number;
+  totalSamples: number;
+  durationSeconds: number;
+  lod1x: number[];
+  lod10x: number[];
+  lod100x: number[];
+  lod1000x: number[];
+}
+
 /** Результат нативного тайм-алигнмента Smart Align (GCC-PHAT + WSOLA Time-Stretch) */
 export interface SmartAlignResult {
   originalPath: string;
@@ -653,6 +740,8 @@ export interface SmartAlignResult {
   correlationScore: number;
   sampleRate: number;
   wasStretched: boolean;
+  requiresActorReRecording?: boolean;
+  alignmentAdjustment?: AlignmentAdjustment;
 }
 
 /** Конфигурация параметров нативного Smart Align */
@@ -660,8 +749,11 @@ export interface SmartAlignNativeConfig {
   minStretchRatio?: number;
   maxStretchRatio?: number;
   stretchThresholdPercent?: number;
+  maxDeviationLimitPercent?: number;
   alignOffset?: boolean;
   maxSearchOffsetMs?: number;
+  dtwHopSizeMs?: number;
+  dtwWindowSizeMs?: number;
 }
 
 /** Входной сегмент реплики для валидации правил проекта */
@@ -846,6 +938,199 @@ export interface AuditionVocalBusChainConfig {
   };
 }
 
+// ----------------------------------------------------------------------------
+// Пользовательский VST-рэк для мастер-шины (цепочка внешних VST2/VST3 плагинов)
+// ----------------------------------------------------------------------------
+export interface VstRackSlot {
+  id: string;
+  pluginId?: string;
+  name: string;
+  pluginPath: string;
+  vstVersion: 'VST2' | 'VST3' | 'AU';
+  category?: string;
+  manufacturer?: string;
+  enabled: boolean;
+  bypass: boolean;
+  mix: number; // 0..1 (dry/wet)
+  gainDb: number; // -24..+24 dB
+  parameters: Record<string | number, number>; // paramId or paramIndex -> value
+  latencyMs?: number;
+}
+
+export interface VstRackConfig {
+  presetName: string;
+  bypass: boolean;
+  masterMix: number; // 0..1
+  masterGainDb: number; // -12..+12 dB
+  plugins: VstRackSlot[];
+}
+
+// ----------------------------------------------------------------------------
+// Студийный виртуальный рэк эффектов на нативном Rust DSP (vocal_rack_dsp.rs)
+// ----------------------------------------------------------------------------
+
+export interface NativeEqBandConfig {
+  enabled: boolean;
+  freqHz: number;
+  gainDb: number;
+  q: number;
+}
+
+export interface NativeParametricEqConfig {
+  enabled: boolean;
+  bypass: boolean;
+  lowCut: NativeEqBandConfig;
+  lowShelf: NativeEqBandConfig;
+  peaking: NativeEqBandConfig;
+  highShelf: NativeEqBandConfig;
+}
+
+export interface NativeCompressorConfig {
+  enabled: boolean;
+  bypass: boolean;
+  thresholdDb: number;
+  ratio: number;
+  attackMs: number;
+  releaseMs: number;
+  kneeDb: number;
+  makeupGainDb: number;
+  optoMode: boolean;
+}
+
+export interface NativeDeEsserConfig {
+  enabled: boolean;
+  bypass: boolean;
+  freqHz: number;
+  q: number;
+  thresholdDb: number;
+  ratio: number;
+  maxReductionDb: number;
+  attackMs: number;
+  releaseMs: number;
+  splitBand: boolean;
+}
+
+export type NativeSaturationType = 'softTanh' | 'tubeAnalog' | 'tapeWarmth';
+
+export interface NativeSaturatorConfig {
+  enabled: boolean;
+  bypass: boolean;
+  driveDb: number;
+  saturationType: NativeSaturationType;
+  warmthBias: number;
+  mix: number;
+  outputGainDb: number;
+}
+
+export interface NativeVst3SlotConfig {
+  enabled: boolean;
+  bypass: boolean;
+  pluginPath: string;
+  pluginName: string;
+  instanceId?: string | null;
+  mix: number;
+  gainDb: number;
+  parameters: Record<number, number>;
+}
+
+export interface NativeRackState {
+  trackId: string;
+  bypassAll: boolean;
+  masterGainDb: number;
+  eq: NativeParametricEqConfig;
+  compressor: NativeCompressorConfig;
+  deesser: NativeDeEsserConfig;
+  saturator: NativeSaturatorConfig;
+  vst3: NativeVst3SlotConfig;
+}
+
+// ----------------------------------------------------------------------------
+// Студийный DSP-рэк мастер-шины вокала (высокопроизводительный движок на чистом Rust)
+// ----------------------------------------------------------------------------
+export type VocalDeEsserMode = 'splitBand' | 'wideband';
+
+export interface HpfSurgicalEqConfig {
+  enabled: boolean;
+  hpfCutoffHz: number;
+  hpfOrder: number;
+  notchEnabled: boolean;
+  notchFreqHz: number;
+  notchQ: number;
+  notchGainDb: number;
+}
+
+export interface DynamicDeEsserConfig {
+  enabled: boolean;
+  frequencyHz: number;
+  thresholdDb: number;
+  ratio: number;
+  attackMs: number;
+  releaseMs: number;
+  kneeWidthDb: number;
+  maxReductionDb: number;
+  mode: VocalDeEsserMode;
+}
+
+export interface WarmthSaturationConfig {
+  enabled: boolean;
+  driveDb: number;
+  blend: number;
+  warmthBias: number;
+  autoGain: boolean;
+}
+
+export interface VocalCompressorConfig {
+  enabled: boolean;
+  thresholdDb: number;
+  ratio: number;
+  attackMs: number;
+  releaseMs: number;
+  kneeWidthDb: number;
+  makeupGainDb: number;
+  optoCharacter: boolean;
+}
+
+export interface PresenceExciterConfig {
+  enabled: boolean;
+  airFreqHz: number;
+  airGainDb: number;
+  harmonicDrive: number;
+  airBlend: number;
+}
+
+export interface TruePeakLimiterConfig {
+  enabled: boolean;
+  ceilingDbtp: number;
+  releaseMs: number;
+  lookaheadMs: number;
+}
+
+export interface VocalBusRackConfig {
+  presetName: string;
+  bypass: boolean;
+  eq: HpfSurgicalEqConfig;
+  deesser: DynamicDeEsserConfig;
+  saturation: WarmthSaturationConfig;
+  compressor: VocalCompressorConfig;
+  exciter: PresenceExciterConfig;
+  limiter: TruePeakLimiterConfig;
+}
+
+export interface VocalBusReport {
+  inputPath: string;
+  outputPath: string;
+  sampleRate: number;
+  channels: number;
+  totalSamples: number;
+  durationSec: number;
+  initialPeakDb: number;
+  finalPeakDb: number;
+  maxCompressionDb: number;
+  maxDeesserDb: number;
+  limiterClampedSamples: number;
+  processingTimeMs: number;
+}
+
 export interface MixingEffectsConfig {
   enabled: boolean;
   vstSteps?: Record<string, VstStepConfig>;
@@ -862,17 +1147,20 @@ export interface MixingEffectsConfig {
     bypass: boolean;
   };
   
-  // Дакинг (Ducking) оригинальных реплик под наш голос (дубляж/рекаст)
+  // Дакинг (Ducking) оригинальных реплик под наш голос (дубляж/рекаст/закадр)
   ducking: {
     enabled: boolean;
-    duckingDb: number; // на сколько опускать оригинальные реплики (например, -16 dB, настраиваемо)
-    attackMs: number; // Плавность входа (мс)
-    releaseMs: number; // Плавность восстановления (мс)
-    holdMs: number; // Удержание дакинга во время пауз внутри фразы (мс)
+    duckingDb: number; // на сколько опускать оригинальные реплики (например, -16 dB для закадра, -24 dB для рекаста, -96 dB / Mute для дубляжа)
+    attackMs: number; // Плавность входа / Fade-down (мс, по умолчанию 100 мс)
+    releaseMs: number; // Плавность восстановления (мс, по умолчанию 350 мс)
+    holdMs: number; // Удержание дакинга во время пауз внутри фразы (мс, по умолчанию 150 мс)
     targetStem: 'separated_voice' | 'all_original' | 'music_bgm';
-    recastDuckingDb: number; // Дакинг для рекаста (-16 dB)
-    dubbingDuckingDb: number; // Дакинг для полного дубляжа (-18 dB)
-    voiceoverDuckingDb: number; // Дакинг для закадра (0 dB - не понижается)
+    recastDuckingDb: number; // Дакинг для рекаста (-24 dB)
+    dubbingDuckingDb: number; // Дакинг для полного дубляжа (-96 dB / Mute)
+    voiceoverDuckingDb: number; // Дакинг для закадра (-16 dB)
+    lookaheadMs?: number; // Упреждение до начала фразы (мс, по умолчанию 50 мс)
+    fadeDownMs?: number; // S-кривая спуска (мс, по умолчанию 100 мс)
+    meDuckingDb?: number; // Ослабление дорожки музыки/шумов M&E (-1.5 dB или 0)
     bypass: boolean;
   };
   
@@ -889,10 +1177,14 @@ export interface MixingEffectsConfig {
     bypass: boolean;
   };
   
-  // Обработка мастер-шины голоса (Цепочка из Adobe Audition)
+  // Обработка мастер-шины голоса (Студийный рэк на Rust DSP ИЛИ пользовательская цепочка VST-плагинов)
   vocalBusProcessing: {
     enabled: boolean;
-    chain: AuditionVocalBusChainConfig;
+    mode: 'rustDsp' | 'vstRack'; // Переключатель: собственный студийный рэк на Rust или кастомная цепочка VST
+    useRustDsp?: boolean;
+    nativeRack?: VocalBusRackConfig;
+    vstRack?: VstRackConfig;
+    chain?: AuditionVocalBusChainConfig;
     glueCompressor: {
       enabled: boolean;
       threshold: number; // dB
@@ -933,16 +1225,125 @@ export interface MixingAuditEntry {
     adjustedGainDb?: number;
     duckingDb?: number;
     detectedFx?: string;
+    detectedEnv?: string;
+    preset?: any;
     vstPluginName?: string;
     measuredValue?: string;
     fixSuggestion?: string;
   };
 }
 
+// ============================================================================
+// ПРЕДРЕЛИЗНЫЙ АУДИТ И КОНТРОЛЬ КАЧЕСТВА (PRE-RELEASE QA AUDIT - RUST ENGINE)
+// ============================================================================
+
+export type QaIncidentType = 
+  | 'true_peak_overload' 
+  | 'digital_clipping' 
+  | 'digital_click' 
+  | 'anomalous_silence' 
+  | 'missing_actor_line' 
+  | 'lufs_out_of_spec';
+
+export type QaSeverity = 'error' | 'warning' | 'info';
+
+export interface QaTimecode {
+  seconds: number;
+  milliseconds: number;
+  sampleIndex: number;
+  durationSeconds?: number;
+  durationMs?: number;
+  sampleCount?: number;
+  smpteTimecode: string;
+}
+
+export interface QaIncident {
+  id: string;
+  incidentType: QaIncidentType;
+  severity: QaSeverity;
+  timecode: QaTimecode;
+  channel?: number;
+  channelName: string;
+  trackName?: string;
+  characterRole?: string;
+  scriptCueId?: string;
+  title: string;
+  description: string;
+  measuredValue: string;
+  thresholdValue: string;
+  fixSuggestion: string;
+}
+
+export interface QaAudioMetrics {
+  integratedLufs: number;
+  loudnessRangeLu: number;
+  maxTruePeakDbtp: number;
+  maxTruePeakLinear: number;
+  maxSamplePeakDbfs: number;
+  truePeakOverloadCount: number;
+  digitalClippingEventsCount: number;
+  totalClippedSamples: number;
+  digitalClicksCount: number;
+  anomalousSilenceCount: number;
+}
+
+export interface QaScriptCoverageMetrics {
+  totalScriptCues: number;
+  coveredScriptCues: number;
+  missingScriptCues: number;
+  coveragePercent: number;
+  isFullCoverage: boolean;
+}
+
+export interface QaSummary {
+  totalIncidents: number;
+  errorsCount: number;
+  warningsCount: number;
+  infoCount: number;
+  isBroadcastReady: boolean;
+}
+
+export interface QaAuditReport {
+  projectId: string;
+  projectName: string;
+  auditedAt: string;
+  sampleRate: number;
+  channels: number;
+  totalFrames: number;
+  durationSeconds: number;
+  auditElapsedMs: number;
+  passed: boolean;
+  summary: QaSummary;
+  audioMetrics: QaAudioMetrics;
+  scriptCoverage: QaScriptCoverageMetrics;
+  incidents: QaIncident[];
+}
+
+export interface MasteringStats {
+  standardApplied: string;
+  initialIntegratedLufs: number;
+  initialTruePeakDbtp: number;
+  initialLoudnessRangeLu: number;
+  targetIntegratedLufs: number;
+  finalIntegratedLufs: number;
+  finalTruePeakDbtp: number;
+  finalLoudnessRangeLu: number;
+  truePeakCeilingDbtp: number;
+  normalizationGainAppliedDb: number;
+  maxGainReductionDb: number;
+  totalLimitedEvents: number;
+  isCompliant: boolean;
+  sampleRate: number;
+  channels: number;
+  durationSec: number;
+  referenceTrackLufs?: number | null;
+  outputPath: string;
+}
+
 // Замечание или ошибка при контроле качества (QA)
 export interface QualityControlIssue {
   id: string;
-  type: 'clipping' | 'silence' | 'overlap' | 'missing_sub' | 'lufs_deviation';
+  type: 'clipping' | 'silence' | 'overlap' | 'missing_sub' | 'lufs_deviation' | 'true_peak' | 'click';
   severity: 'error' | 'warning' | 'info';
   time: number; // секунды на таймлайне
   duration?: number;
@@ -954,6 +1355,7 @@ export interface QualityControlIssue {
   fixSuggestion?: string;
   measuredValue?: string;
   isResolved?: boolean;
+  rawIncident?: QaIncident;
 }
 
 // Результат выполнения финального рендера
@@ -1074,6 +1476,83 @@ export interface MixingPreset {
   phase2Order?: string[];
   phase3Order?: string[];
   phase4Order?: string[];
+}
+
+// ============================================================================
+// SQLITE NATIVE PROJECT REPOSITORY DTOs
+// ============================================================================
+
+export interface AudioClipPayload {
+  id: string;
+  filePath: string;
+  startTimeMs: number;
+  durationMs: number;
+  sourceOffsetMs: number;
+  gainDb: number;
+  isActive: boolean;
+  backstageVideoPath?: string | null;
+}
+
+export interface RackPresetPayload {
+  id: string;
+  fxChainJson: string;
+}
+
+export interface TrackPayload {
+  id: string;
+  name: string;
+  trackType: string;
+  volume: number;
+  pan: number;
+  isMuted: boolean;
+  isSolo: boolean;
+  orderIndex: number;
+  clips: AudioClipPayload[];
+  rackPreset?: RackPresetPayload | null;
+}
+
+export interface SubtitlePayload {
+  id: string;
+  characterName: string;
+  text: string;
+  startTimeMs: number;
+  endTimeMs: number;
+  matchedClipId?: string | null;
+}
+
+export interface FullProjectPayload {
+  id: string;
+  name: string;
+  sampleRate: number;
+  frameRate: number;
+  targetLufs: number;
+  createdAt: string;
+  updatedAt: string;
+  audioOffsetMs: number;
+  metadata: Record<string, any>;
+  tracks: TrackPayload[];
+  subtitles: SubtitlePayload[];
+}
+
+export interface ProjectSaveResult {
+  projectId: string;
+  updatedAt: string;
+  canUndo: boolean;
+  canRedo: boolean;
+  snapshotSequence: number;
+}
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  sampleRate: number;
+  frameRate: number;
+  targetLufs: number;
+  createdAt: string;
+  updatedAt: string;
+  trackCount: number;
+  clipCount: number;
+  subtitleCount: number;
 }
 
 declare global {

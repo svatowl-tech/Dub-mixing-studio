@@ -4,7 +4,6 @@ use rustfft::{FftPlanner, num_complex::Complex32};
 use serde::{Deserialize, Serialize};
 use std::f32::consts::PI;
 use std::path::Path;
-use tauri::command;
 use crate::logger::log_debug;
 
 /// Одиночный кадр спектрограммы

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { VstRackConfig } from "../types";
 
 export interface PluginMetadata {
   name: string;
@@ -9,7 +10,7 @@ export interface PluginMetadata {
   outputs: number;
   unique_id: number;
   path: string;
-  format: string; // "VST2" or "VST3"
+  format: string; // "VST2", "VST3", "AU"
 }
 
 export interface PluginParameter {
@@ -17,6 +18,17 @@ export interface PluginParameter {
   name: string;
   label: string;
   value: number;
+}
+
+export interface VstProcessReport {
+  input_file: string;
+  output_file: string;
+  processed_samples: number;
+  duration_seconds: number;
+  active_plugins_count: number;
+  peak_before_db: number;
+  peak_after_db: number;
+  processing_time_ms: number;
 }
 
 const isTauriAvailable = (): boolean => {
@@ -31,6 +43,47 @@ export const scanPlugins = async (): Promise<PluginMetadata[]> => {
     console.warn("[VSTHost] scanPlugins error:", err);
     return [];
   }
+};
+
+export const scanPluginsWithPaths = async (customPaths: string[]): Promise<PluginMetadata[]> => {
+  if (!isTauriAvailable()) return [];
+  try {
+    return await invoke("scan_plugins_with_paths", { customPaths });
+  } catch (err) {
+    console.warn("[VSTHost] scanPluginsWithPaths error:", err);
+    return [];
+  }
+};
+
+export const batchProcessVstChainNative = async (
+  filePairs: [string, string][],
+  rack: VstRackConfig
+): Promise<VstProcessReport[]> => {
+  if (!isTauriAvailable()) {
+    throw new Error('Обработка сторонними VST2/VST3 плагинами требует десктопного окружения с установленными в ОС плагинами. Переключите режим шины на нативный Rust DSP рэк или запустите приложение через Tauri.');
+  }
+
+  const payload = {
+    preset_name: rack.presetName || 'User VST Rack',
+    bypass: Boolean(rack.bypass),
+    master_mix: typeof rack.masterMix === 'number' ? rack.masterMix : 1.0,
+    master_gain_db: typeof rack.masterGainDb === 'number' ? rack.masterGainDb : 0.0,
+    plugins: (rack.plugins || []).map(p => ({
+      id: p.id,
+      name: p.name,
+      path: p.pluginPath,
+      format: p.vstVersion,
+      bypass: Boolean(p.bypass),
+      mix: typeof p.mix === 'number' ? p.mix : 1.0,
+      gain_db: typeof p.gainDb === 'number' ? p.gainDb : 0.0,
+      parameters: p.parameters || {},
+    })),
+  };
+
+  return await invoke("batch_process_vst_chain", {
+    filePairs,
+    config: payload,
+  });
 };
 
 export const loadPlugin = async (path: string): Promise<string> => {

@@ -214,6 +214,16 @@ export const tauriAPI = {
       const cleanData = { ...args.projectData };
       
       await invoke('save_project_file', { path: filePath, data: JSON.stringify(cleanData, null, 2) });
+      
+      // Sync into SQLite transactional database
+      try {
+        const { convertProjectToFullPayload } = await import('../services/projectRepositoryService');
+        const payload = convertProjectToFullPayload(args.projectData);
+        await invoke('save_project_atomic', { project: payload, actionName: 'File Save' });
+      } catch (dbErr) {
+        console.warn('Background SQLite save warning:', dbErr);
+      }
+
       IOLogger.log('PROJECT', 'saveProjectJson', 'SUCCESS', { filePath });
       return { success: true, data: true };
     } catch(err) {
@@ -301,30 +311,24 @@ export const tauriAPI = {
       
       return { success: true, data: { filePath: wavPath, peaks, duration } };
     } catch(err) {
-      console.error("Peak extract error, using fallback waveform:", err);
-      // Fallback: Try to get duration or assume 30s, and generate dummy peaks
-      let duration = 30; // default
+      console.warn("Event extract_audio_peaks failed, trying direct native command:", err);
       try {
-          const info = await invoke<any>('get_file_info', { path: videoPath });
-          if (info && info.duration) duration = info.duration;
-      } catch(e) {}
-
-      // Use WaveformService fallback if possible, otherwise generate legacy way manually
-      const points = Math.max(100, Math.floor(duration * 50));
-      const dummyPeaks = new Float32Array(points);
-      for(let i=0; i<points; i++) {
-          dummyPeaks[i] = 0.05 + Math.random() * 0.1;
-          if (i % 50 === 0) dummyPeaks[i] = 0.3; // some spikes for visual feedback
+        const info = await invoke<any>('get_file_info', { path: videoPath });
+        const duration = info?.duration || 0;
+        const points = Math.max(100, Math.floor((duration || 30) * 50));
+        const rawPeaks = await invoke<number[]>('generate_waveform_peaks', { filePath: videoPath, points });
+        const peaks = new Float32Array(rawPeaks);
+        return {
+          success: true,
+          data: { filePath: wavPath, peaks, duration: duration || (peaks.length / 50.0) }
+        };
+      } catch (directErr) {
+        console.error("Direct waveform extraction failed:", directErr);
+        return {
+          success: false,
+          error: `Ошибка извлечения формы волны: ${String(directErr || err)}`
+        };
       }
-
-      return { 
-          success: true, // We return success even if peaks are dummy to keep UI alive
-          data: { 
-              filePath: wavPath, 
-              peaks: dummyPeaks, 
-              duration 
-          } 
-      };
     }
   },
 

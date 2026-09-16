@@ -7,6 +7,10 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+export const isTauriAvailable = (): boolean => {
+  return typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
+};
+
 export const getDefaultKeyMap = (): KeyMap => ({
   'play_pause': { label: 'Воспроизведение/Пауза', code: 'Space' },
   'record_toggle': { label: 'Начать/Остановить запись', code: 'KeyR' },

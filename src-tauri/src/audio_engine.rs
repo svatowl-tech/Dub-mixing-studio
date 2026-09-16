@@ -129,6 +129,7 @@ pub struct CachedAudioFile {
     pub samples: Vec<f32>,
     pub channels: u16,
     pub sample_rate: u32,
+    #[allow(dead_code)]
     pub duration: f64,
 }
 

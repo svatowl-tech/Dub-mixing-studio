@@ -494,152 +494,178 @@ pub async fn denoise_audio_task(
     let mut planner = FftPlanner::new();
 
     // 4. Проверка наличия ONNX-модели
-    if let Some(path) = model_path {
+    let (cleaned_channels_44k, provider_used, is_neural) = if let Some(ref path) = model_path {
         // --- РЕЖИМ 1: НЕЙРОСЕТЕВОЙ ИНФЕРЕНС ЧЕРЕЗ ORT (DirectML/CUDA/CoreML/CPU) ---
-        let (mut session, provider_used) = init_onnx_session(&path)?;
-        println!("[UVR-DeNoise] Провайдер ONNX Runtime: {}", provider_used);
+        let neural_attempt = (|| -> Result<(Vec<Vec<f32>>, String), String> {
+            let (mut session, prov) = init_onnx_session(path)?;
+            
+            let input_name = session.inputs.first()
+                .map(|inp| inp.name.clone())
+                .unwrap_or_else(|| "input".to_string());
 
-        let mut cleaned_channels_44k: Vec<Vec<f32>> = Vec::with_capacity(num_channels);
+            println!("[UVR-DeNoise] Провайдер ONNX Runtime: {}, имя входа: '{}'", prov, input_name);
 
-        for ch in 0..num_channels {
-            let (mut magnitudes, phases) = compute_stft(
-                &resampled_channels[ch],
-                FFT_SIZE,
-                HOP_SIZE,
-                &hann,
-                &mut planner,
-            );
+            let mut expected_channels = 2usize;
+            let mut expected_bins = 1025usize;
+            let mut expected_time_steps = 256usize;
+            let mut fft_len = FFT_SIZE;
 
-            let num_frames = magnitudes.len();
-            let num_bins = FFT_SIZE / 2 + 1;
-
-            // Разделение на перекрывающиеся временные чанки для батча нейросети
-            let mut chunk_start = 0;
-            let mut processed_chunk_count = 0;
-            let total_chunks = (num_frames + CHUNK_HOP_STEPS - 1) / CHUNK_HOP_STEPS;
-
-            while chunk_start < num_frames {
-                let current_steps = CHUNK_TIME_STEPS.min(num_frames - chunk_start);
-
-                // Формирование 4D-тензора формы [batch_size: 1, channels: 2, freq_bins: 1025, time_steps: 256]
-                let mut tensor_data = Array4::<f32>::zeros((1, 2, num_bins, CHUNK_TIME_STEPS));
-
-                for t in 0..current_steps {
-                    let frame_idx = chunk_start + t;
-                    for k in 0..num_bins {
-                        let mag = magnitudes[frame_idx][k];
-                        tensor_data[[0, 0, k, t]] = mag;
-                        tensor_data[[0, 1, k, t]] = mag; // Стерео-дублирование для MDX VR моделей
-                    }
-                }
-
-                // Инференс в ONNX Runtime
-                let input_tensor = Tensor::from_array(tensor_data)
-                    .map_err(|e| format!("Ошибка создания входного ONNX тензора: {}", e))?;
-
-                let outputs = session
-                    .run(ort::inputs!["input" => input_tensor])
-                    .map_err(|e| format!("Ошибка инференса UVR-DeNoise: {}", e))?;
-
-                // Извлечение маски или очищенной спектрограммы
-                if let Some(out_val) = outputs.values().next() {
-                    if let Ok((out_shape, out_slice)) = out_val.try_extract_tensor::<f32>() {
-                        let time_dim = if out_shape.len() >= 4 { out_shape[3] as usize } else { current_steps };
-                        let freq_dim = if out_shape.len() >= 3 { out_shape[2] as usize } else { num_bins };
-
-                        let steps_to_apply = current_steps.min(time_dim);
-                        let bins_to_apply = num_bins.min(freq_dim);
-
-                        for t in 0..steps_to_apply {
-                            let frame_idx = chunk_start + t;
-                            for k in 0..bins_to_apply {
-                                let flat_idx = k * time_dim + t;
-                                let predicted_clean = if flat_idx < out_slice.len() {
-                                    out_slice[flat_idx]
-                                } else {
-                                    magnitudes[frame_idx][k]
-                                };
-
-                                let orig = magnitudes[frame_idx][k];
-                                // Плавный блендинг силы шумоподавления (Dry/Wet)
-                                let blended = orig * (1.0 - strength_factor) + predicted_clean.min(orig) * strength_factor;
-                                magnitudes[frame_idx][k] = blended.max(0.0);
+            if let Some(first_input) = session.inputs.first() {
+                if let ort::value::ValueType::Tensor { dimensions, .. } = &first_input.input_type {
+                    if dimensions.len() == 4 {
+                        if let Some(ch) = dimensions[1] {
+                            if ch > 0 { expected_channels = ch as usize; }
+                        }
+                        if let Some(f) = dimensions[2] {
+                            if f > 0 {
+                                expected_bins = f as usize;
+                                if expected_bins == 3072 {
+                                    fft_len = 6144;
+                                } else if expected_bins == 2048 {
+                                    fft_len = 4096;
+                                } else if expected_bins == 1025 {
+                                    fft_len = 2048;
+                                }
                             }
+                        }
+                        if let Some(t) = dimensions[3] {
+                            if t > 0 { expected_time_steps = t as usize; }
                         }
                     }
                 }
-
-                chunk_start += CHUNK_HOP_STEPS;
-                processed_chunk_count += 1;
-
-                let channel_progress_base = (ch as f32 / num_channels as f32) * 80.0;
-                let chunk_progress = (processed_chunk_count as f32 / total_chunks.max(1) as f32) * (80.0 / num_channels as f32);
-                let current_percent = 10.0 + channel_progress_base + chunk_progress;
-
-                app_handle.emit("denoise-progress", ProgressPayload {
-                    percent: current_percent.min(92.0),
-                    current_frame: (chunk_start * HOP_SIZE).min(target_44k_len),
-                    total_frames: target_44k_len,
-                    stage: format!("Инференс нейросети UVR (Канал {}/{}, {})...", ch + 1, num_channels, provider_used),
-                }).ok();
             }
 
-            // Обратное iSTFT с Overlap-Add
-            let restored = compute_istft_ola(
-                &magnitudes,
-                &phases,
-                FFT_SIZE,
-                HOP_SIZE,
-                &hann,
-                &mut planner,
-                target_44k_len,
-            );
-            cleaned_channels_44k.push(restored);
+            println!("[UVR-DeNoise] Параметры ONNX: каналы={}, бины={}, шаги={}, FFT={}",
+                expected_channels, expected_bins, expected_time_steps, fft_len);
+
+            let win = generate_hann_window(fft_len);
+            let chunk_hop = expected_time_steps / 2;
+            let mut cleaned = Vec::with_capacity(num_channels);
+
+            for ch in 0..num_channels {
+                let (mut magnitudes, phases) = compute_stft(
+                    &resampled_channels[ch],
+                    fft_len,
+                    HOP_SIZE,
+                    &win,
+                    &mut planner,
+                );
+
+                let num_frames = magnitudes.len();
+                let num_bins = fft_len / 2 + 1;
+
+                let mut chunk_start = 0;
+                let mut processed_chunk_count = 0;
+                let total_chunks = (num_frames + chunk_hop - 1) / chunk_hop;
+
+                while chunk_start < num_frames {
+                    let current_steps = expected_time_steps.min(num_frames - chunk_start);
+
+                    let mut tensor_data = Array4::<f32>::zeros((1, expected_channels, expected_bins, expected_time_steps));
+
+                    for t in 0..current_steps {
+                        let frame_idx = chunk_start + t;
+                        let max_k = num_bins.min(expected_bins);
+                        for k in 0..max_k {
+                            let mag = magnitudes[frame_idx][k];
+                            let p = phases[frame_idx][k];
+
+                            if expected_channels >= 4 {
+                                tensor_data[[0, 0, k, t]] = mag * p.cos();
+                                tensor_data[[0, 1, k, t]] = mag * p.sin();
+                                tensor_data[[0, 2, k, t]] = mag * p.cos();
+                                tensor_data[[0, 3, k, t]] = mag * p.sin();
+                            } else if expected_channels == 2 {
+                                tensor_data[[0, 0, k, t]] = mag;
+                                tensor_data[[0, 1, k, t]] = mag;
+                            } else {
+                                tensor_data[[0, 0, k, t]] = mag;
+                            }
+                        }
+                    }
+
+                    let input_tensor = Tensor::from_array(tensor_data)
+                        .map_err(|e| format!("Ошибка создания входного ONNX тензора: {}", e))?;
+
+                    let outputs = session
+                        .run(ort::inputs![input_name.as_str() => input_tensor])
+                        .map_err(|e| format!("Ошибка инференса UVR-DeNoise: {}", e))?;
+
+                    if let Some(out_val) = outputs.values().next() {
+                        if let Ok((out_shape, out_slice)) = out_val.try_extract_tensor::<f32>() {
+                            let time_dim = if out_shape.len() >= 4 { out_shape[3] as usize } else { current_steps };
+                            let freq_dim = if out_shape.len() >= 3 { out_shape[2] as usize } else { num_bins };
+
+                            let steps_to_apply = current_steps.min(time_dim);
+                            let bins_to_apply = num_bins.min(freq_dim);
+
+                            for t in 0..steps_to_apply {
+                                let frame_idx = chunk_start + t;
+                                for k in 0..bins_to_apply {
+                                    let flat_idx = k * time_dim + t;
+                                    let predicted_clean = if flat_idx < out_slice.len() {
+                                        out_slice[flat_idx].abs()
+                                    } else {
+                                        magnitudes[frame_idx][k]
+                                    };
+
+                                    let orig = magnitudes[frame_idx][k];
+                                    let blended = orig * (1.0 - strength_factor) + predicted_clean.min(orig) * strength_factor;
+                                    magnitudes[frame_idx][k] = blended.max(0.0);
+                                }
+                            }
+                        }
+                    }
+
+                    chunk_start += chunk_hop;
+                    processed_chunk_count += 1;
+
+                    let channel_progress_base = (ch as f32 / num_channels as f32) * 80.0;
+                    let chunk_progress = (processed_chunk_count as f32 / total_chunks.max(1) as f32) * (80.0 / num_channels as f32);
+                    let current_percent = 10.0 + channel_progress_base + chunk_progress;
+
+                    app_handle.emit("denoise-progress", ProgressPayload {
+                        percent: current_percent.min(92.0),
+                        current_frame: (chunk_start * HOP_SIZE).min(target_44k_len),
+                        total_frames: target_44k_len,
+                        stage: format!("Инференс нейросети UVR (Канал {}/{}, {})...", ch + 1, num_channels, prov),
+                    }).ok();
+                }
+
+                let restored = compute_istft_ola(
+                    &magnitudes,
+                    &phases,
+                    fft_len,
+                    HOP_SIZE,
+                    &win,
+                    &mut planner,
+                    target_44k_len,
+                );
+                cleaned.push(restored);
+            }
+
+            Ok((cleaned, prov))
+        })();
+
+        match neural_attempt {
+            Ok((cleaned, prov)) => (Some(cleaned), prov, true),
+            Err(e) => {
+                println!("[UVR-DeNoise] ⚠️ Ошибка инференса ONNX ({}), переключение на алгоритмический DSP движок...", e);
+                (None, "CPU SIMD Audio DSP".to_string(), false)
+            }
         }
+    } else {
+        (None, "CPU SIMD Audio DSP".to_string(), false)
+    };
 
-        // 5. Ресэмплинг обратно к исходной частоте дискретизации при необходимости
-        app_handle.emit("denoise-progress", ProgressPayload {
-            percent: 94.0,
-            current_frame: target_44k_len,
-            total_frames: target_44k_len,
-            stage: "Финализация и запись очищенного WAV...".to_string(),
-        }).ok();
-
-        let final_channels = if orig_sample_rate != UVR_TARGET_SAMPLE_RATE {
-            resample_channels(&cleaned_channels_44k, UVR_TARGET_SAMPLE_RATE, orig_sample_rate)?
-        } else {
-            cleaned_channels_44k
-        };
-
-        // Запись выходного WAV
-        write_output_wav(&output_path, &final_channels, orig_spec)?;
-
-        app_handle.emit("denoise-progress", ProgressPayload {
-            percent: 100.0,
-            current_frame: orig_total_frames,
-            total_frames: orig_total_frames,
-            stage: "Готово! Вокал очищен нейросетью UVR DeNoise.".to_string(),
-        }).ok();
-
-        let noise_db = (strength_factor * 22.0 * 10.0).round() / 10.0;
-        println!("[UVR-DeNoise] <<< УСПЕШНО ЗАВЕРШЕНО (Нейросеть) >>> Подавление: -{:.1} dB", noise_db);
-
-        Ok(DenoiseReport {
-            model_name: chosen_model,
-            provider_used,
-            sample_rate: orig_sample_rate,
-            channels: orig_spec.channels,
-            duration_sec: (duration_sec * 100.0).round() / 100.0,
-            noise_reduction_db: noise_db,
-            processed_path: output_path.to_string_lossy().to_string(),
-            is_neural: true,
-        })
+    let (cleaned_channels_44k, provider_used, is_neural, final_engine_name, max_atten_db) = if let Some(cleaned) = cleaned_channels_44k {
+        (cleaned, provider_used, is_neural, "ONNX Neural Model".to_string(), 22.0 * strength_factor)
     } else {
         // --- РЕЖИМ 2: ТОЧНЫЙ АЛГОРИТМИЧЕСКИЙ DSP-ДВИЖОК ПОД ВЫБРАННУЮ МОДЕЛЬ ФРОНТЕНДА ---
-        let mut cleaned_channels_44k: Vec<Vec<f32>> = Vec::with_capacity(num_channels);
+        let mut cleaned = Vec::with_capacity(num_channels);
         let model_id = chosen_model.as_str();
 
-        let (dsp_engine_name, max_atten_db): (&str, f32) = match model_id {
+        let (dsp_engine_name, max_db): (&str, f32) = match model_id {
             "intel_ai_denoise" => ("Intel Voice Clean (4-Band Downward Expander)", 30.0),
             "deep_noise" => ("Deep Denoise (Bark Psychoacoustic Noise Tracker)", 36.0),
             "uvr_denoise_lite" => ("VR-DeNoise Lite (Fast Spectral Gate)", 22.0),
@@ -648,7 +674,7 @@ pub async fn denoise_audio_task(
             _ => ("Spectral Gate AFFTDN (Wiener Spectral Subtraction)", 34.0),
         };
 
-        println!("[UVR-DeNoise] Применение DSP алгоритма: '{}', глубина: до -{:.1} dB", dsp_engine_name, max_atten_db);
+        println!("[UVR-DeNoise] Применение DSP алгоритма: '{}', глубина: до -{:.1} dB", dsp_engine_name, max_db);
 
         for ch in 0..num_channels {
             let (mut magnitudes, phases) = compute_stft(
@@ -681,16 +707,13 @@ pub async fn denoise_audio_task(
             }
 
             // 2. Вычисление коэффициентов усиления для каждого фрейма в зависимости от выбранной модели
-            let min_atten_linear = 10.0_f32.powf((-max_atten_db * strength_factor) / 20.0).clamp(0.001, 1.0);
+            let min_atten_linear = 10.0_f32.powf((-max_db * strength_factor) / 20.0).clamp(0.001, 1.0);
 
             for f in 0..num_frames {
-                // Временной срез магнитуд
                 let mut gains = vec![1.0_f32; num_bins];
 
                 match model_id {
                     "intel_ai_denoise" => {
-                        // 4-полосный Downward Expander
-                        // Полосы: 0..12 (~0-250 Гц), 12..70 (~250-1500 Гц), 70..280 (~1.5-6 кГц), 280..num_bins (>6 кГц)
                         let bands: [(usize, usize); 4] = [
                             (0, 12),
                             (12, 70),
@@ -709,7 +732,6 @@ pub async fn denoise_audio_task(
                             band_energy /= count;
                             band_noise /= count;
 
-                            // Порог экспандера: шум + 4 dB
                             let exp_threshold = band_noise * (1.5 + strength_factor * 1.5);
                             let band_gain = if band_energy > exp_threshold {
                                 1.0_f32
@@ -725,7 +747,6 @@ pub async fn denoise_audio_task(
                         }
                     },
                     "deep_noise" => {
-                        // Психоакустический трекер формант речи (подавление межгармонического шума)
                         for k in 0..num_bins {
                             let orig = magnitudes[f][k];
                             let floor = noise_floor[k] * (1.1 + strength_factor * 1.4);
@@ -738,7 +759,6 @@ pub async fn denoise_audio_task(
                         }
                     },
                     "uvr_denoise_foxjoy" => {
-                        // Речевой оптимизатор FoxJoy: защищаем форманты речи 300..3800 Гц (бины 14..180)
                         for k in 0..num_bins {
                             let orig = magnitudes[f][k];
                             let is_vocal_formant = k >= 14 && k <= 180;
@@ -755,7 +775,6 @@ pub async fn denoise_audio_task(
                         }
                     },
                     "uvr_denoise_full" => {
-                        // Максимально глубокое подавление шума с крутым VAD гейтом
                         let mut frame_power = 0.0_f32;
                         let mut noise_power = 0.0_f32;
                         for k in 0..num_bins {
@@ -778,7 +797,6 @@ pub async fn denoise_audio_task(
                         }
                     },
                     _ => {
-                        // "spectral_gate" (AFFTDN - Спектральный гейт)
                         let threshold_scale = 1.0 + strength_factor * 1.8;
                         for k in 0..num_bins {
                             let orig = magnitudes[f][k];
@@ -822,39 +840,53 @@ pub async fn denoise_audio_task(
                 &mut planner,
                 target_44k_len,
             );
-            cleaned_channels_44k.push(restored);
+            cleaned.push(restored);
         }
 
-        let final_channels = if orig_sample_rate != UVR_TARGET_SAMPLE_RATE {
-            resample_channels(&cleaned_channels_44k, UVR_TARGET_SAMPLE_RATE, orig_sample_rate)?
+        (cleaned, format!("CPU SIMD Audio DSP [{}]", dsp_engine_name), false, dsp_engine_name.to_string(), max_db * strength_factor)
+    };
+
+    // 5. Ресэмплинг обратно к исходной частоте дискретизации при необходимости
+    app_handle.emit("denoise-progress", ProgressPayload {
+        percent: 94.0,
+        current_frame: target_44k_len,
+        total_frames: target_44k_len,
+        stage: "Финализация и запись очищенного WAV...".to_string(),
+    }).ok();
+
+    let final_channels = if orig_sample_rate != UVR_TARGET_SAMPLE_RATE {
+        resample_channels(&cleaned_channels_44k, UVR_TARGET_SAMPLE_RATE, orig_sample_rate)?
+    } else {
+        cleaned_channels_44k
+    };
+
+    // Запись выходного WAV
+    write_output_wav(&output_path, &final_channels, orig_spec)?;
+
+    app_handle.emit("denoise-progress", ProgressPayload {
+        percent: 100.0,
+        current_frame: orig_total_frames,
+        total_frames: orig_total_frames,
+        stage: if is_neural {
+            "Готово! Вокал очищен нейросетью UVR DeNoise.".to_string()
         } else {
-            cleaned_channels_44k
-        };
+            format!("Шумоподавление завершено ({}).", final_engine_name)
+        },
+    }).ok();
 
-        write_output_wav(&output_path, &final_channels, orig_spec)?;
+    let noise_db = (max_atten_db * 10.0).round() / 10.0;
+    println!("[UVR-DeNoise] <<< УСПЕШНО ЗАВЕРШЕНО >>> Движок: '{}', Подавление: -{:.1} dB", provider_used, noise_db);
 
-        app_handle.emit("denoise-progress", ProgressPayload {
-            percent: 100.0,
-            current_frame: orig_total_frames,
-            total_frames: orig_total_frames,
-            stage: format!("Шумоподавление завершено ({}).", dsp_engine_name),
-        }).ok();
-
-        let applied_db = ((max_atten_db * strength_factor) * 10.0).round() / 10.0;
-        println!("[UVR-DeNoise] <<< УСПЕШНО ЗАВЕРШЕНО (DSP) >>> Алгоритм: '{}', Подавление: -{:.1} dB",
-            dsp_engine_name, applied_db);
-
-        Ok(DenoiseReport {
-            model_name: format!("{} [{}]", chosen_model, dsp_engine_name),
-            provider_used: "CPU SIMD Audio DSP Engine".to_string(),
-            sample_rate: orig_sample_rate,
-            channels: orig_spec.channels,
-            duration_sec: (duration_sec * 100.0).round() / 100.0,
-            noise_reduction_db: applied_db,
-            processed_path: output_path.to_string_lossy().to_string(),
-            is_neural: false,
-        })
-    }
+    Ok(DenoiseReport {
+        model_name: if is_neural { chosen_model } else { format!("{} [{}]", chosen_model, final_engine_name) },
+        provider_used,
+        sample_rate: orig_sample_rate,
+        channels: orig_spec.channels,
+        duration_sec: (duration_sec * 100.0).round() / 100.0,
+        noise_reduction_db: noise_db,
+        processed_path: output_path.to_string_lossy().to_string(),
+        is_neural,
+    })
 }
 
 /// Вспомогательная функция записи выходных сэмплов в 32-bit Float WAV

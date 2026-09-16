@@ -1,4 +1,4 @@
-import { MixingPreset, MixingType } from '../types';
+import { MixingPreset, MixingType, MixingEffectsConfig } from '../types';
 
 export const DEFAULT_PHASE1_ORDER = [
   'normalization',
@@ -152,7 +152,7 @@ export const createDefaultPhase2 = (type: MixingType) => ({
   }
 });
 
-export const createDefaultPhase3 = (type: MixingType) => ({
+export const createDefaultPhase3 = (type: MixingType): MixingEffectsConfig => ({
   enabled: true,
   vstSteps: {},
   gainMatching: {
@@ -165,15 +165,18 @@ export const createDefaultPhase3 = (type: MixingType) => ({
     bypass: false,
   },
   ducking: {
-    enabled: type !== MixingType.VOICEOVER, // Для закадра не понижается, для рекаста и дубляжа включен
-    duckingDb: type === MixingType.DUBBING ? -18 : -16, // -15..-18 dB
-    attackMs: 40,
-    releaseMs: 300,
-    holdMs: 250,
+    enabled: true, // Включен для всех типов проектов с интеллектуальной дифференциацией
+    duckingDb: type === MixingType.VOICEOVER ? -16 : (type === MixingType.RECAST ? -24 : -96),
+    attackMs: 100, // Fade-down 100 мс (S-curve)
+    releaseMs: 350, // Release 350 мс (300-500 мс, S-curve)
+    holdMs: 150, // Hold 150 мс
+    lookaheadMs: 50, // Lookahead 50 мс
+    fadeDownMs: 100, // S-curve Fade-down
+    meDuckingDb: -1.5, // M&E подложка ослабляется всего на -1.5 dB (опционально)
     targetStem: 'separated_voice' as const,
-    recastDuckingDb: -16,
-    dubbingDuckingDb: -18,
-    voiceoverDuckingDb: 0,
+    recastDuckingDb: -24,
+    dubbingDuckingDb: -96,
+    voiceoverDuckingDb: -16,
     bypass: false,
   },
   autoFxAnalysis: {
@@ -189,74 +192,68 @@ export const createDefaultPhase3 = (type: MixingType) => ({
   },
   vocalBusProcessing: {
     enabled: true,
-    chain: {
-      presetName: 'Audition Master VO Chain',
-      ozoneStabilizer: {
+    mode: 'rustDsp' as const,
+    useRustDsp: true,
+    nativeRack: {
+      presetName: 'Studio Master Vocal Bus Rack (Rust DSP)',
+      bypass: false,
+      eq: {
         enabled: true,
-        shape: 65,
-        speed: 50,
-        smoothness: 70,
-        bypass: false,
+        hpfCutoffHz: 75,
+        hpfOrder: 2,
+        notchEnabled: true,
+        notchFreqHz: 3200,
+        notchQ: 8.0,
+        notchGainDb: -6.0,
       },
-      rCompressor: {
+      deesser: {
         enabled: true,
-        threshold: -12.2,
-        ratio: 4.7,
-        attackMs: 149.6,
+        frequencyHz: 6500,
+        thresholdDb: -22.0,
+        ratio: 4.0,
+        attackMs: 1.5,
+        releaseMs: 50.0,
+        kneeWidthDb: 4.0,
+        maxReductionDb: -12.0,
+        mode: 'splitBand' as const,
+      },
+      saturation: {
+        enabled: true,
+        driveDb: 3.5,
+        blend: 0.35,
+        warmthBias: 0.15,
+        autoGain: true,
+      },
+      compressor: {
+        enabled: true,
+        thresholdDb: -18.0,
+        ratio: 3.0,
+        attackMs: 20.0,
         releaseMs: 120.0,
-        gainDb: 3.44,
-        warmth: 60,
-        bypass: false,
+        kneeWidthDb: 6.0,
+        makeupGainDb: 2.5,
+        optoCharacter: true,
       },
-      soothe2: {
+      exciter: {
         enabled: true,
-        depth: 5.27,
-        sharpness: 3.31,
-        selectivity: 4.07,
-        band1Freq: 328.8,
-        band1Sens: 5.94,
-        band3Freq: 3489.5,
-        band3Sens: 6.20,
-        bypass: false,
+        airFreqHz: 10000,
+        airGainDb: 2.5,
+        harmonicDrive: 0.20,
+        airBlend: 0.70,
       },
-      proQ4: {
+      limiter: {
         enabled: true,
-        highPassFreq: 80,
-        lowCutSlope: 12,
-        airShelfFreq: 12000,
-        airShelfGain: 1.5,
-        notchResonanceFreq: 3200,
-        notchCutDb: -2.0,
-        bypass: false,
+        ceilingDbtp: -1.0,
+        releaseMs: 60.0,
+        lookaheadMs: 1.5,
       },
-      rBass: {
-        enabled: true,
-        frequency: 43,
-        intensity: 5.0,
-        originalBassDb: -2.0,
-        bypass: false,
-      },
-      freshAir: {
-        enabled: true,
-        midAir: 24,
-        highAir: 32,
-        bypass: false,
-      },
-      rVox: {
-        enabled: true,
-        compression: -9.5,
-        gateThreshold: -80,
-        gainDb: 0.0,
-        bypass: false,
-      },
-      proDS: {
-        enabled: true,
-        threshold: -24,
-        range: -8,
-        frequency: 10000,
-        wideBand: true,
-        bypass: false,
-      },
+    },
+    vstRack: {
+      presetName: 'Пользовательская цепочка VST',
+      bypass: false,
+      masterMix: 1.0,
+      masterGainDb: 0.0,
+      plugins: [],
     },
     glueCompressor: {
       enabled: type === MixingType.DUBBING,

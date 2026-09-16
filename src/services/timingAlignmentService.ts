@@ -408,6 +408,8 @@ export class TimingAlignmentService {
     };
   }
 
+  private static whisperFileCache = new Map<string, WhisperTranscriptionResult>();
+
   /**
    * Нативное распознавание фразы через Whisper (Rust/whisper-rs) с авто-сопоставлением со сценарием
    */
@@ -424,41 +426,68 @@ export class TimingAlignmentService {
       return { text: seg.whisperText, confidence: seg.whisperConfidence || 0.95, matchedSub: matched };
     }
 
-    // 2. Вызов нативного Rust Whisper-движка в Tauri окружении
+    // 2. Вызов нативного Rust Whisper-движка в Tauri окружении (с кэшированием файла)
     if (isTauriAvailable() && seg.filePath && !seg.filePath.startsWith('blob:') && !seg.filePath.startsWith('data:')) {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
+        let result = this.whisperFileCache.get(seg.filePath);
+        if (!result) {
+          const { invoke } = await import('@tauri-apps/api/core');
 
-        const scriptLines = subtitles.map(s => ({
-          id: s.id,
-          text: s.text,
-          startTimestampMs: Math.round(s.start * 1000),
-          endTimestampMs: Math.round(s.end * 1000),
-          role: s.role
-        }));
+          const scriptLines = subtitles.map(s => ({
+            id: s.id,
+            text: s.text,
+            startTimestampMs: Math.round(s.start * 1000),
+            endTimestampMs: Math.round(s.end * 1000),
+            role: s.role
+          }));
 
-        const result = await invoke<WhisperTranscriptionResult>('transcribe_and_match_script', {
-          audioPath: seg.filePath,
-          config: {
-            modelType: whisperConfig?.model || 'whisper-base',
-            language: whisperConfig?.language || 'ru',
-            autoMatchScript: whisperConfig?.autoMatchSubtitles !== false,
-            scriptLines: scriptLines.length > 0 ? scriptLines : undefined,
-            minSimilarityThreshold: 0.35
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Whisper timeout (15s)')), 15000)
+          );
+
+          result = await Promise.race([
+            invoke<WhisperTranscriptionResult>('transcribe_and_match_script', {
+              audioPath: seg.filePath,
+              config: {
+                modelType: whisperConfig?.model || 'whisper-base',
+                language: whisperConfig?.language || 'ru',
+                autoMatchScript: whisperConfig?.autoMatchSubtitles !== false,
+                scriptLines: scriptLines.length > 0 ? scriptLines : undefined,
+                minSimilarityThreshold: 0.35
+              }
+            }),
+            timeoutPromise
+          ]);
+
+          if (result) {
+            this.whisperFileCache.set(seg.filePath, result);
           }
-        });
+        }
 
         if (result && result.items && result.items.length > 0) {
-          const firstItem = result.items[0];
-          const matchedSub = firstItem.matchedScriptId 
-            ? subtitles.find(s => s.id === firstItem.matchedScriptId)
+          const segStartMs = Math.round(seg.startTime * 1000);
+          const segEndMs = Math.round((seg.startTime + seg.duration) * 1000);
+
+          const matchingItems = result.items.filter(it => 
+            (it.startTimestampMs >= segStartMs - 600 && it.startTimestampMs <= segEndMs + 600) ||
+            (it.endTimestampMs >= segStartMs && it.endTimestampMs <= segEndMs) ||
+            (it.startTimestampMs <= segStartMs && it.endTimestampMs >= segEndMs)
+          );
+
+          const matchedItem = matchingItems.length > 0 ? matchingItems[0] : result.items[0];
+          const matchedSub = matchedItem.matchedScriptId 
+            ? subtitles.find(s => s.id === matchedItem.matchedScriptId)
             : this.findClosestSubtitle(seg.startTime, seg.duration, subtitles, roleHint);
 
+          const phraseText = matchingItems.length > 0 
+            ? matchingItems.map(m => m.text).join(' ') 
+            : matchedItem.text;
+
           return {
-            text: result.fullText || firstItem.text,
-            confidence: firstItem.confidence || result.averageConfidence || 0.92,
+            text: phraseText || result.fullText,
+            confidence: matchedItem.confidence || result.averageConfidence || 0.92,
             matchedSub,
-            similarity: firstItem.matchSimilarity
+            similarity: matchedItem.matchSimilarity
           };
         }
       } catch (err) {
@@ -540,7 +569,8 @@ export class TimingAlignmentService {
     originalVoiceTrack: AudioTrack | undefined,
     subtitles: SubtitleLine[],
     mixingType: MixingType,
-    config: TimingAlignmentConfig
+    config: TimingAlignmentConfig,
+    onProgress?: (percent: number, message: string) => void
   ): Promise<{ updatedTrack: AudioTrack; issues: TimingIssue[]; alignedCount: number; avgShiftMs: number }> {
     if (!track.segments || track.segments.length === 0) {
       return { updatedTrack: track, issues: [], alignedCount: 0, avgShiftMs: 0 };
@@ -589,12 +619,21 @@ export class TimingAlignmentService {
     for (let i = 0; i < segments.length; i++) {
       const seg = { ...segments[i] };
 
-      // 3. Распознаем фразу и связываем с субтитрами (если есть)
-      const { text, confidence, matchedSub } = await this.transcribePhraseWithWhisper(seg, subtitles, track.name);
-      seg.text = seg.text || text;
-      seg.whisperText = text;
-      seg.whisperConfidence = confidence;
-      seg.matchedSubId = matchedSub?.id;
+      // 3. Мгновенное сопоставление со сценарием (In-Memory Lookup)
+      let directSub: SubtitleLine | undefined = undefined;
+      if (seg.matchedSubId) {
+        directSub = subtitles.find(s => s.id === seg.matchedSubId);
+      }
+      if (!directSub) {
+        directSub = this.findClosestSubtitle(seg.startTime, seg.duration, subtitles, (track as any).role || track.name);
+      }
+
+      if (directSub) {
+        seg.matchedSubId = directSub.id;
+        if (!seg.text && directSub.text) {
+          seg.text = directSub.text;
+        }
+      }
 
       // 4. ОПРЕДЕЛЕНИЕ ЦЕЛЕВОГО ТАЙМИНГА
       let targetStartTime = seg.startTime;
@@ -602,7 +641,6 @@ export class TimingAlignmentService {
       let hasTarget = false;
 
       // Приоритет A: Субтитр (если привязан или найден поблизости)
-      const directSub = matchedSub || this.findClosestSubtitle(seg.startTime, seg.duration, subtitles, track.name);
       if (directSub) {
         targetStartTime = directSub.start;
         targetDuration = directSub.end - directSub.start;
@@ -721,6 +759,12 @@ export class TimingAlignmentService {
       }
 
       updatedSegments.push(seg);
+
+      if (onProgress && (i % 5 === 0 || i === segments.length - 1)) {
+        const pct = Math.round(((i + 1) / segments.length) * 100);
+        onProgress(pct, `Выравнивание фраз дорожки "${track.name}" (${i + 1}/${segments.length})...`);
+        await new Promise(r => setTimeout(r, 0));
+      }
     }
 
     // 6. ДЕТЕКТИРОВАНИЕ НАЕЗДОВ ДРУГ НА ДРУГА (OVERLAPS) НА ТАЙМЛАЙНЕ

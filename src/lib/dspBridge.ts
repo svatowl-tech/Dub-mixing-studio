@@ -286,3 +286,279 @@ export async function transformWaveformLevelerNative(
     ratio,
   });
 }
+
+// 9. Smart Gain Matching by Subtitles
+export type SpeechCategory = 'dialogue' | 'foleySfx';
+
+export interface AnnotatedSegment {
+  id: string;
+  filePath: string;
+  outputPath?: string;
+  text?: string;
+  startTime?: number;
+  duration?: number;
+  category?: SpeechCategory;
+  targetDialogueLufs?: number;
+  foleyOffsetDb?: number;
+  fadeMs?: number;
+}
+
+export interface ProcessedSegmentResult {
+  id: string;
+  filePath: string;
+  outputPath: string;
+  category: SpeechCategory;
+  initialLufs: number;
+  targetLufs: number;
+  appliedGainDb: number;
+  linearMultiplier: number;
+  finalLufs: number;
+  durationSec: number;
+  sampleRate: number;
+  channels: number;
+  fadeSamples: number;
+  classificationReason: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface SmartGainMatchingBatchResult {
+  results: ProcessedSegmentResult[];
+  totalProcessed: number;
+  dialogueCount: number;
+  foleyCount: number;
+  avgDialogueGainDb: number;
+  avgFoleyGainDb: number;
+}
+
+export async function applySmartGainMatchingNative(
+  segments: AnnotatedSegment[]
+): Promise<SmartGainMatchingBatchResult> {
+  return await invoke<SmartGainMatchingBatchResult>('apply_smart_gain_matching', {
+    segments,
+  });
+}
+
+// 10. Intelligent Sidechain Ducking Engine
+export type DuckingMode = 'voiceover' | 'recast' | 'dubbing' | 'custom';
+export type TargetTrackType = 'originalDialogue' | 'musicAndEffects';
+
+export interface VoiceActivityMask {
+  startSec: number;
+  endSec: number;
+}
+
+export interface SidechainDuckingConfig {
+  mode: DuckingMode;
+  trackType: TargetTrackType;
+  customDuckingDb?: number;
+  lookaheadMs?: number;
+  fadeDownMs?: number;
+  holdMs?: number;
+  releaseMs?: number;
+  meDuckingDb?: number;
+}
+
+export interface DuckingRenderResult {
+  inputPath: string;
+  outputPath: string;
+  totalFrames: number;
+  durationSec: number;
+  sampleRate: number;
+  channels: number;
+  duckedIntervalsCount: number;
+  minGainDb: number;
+  targetDuckingDb: number;
+  mode: DuckingMode;
+  trackType: TargetTrackType;
+  processingTimeMs: number;
+  success: boolean;
+  error?: string;
+}
+
+export async function renderSidechainDuckingNative(
+  inputPath: string,
+  outputPath: string,
+  activityMasks: VoiceActivityMask[],
+  config: SidechainDuckingConfig
+): Promise<DuckingRenderResult> {
+  return await invoke<DuckingRenderResult>('render_sidechain_ducking', {
+    inputPath,
+    outputPath,
+    activityMasks,
+    config,
+  });
+}
+
+// ============================================================================
+// Phase 3.3: Acoustic Environment Analysis & FX Chain Generation (Rust DSP)
+// ============================================================================
+
+export interface AcousticPreset {
+  pan: number; // -1.0 .. 0.0 .. 1.0
+  reverbWet: number; // 0.0 .. 1.0
+  reverbDecayMs: number; // ms
+  highPassHz: number; // Hz
+  lowPassHz: number; // Hz
+}
+
+export interface AcousticAnalysisReport {
+  preset: AcousticPreset;
+  ildDb: number;
+  phaseCorrelation: number;
+  drrDb: number;
+  t60Ms: number;
+  spectralCentroidHz: number;
+  bandwidthHz: number;
+  detectedEnvironment: string;
+  isNarrowbandComm: boolean;
+  isResonantHorn: boolean;
+  confidence: number;
+  processingTimeMs: number;
+}
+
+export interface VoiceSegmentInterval {
+  id: string;
+  startSec: number;
+  durationSec: number;
+  text?: string;
+}
+
+export interface SegmentAcousticResult {
+  segmentId: string;
+  report: AcousticAnalysisReport;
+}
+
+export async function analyzeAcousticEnvironmentNative(
+  audioPath: string,
+  startSec?: number,
+  durationSec?: number
+): Promise<AcousticAnalysisReport> {
+  return await invoke<AcousticAnalysisReport>('analyze_acoustic_environment', {
+    audioPath,
+    startSec,
+    durationSec,
+  });
+}
+
+export async function analyzeSegmentsAcousticsNative(
+  audioPath: string,
+  intervals: VoiceSegmentInterval[]
+): Promise<SegmentAcousticResult[]> {
+  return await invoke<SegmentAcousticResult[]>('analyze_segments_acoustics', {
+    audioPath,
+    intervals,
+  });
+}
+
+// ============================================================================
+// Phase 3.4: Master Vocal Bus Studio DSP Rack (Rust 6-FX Chain Engine)
+// ============================================================================
+
+export type VocalDeEsserMode = 'splitBand' | 'wideband';
+
+export interface HpfSurgicalEqConfig {
+  enabled: boolean;
+  hpfCutoffHz: number;
+  hpfOrder: number;
+  notchEnabled: boolean;
+  notchFreqHz: number;
+  notchQ: number;
+  notchGainDb: number;
+}
+
+export interface DynamicDeEsserConfig {
+  enabled: boolean;
+  frequencyHz: number;
+  thresholdDb: number;
+  ratio: number;
+  attackMs: number;
+  releaseMs: number;
+  kneeWidthDb: number;
+  maxReductionDb: number;
+  mode: VocalDeEsserMode;
+}
+
+export interface WarmthSaturationConfig {
+  enabled: boolean;
+  driveDb: number;
+  blend: number;
+  warmthBias: number;
+  autoGain: boolean;
+}
+
+export interface VocalCompressorConfig {
+  enabled: boolean;
+  thresholdDb: number;
+  ratio: number;
+  attackMs: number;
+  releaseMs: number;
+  kneeWidthDb: number;
+  makeupGainDb: number;
+  optoCharacter: boolean;
+}
+
+export interface PresenceExciterConfig {
+  enabled: boolean;
+  airFreqHz: number;
+  airGainDb: number;
+  harmonicDrive: number;
+  airBlend: number;
+}
+
+export interface TruePeakLimiterConfig {
+  enabled: boolean;
+  ceilingDbtp: number;
+  releaseMs: number;
+  lookaheadMs: number;
+}
+
+export interface VocalBusRackConfig {
+  presetName: string;
+  bypass: boolean;
+  eq: HpfSurgicalEqConfig;
+  deesser: DynamicDeEsserConfig;
+  saturation: WarmthSaturationConfig;
+  compressor: VocalCompressorConfig;
+  exciter: PresenceExciterConfig;
+  limiter: TruePeakLimiterConfig;
+}
+
+export interface VocalBusReport {
+  inputPath: string;
+  outputPath: string;
+  sampleRate: number;
+  channels: number;
+  totalSamples: number;
+  durationSec: number;
+  initialPeakDb: number;
+  finalPeakDb: number;
+  maxCompressionDb: number;
+  maxDeesserDb: number;
+  limiterClampedSamples: number;
+  processingTimeMs: number;
+}
+
+export async function processMasterVocalBusNative(
+  inputPath: string,
+  outputPath: string,
+  config: VocalBusRackConfig
+): Promise<VocalBusReport> {
+  return await invoke<VocalBusReport>('process_master_vocal_bus', {
+    inputPath,
+    outputPath,
+    config,
+  });
+}
+
+export async function batchProcessMasterVocalBusNative(
+  filePairs: [string, string][],
+  config: VocalBusRackConfig
+): Promise<VocalBusReport[]> {
+  return await invoke<VocalBusReport[]>('batch_process_master_vocal_bus', {
+    filePairs,
+    config,
+  });
+}
+
+

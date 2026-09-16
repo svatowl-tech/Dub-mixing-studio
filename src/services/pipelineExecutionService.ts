@@ -27,18 +27,6 @@ export interface ExecuteStepParams {
   handleStartFinalRender?: () => Promise<void>;
 }
 
-const DEFAULT_VOCAL_CHAIN: AuditionVocalBusChainConfig = {
-  presetName: 'Audition Master VO Chain',
-  ozoneStabilizer: { enabled: true, shape: 65, speed: 50, smoothness: 70, bypass: false },
-  rCompressor: { enabled: true, threshold: -12.2, ratio: 4.7, attackMs: 149.6, releaseMs: 120, gainDb: 3.44, warmth: 60, bypass: false },
-  soothe2: { enabled: true, depth: 5.27, sharpness: 3.31, selectivity: 4.07, band1Freq: 328.8, band1Sens: 5.94, band3Freq: 3489.5, band3Sens: 6.20, bypass: false },
-  proQ4: { enabled: true, highPassFreq: 80, lowCutSlope: 12, airShelfFreq: 12000, airShelfGain: 1.5, notchResonanceFreq: 3200, notchCutDb: -2.0, bypass: false },
-  rBass: { enabled: true, frequency: 43, intensity: 5.0, originalBassDb: -2.0, bypass: false },
-  freshAir: { enabled: true, midAir: 24, highAir: 32, bypass: false },
-  rVox: { enabled: true, compression: -9.5, gateThreshold: -80, gainDb: 0.0, bypass: false },
-  proDS: { enabled: true, threshold: -24, range: -8, frequency: 10000, wideBand: true, bypass: false }
-};
-
 /**
  * Обеспечивает, чтобы все аудиодорожки дубляжа были сконвертированы в 48kHz WAV
  * для корректной нативной DSP обработки и предотвращения ошибок "no RIFF tag found".
@@ -1274,14 +1262,17 @@ export class PipelineExecutionService {
             ...prev,
             [stepId]: {
               ...prev[stepId],
-              progress: 20,
-              log: 'Распознавание речи через локальный Whisper (GGML) и сопоставление со сценарием...'
+              progress: 15,
+              log: 'Распознавание речи через Whisper и сопоставление со сценарием...'
             }
           }));
 
           const updatedTracks: AudioTrack[] = [];
           let totalTranscribed = 0;
           let matchedScriptCount = 0;
+
+          const dubTracks = project.tracks.filter(t => !((t.type === 'original' || (origTrack && t.id === origTrack.id)) && !TimingAlignmentService.isDubTrack(t)));
+          const totalSegmentsCount = dubTracks.reduce((acc, t) => acc + (t.segments?.length || 0), 0);
 
           for (const track of project.tracks) {
             const isOrig = (track.type === 'original' || (origTrack && track.id === origTrack.id)) && !TimingAlignmentService.isDubTrack(track);
@@ -1291,7 +1282,17 @@ export class PipelineExecutionService {
             }
 
             const newSegs: AudioSegment[] = [];
-            for (const seg of track.segments) {
+            for (let sIdx = 0; sIdx < track.segments.length; sIdx++) {
+              const seg = track.segments[sIdx];
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  ...prev[stepId],
+                  progress: Math.min(95, Math.round(15 + (totalTranscribed / Math.max(1, totalSegmentsCount)) * 80)),
+                  log: `Whisper: распознавание "${track.name}" (${sIdx + 1}/${track.segments?.length || 0})...`
+                }
+              }));
+
               const res = await TimingAlignmentService.transcribePhraseWithWhisper(
                 seg,
                 project.subtitles || [],
@@ -1352,7 +1353,7 @@ export class PipelineExecutionService {
             ...prev,
             [stepId]: {
               ...prev[stepId],
-              progress: 30,
+              progress: 10,
               log: 'Анализ таймкодов субтитров и сопоставление старта фраз с оригиналом...'
             }
           }));
@@ -1360,20 +1361,43 @@ export class PipelineExecutionService {
           const alignedTracks: AudioTrack[] = [];
           let totalAligned = 0;
           let allIssues: TimingIssue[] = [];
+          const dubTracks = project.tracks.filter(t => !((t.type === 'original' || (origTrack && t.id === origTrack.id)) && !TimingAlignmentService.isDubTrack(t)));
+          const totalTrackCount = Math.max(1, dubTracks.length);
+          let processedTracks = 0;
 
           for (const track of project.tracks) {
             const isOrigStem = (track.type === 'original' || (origTrack && track.id === origTrack.id)) && !TimingAlignmentService.isDubTrack(track);
             if (!isOrigStem) {
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  ...prev[stepId],
+                  progress: Math.round(10 + (processedTracks / totalTrackCount) * 80),
+                  log: `Smart Align: выравнивание дорожки "${track.name}" (${processedTracks + 1}/${totalTrackCount})...`
+                }
+              }));
+
               const res = await TimingAlignmentService.alignTrackPhrases(
                 track,
                 origTrack,
                 project.subtitles || [],
                 project.mixingType || activePreset.type,
-                activePreset.phase2
+                activePreset.phase2,
+                (percent, msg) => {
+                  setStepExecution(prev => ({
+                    ...prev,
+                    [stepId]: {
+                      ...prev[stepId],
+                      progress: Math.round(10 + ((processedTracks + percent / 100) / totalTrackCount) * 80),
+                      log: msg
+                    }
+                  }));
+                }
               );
               totalAligned += (res.alignedCount || 0);
               allIssues.push(...res.issues);
               alignedTracks.push(res.updatedTrack);
+              processedTracks++;
             } else {
               alignedTracks.push(track);
             }
@@ -1452,7 +1476,7 @@ export class PipelineExecutionService {
             }
           }));
 
-          const gmRes = MixingService.matchLoudnessBySubtitles(
+          const gmRes = await MixingService.matchLoudnessBySubtitles(
             project.tracks,
             project.subtitles || [],
             activePreset.phase3.gainMatching
@@ -1482,7 +1506,7 @@ export class PipelineExecutionService {
             }
           }));
 
-          const duckRes = MixingService.applyAutoDucking(
+          const duckRes = await MixingService.applyAutoDucking(
             project.tracks,
             activePreset.type,
             activePreset.phase3.ducking
@@ -1515,7 +1539,7 @@ export class PipelineExecutionService {
             }
           }));
 
-          const fxRes = MixingService.detectAndApplyOriginalEffects(
+          const fxRes = await MixingService.detectAndApplyOriginalEffects(
             project.tracks,
             activePreset.phase3.autoFxAnalysis
           );
@@ -1535,25 +1559,31 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'vocalBusProcessing') {
+          const busConfig = activePreset.phase3.vocalBusProcessing;
+          const isRustDsp = busConfig.mode === 'rustDsp';
+          const busTitle = isRustDsp
+            ? 'Студийный Rust DSP рэк (6 ступеней)'
+            : (busConfig.vstRack?.presetName || 'Пользовательский VST-рэк');
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
               ...prev[stepId],
               progress: 40,
-              log: `Конфигурация мастер-шины вокала (пресет "${activePreset.phase3.vocalBusProcessing.chain?.presetName || 'Master VO Chain'}")...`
+              log: `Конфигурация мастер-шины вокала: ${busTitle}...`
             }
           }));
 
-          const busRes = MixingService.applyMasterVocalBusChain(
+          const busRes = await MixingService.applyMasterVocalBusChain(
             project.tracks,
-            activePreset.phase3.vocalBusProcessing.chain || DEFAULT_VOCAL_CHAIN
+            busConfig
           );
 
           onUpdateProject({ tracks: busRes.updatedTracks });
           await playbackEngine.updateTracks(busRes.updatedTracks);
           addAuditLogs(busRes.logs);
 
-          const logMsg = `Мастер-шина вокала: активировано ${busRes.activePluginsCount} плагинов в цепочке "${busRes.chainConfig.presetName}".`;
+          const logMsg = `Мастер-шина вокала: активировано ${busRes.activePluginsCount} звеньев обработки (${busTitle}).`;
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
@@ -1573,18 +1603,18 @@ export class PipelineExecutionService {
             ...prev,
             [stepId]: {
               ...prev[stepId],
-              progress: 50,
-              log: 'Проверка клиппинга, интервалов тишины и наложений...'
+              progress: 40,
+              log: 'Запуск предрелизного контроля качества (True-Peak 4x, EBU R128, клиппинг, сверка сценария)...'
             }
           }));
 
-          const qcRes = FinalRenderService.runQualityControlAnalysis(
+          const qcRes = await FinalRenderService.runFullQualityControlAsync(
             project,
             activePreset.phase4
           );
 
           setQaIssues(qcRes.issues);
-          const logMsg = `QC Контроль качества: проверено ${project.tracks.length} дорожек. Найдено замечаний: ${qcRes.issues.length} (${qcRes.integratedLufs.toFixed(1)} LUFS, True-Peak ${qcRes.maxTruePeakDb.toFixed(1)} dBTP).`;
+          const logMsg = `QC Контроль качества: проверено ${project.tracks.length} дорожек. Замечаний: ${qcRes.issues.length} (LUFS: ${qcRes.integratedLufs.toFixed(1)}, Max True-Peak: ${qcRes.maxTruePeakDb.toFixed(2)} dBTP).`;
 
           setStepExecution(prev => ({
             ...prev,
@@ -1601,21 +1631,25 @@ export class PipelineExecutionService {
             ...prev,
             [stepId]: {
               ...prev[stepId],
-              progress: 50,
-              log: `Применение мастеринг-лимитера (True Peak: ${activePreset.phase4.masteringLimiter.truePeakCeilingDb} dB, стандарт ${activePreset.phase4.masteringLimiter.loudnessStandard})...`
+              progress: 40,
+              log: `Применение мастеринг-лимитера (True Peak: ${activePreset.phase4.masteringLimiter.truePeakCeilingDb} dBTP, стандарт ${activePreset.phase4.masteringLimiter.loudnessStandard}, 4x oversampling)...`
             }
           }));
 
-          const mastRes = FinalRenderService.applyMasteringLimiter(
+          const mastRes = await FinalRenderService.applyMasteringLimiterAsync(
             project.tracks,
-            activePreset.phase4
+            activePreset.phase4,
+            project
           );
 
           onUpdateProject({ tracks: mastRes.updatedTracks });
           await playbackEngine.updateTracks(mastRes.updatedTracks);
           addAuditLogs(mastRes.logs);
 
-          const logMsg = `Мастеринг-лимитер: выходной потолок ${mastRes.ceilingDb.toFixed(1)} dBTP, стандарт ${activePreset.phase4.masteringLimiter.loudnessStandard} (${activePreset.phase4.masteringLimiter.targetIntegratedLufs} LUFS).`;
+          const logMsg = mastRes.masteringStats 
+            ? `Мастеринг выполнен: ${mastRes.masteringStats.finalIntegratedLufs} LUFS, TP: ${mastRes.masteringStats.finalTruePeakDbtp} dBTP, компрессия: -${mastRes.masteringStats.maxGainReductionDb} dB (${mastRes.masteringStats.isCompliant ? 'Соответствует стандарту' : 'Внимание'}).`
+            : `Мастеринг-лимитер: выходной потолок ${mastRes.ceilingDb.toFixed(1)} dBTP, стандарт ${activePreset.phase4.masteringLimiter.loudnessStandard} (${activePreset.phase4.masteringLimiter.targetIntegratedLufs} LUFS).`;
+          
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
@@ -1642,12 +1676,31 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'subtitleBurn') {
-          const logMsg = `Вшивание субтитров настроено: шрифт ${activePreset.phase4.subtitleBurn.fontName}, размер ${activePreset.phase4.subtitleBurn.fontSize}px, режим ${activePreset.phase4.subtitleBurn.burnMode || 'hardsub'}.`;
+          const subs = project.subtitles || [];
+          const subConfig = activePreset.phase4.subtitleBurn;
+          const { assContent } = FinalRenderService.generateSubtitlesFiles(subs, subConfig);
+          
+          let signsCount = 0;
+          let voCount = 0;
+          let actorCount = 0;
+          subs.forEach(s => {
+            const r = (s.role || '').toLowerCase();
+            if (r.includes('sign') || r.includes('вывеска') || r.includes('надпись') || r.includes('титры') || s.text.startsWith('[')) {
+              signsCount++;
+            } else if (r.includes('narrator') || r.includes('диктор') || r.includes('закадр') || r.includes('vo')) {
+              voCount++;
+            } else {
+              actorCount++;
+            }
+          });
+
+          const logMsg = `Субтитры готовы: ${subs.length} реплик (Диалоги: ${actorCount}, Закадр: ${voCount}, Надписи/Вывески: ${signsCount}). Шрифт: ${subConfig.fontName} ${subConfig.fontSize}px, цвет: ${subConfig.fontColor}, режим: ${subConfig.burnMode || 'hardsub_all'}. Сгенерирован скрипт .ASS (${Math.round(assContent.length / 1024 * 10) / 10} KB).`;
+          
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
           }));
-          showToast(logMsg);
+          showToast(`Субтитры подготовлены (${subs.length} реплик)`);
           return;
         }
       }

@@ -25,6 +25,26 @@ mod project_type_rules;
 mod conflict_detection;
 mod spectral_analysis;
 mod dsp_waveform;
+mod gain_matching;
+mod sidechain_ducking;
+mod acoustic_analyzer;
+mod vocal_bus;
+mod qa_audit;
+mod mastering_limiter;
+mod subtitle_engine;
+mod stem_export;
+mod video_muxer;
+mod audio_buffer_manager;
+mod loudness_engine;
+mod ducking_engine;
+mod realtime_analyzer;
+mod vocal_rack_dsp;
+mod project_repository;
+
+use project_repository::{
+    save_project_atomic, load_project_by_id, undo_project_action, redo_project_action,
+    list_all_projects, delete_project,
+};
 
 use audio_engine::{
     get_audio_devices, start_recording, stop_recording, force_stop_all, check_crashes,
@@ -34,9 +54,10 @@ use audio_engine::{
 };
 use logger::log_debug;
 use vst_host::{
-    scan_plugins, load_plugin, unload_plugin, process_audio_block,
+    scan_plugins, scan_plugins_with_paths, load_plugin, unload_plugin, process_audio_block,
     get_plugin_parameters, set_plugin_parameter, get_plugin_state,
     set_plugin_state, open_plugin_editor, close_plugin_editor,
+    batch_process_vst_chain,
     SharedVstHostState, VstHostState,
 };
 use normalization::{normalize_audio, estimate_lufs_from_pcm, apply_waveform_upward_compression};
@@ -50,7 +71,7 @@ use volume_leveler::level_speech_volume;
 use source_separation::{separate_audio_stems, cancel_source_separation};
 use silence_split::{split_by_silence, process_vad_split};
 use whisper_engine::transcribe_and_match_script;
-use smart_align::align_vocal_clip;
+use smart_align::{align_vocal_clip, calculate_smart_alignment};
 use project_type_rules::validate_and_adjust_project_rules;
 use conflict_detection::validate_timeline_compliance;
 use audio_separator::{check_audio_separator_status, install_audio_separator_pkg, run_audio_separator_cmd};
@@ -68,6 +89,33 @@ use dsp_waveform::{
     transform_waveform_denoise,
     transform_waveform_dereverb,
     transform_waveform_leveler,
+};
+use gain_matching::apply_smart_gain_matching;
+use sidechain_ducking::render_sidechain_ducking;
+use acoustic_analyzer::{analyze_acoustic_environment, analyze_segments_acoustics};
+use vocal_bus::{process_master_vocal_bus, batch_process_master_vocal_bus};
+use qa_audit::run_project_qa_audit;
+use mastering_limiter::apply_mastering_limiter;
+use subtitle_engine::{generate_ass_subtitle_file, burn_subtitles_to_video, process_subtitle_burn_stage};
+use stem_export::export_project_stems;
+use video_muxer::execute_final_video_render;
+use audio_buffer_manager::{
+    load_audio_file, get_audio_slice, unload_audio_buffer, clear_all_audio_buffers,
+    get_buffer_cache_stats, AudioBufferCache
+};
+use loudness_engine::{
+    analyze_track_loudness, reset_realtime_loudness, RealtimeLoudnessMeter
+};
+use ducking_engine::{
+    apply_adaptive_ducking, calculate_ducking_envelope_preview
+};
+use realtime_analyzer::{
+    start_realtime_spectrum_analyzer, stop_realtime_spectrum_analyzer,
+    get_latest_spectrum_frame, generate_waveform_mipmaps, RealtimeAnalyzerState
+};
+use vocal_rack_dsp::{
+    set_rack_parameters, load_vst3_plugin_to_rack, get_rack_state, reset_rack,
+    VocalRackManager, SharedVocalRackManager
 };
 
 use std::sync::Arc;
@@ -276,6 +324,10 @@ fn main() {
         })
         .manage(app_state)
         .manage(vst_state)
+        .manage(AudioBufferCache::new())
+        .manage(RealtimeLoudnessMeter::new())
+        .manage(RealtimeAnalyzerState::default())
+        .manage(Arc::new(VocalRackManager::new()) as SharedVocalRackManager)
         .manage(AudioState {
             recorder: std::sync::Mutex::new(AudioRecorder::default()),
             player: std::sync::Mutex::new(NativeAudioPlayer::default()),
@@ -296,6 +348,7 @@ fn main() {
             get_native_playback_position,
             clear_native_playback_cache,
             scan_plugins,
+            scan_plugins_with_paths,
             load_plugin,
             unload_plugin,
             process_audio_block,
@@ -305,6 +358,7 @@ fn main() {
             set_plugin_state,
             open_plugin_editor,
             close_plugin_editor,
+            batch_process_vst_chain,
             export_audio,
             export_stems,
             save_project_to_db,
@@ -365,6 +419,7 @@ fn main() {
             split_by_silence,
             transcribe_and_match_script,
             align_vocal_clip,
+            calculate_smart_alignment,
             validate_and_adjust_project_rules,
             validate_timeline_compliance,
             process_media_effect,
@@ -379,7 +434,43 @@ fn main() {
             transform_waveform_deesser,
             transform_waveform_denoise,
             transform_waveform_dereverb,
-            transform_waveform_leveler
+            transform_waveform_leveler,
+            apply_smart_gain_matching,
+            render_sidechain_ducking,
+            analyze_acoustic_environment,
+            analyze_segments_acoustics,
+            process_master_vocal_bus,
+            batch_process_master_vocal_bus,
+            run_project_qa_audit,
+            apply_mastering_limiter,
+            generate_ass_subtitle_file,
+            burn_subtitles_to_video,
+            process_subtitle_burn_stage,
+            export_project_stems,
+            execute_final_video_render,
+            load_audio_file,
+            get_audio_slice,
+            unload_audio_buffer,
+            clear_all_audio_buffers,
+            get_buffer_cache_stats,
+            analyze_track_loudness,
+            reset_realtime_loudness,
+            apply_adaptive_ducking,
+            calculate_ducking_envelope_preview,
+            start_realtime_spectrum_analyzer,
+            stop_realtime_spectrum_analyzer,
+            get_latest_spectrum_frame,
+            generate_waveform_mipmaps,
+            set_rack_parameters,
+            load_vst3_plugin_to_rack,
+            get_rack_state,
+            reset_rack,
+            save_project_atomic,
+            load_project_by_id,
+            undo_project_action,
+            redo_project_action,
+            list_all_projects,
+            delete_project
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

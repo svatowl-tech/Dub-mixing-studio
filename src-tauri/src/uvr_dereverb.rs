@@ -562,114 +562,195 @@ pub async fn run_dereverb_pipeline(
     let mut dry_channels_44k: Vec<Vec<f32>> = Vec::with_capacity(num_channels);
     let mut reverb_channels_44k: Vec<Vec<f32>> = Vec::with_capacity(num_channels);
 
-    let (provider_used, is_neural) = if let Some(path) = model_path {
+    let (provider_used, is_neural) = if let Some(ref path) = model_path {
         // --- РЕЖИМ 1: НЕЙРОСЕТЕВОЙ ИНФЕРЕНС ЧЕРЕЗ ORT (DirectML / CUDA / CoreML / CPU) ---
-        let (mut session, provider) = init_dereverb_session(&path)?;
+        let neural_attempt = (|| -> Result<(Vec<Vec<f32>>, Vec<Vec<f32>>, String), String> {
+            let (mut session, provider) = init_dereverb_session(path)?;
+            
+            // Определение имени входного тензора и ожидаемой формы
+            let input_name = session.inputs.first()
+                .map(|inp| inp.name.clone())
+                .unwrap_or_else(|| "input".to_string());
 
-        for ch in 0..num_channels {
-            let (mut magnitudes, phases) = compute_stft_complex(
-                &resampled_channels[ch],
-                FFT_SIZE,
-                HOP_SIZE,
-                &hann_win,
-                &mut planner,
-            );
+            println!("[UVR-DeReverb] ONNX Модель загружена. Имя входа: '{}', Провайдер: {}", input_name, provider);
 
-            let num_frames = magnitudes.len();
-            let num_bins = FFT_SIZE / 2 + 1;
+            // Проверяем, ожидает ли модель 4-канальный VR-формат [1, 4, 3072, 512]
+            // или стандартный 2-канальный MDX-формат [1, 2, 1025, 256]
+            let mut expected_channels = 2usize;
+            let mut expected_bins = 1025usize;
+            let mut expected_time_steps = 256usize;
+            let mut fft_len = FFT_SIZE;
 
-            // Потоковая чанковая обработка с перекрытием 50% для предотвращения переполнения VRAM
-            let mut chunk_start = 0;
-            let mut processed_chunks = 0;
-            let total_chunks = (num_frames + CHUNK_HOP_STEPS - 1) / CHUNK_HOP_STEPS;
-
-            while chunk_start < num_frames {
-                let current_steps = CHUNK_TIME_STEPS.min(num_frames - chunk_start);
-
-                // Формирование 4D тензора [1, 2, num_bins, CHUNK_TIME_STEPS]
-                let mut tensor_data = Array4::<f32>::zeros((1, 2, num_bins, CHUNK_TIME_STEPS));
-
-                for t in 0..current_steps {
-                    let frame_idx = chunk_start + t;
-                    for k in 0..num_bins {
-                        let m = magnitudes[frame_idx][k];
-                        tensor_data[[0, 0, k, t]] = m;
-                        tensor_data[[0, 1, k, t]] = m;
-                    }
-                }
-
-                // Инференс через ONNX Runtime
-                let input_tensor = Tensor::from_array(tensor_data)
-                    .map_err(|e| format!("Ошибка формирования входного тензора DeReverb: {}", e))?;
-
-                let outputs = session
-                    .run(ort::inputs!["input" => input_tensor])
-                    .map_err(|e| format!("Ошибка инференса UVR De-Echo: {}", e))?;
-
-                // Извлечение маски или предсказанной сухой спектрограммы
-                if let Some(out_val) = outputs.values().next() {
-                    if let Ok((out_shape, out_slice)) = out_val.try_extract_tensor::<f32>() {
-                        let time_dim = if out_shape.len() >= 4 { out_shape[3] as usize } else { current_steps };
-                        let freq_dim = if out_shape.len() >= 3 { out_shape[2] as usize } else { num_bins };
-
-                        let steps_to_apply = current_steps.min(time_dim);
-                        let bins_to_apply = num_bins.min(freq_dim);
-
-                        for t in 0..steps_to_apply {
-                            let frame_idx = chunk_start + t;
-                            for k in 0..bins_to_apply {
-                                let flat_idx = k * time_dim + t;
-                                let predicted_dry_mag = if flat_idx < out_slice.len() {
-                                    out_slice[flat_idx]
-                                } else {
-                                    magnitudes[frame_idx][k]
-                                };
-
-                                let orig_mag = magnitudes[frame_idx][k];
-                                // Ограничение: сухой сигнал не может превышать исходный
-                                let clean_mag = predicted_dry_mag.min(orig_mag).max(0.0);
-                                magnitudes[frame_idx][k] = clean_mag;
+            if let Some(first_input) = session.inputs.first() {
+                // Если удалось получить информацию о размерах входного тензора
+                if let ort::value::ValueType::Tensor { dimensions, .. } = &first_input.input_type {
+                    if dimensions.len() == 4 {
+                        if let Some(ch) = dimensions[1] {
+                            if ch > 0 { expected_channels = ch as usize; }
+                        }
+                        if let Some(f) = dimensions[2] {
+                            if f > 0 {
+                                expected_bins = f as usize;
+                                // Если требуется 3072 бина (VR Architecture), используем FFT размер 6144
+                                if expected_bins == 3072 {
+                                    fft_len = 6144;
+                                } else if expected_bins == 2048 {
+                                    fft_len = 4096;
+                                } else if expected_bins == 1025 {
+                                    fft_len = 2048;
+                                }
                             }
+                        }
+                        if let Some(t) = dimensions[3] {
+                            if t > 0 { expected_time_steps = t as usize; }
                         }
                     }
                 }
-
-                chunk_start += CHUNK_HOP_STEPS;
-                processed_chunks += 1;
-
-                let channel_base = (ch as f32 / num_channels as f32) * 75.0;
-                let chunk_prog = (processed_chunks as f32 / total_chunks.max(1) as f32) * (75.0 / num_channels as f32);
-                let current_pct = 10.0 + channel_base + chunk_prog;
-
-                app_handle.emit("dereverb-progress", DereverbProgressPayload {
-                    percent: current_pct.min(88.0),
-                    current_frame: (chunk_start * HOP_SIZE).min(target_44k_len),
-                    total_frames: target_44k_len,
-                    stage: format!("Нейросетевое разделение стемов UVR De-Echo (Канал {}/{}, {})...", ch + 1, num_channels, provider),
-                }).ok();
             }
 
-            // Обратное БПФ iSTFT для восстановления идеального сухого вокала
-            let dry_channel = compute_istft_ola_normalized(
-                &magnitudes,
-                &phases,
-                FFT_SIZE,
-                HOP_SIZE,
-                &hann_win,
-                &mut planner,
-                target_44k_len,
-            );
+            println!("[UVR-DeReverb] Параметры ONNX тензора: каналов={}, частотных бинов={}, временных шагов={}, FFT={}",
+                expected_channels, expected_bins, expected_time_steps, fft_len);
 
-            // Фазово-корректное вычитание для получения изолированного хвоста комнаты
-            let reverb_channel = phase_subtract_reverb(&resampled_channels[ch], &dry_channel);
+            let win = generate_hann_window(fft_len);
+            let chunk_hop = expected_time_steps / 2;
 
-            dry_channels_44k.push(dry_channel);
-            reverb_channels_44k.push(reverb_channel);
+            let mut out_dry = Vec::with_capacity(num_channels);
+            let mut out_rev = Vec::with_capacity(num_channels);
+
+            for ch in 0..num_channels {
+                let (mut magnitudes, phases) = compute_stft_complex(
+                    &resampled_channels[ch],
+                    fft_len,
+                    HOP_SIZE,
+                    &win,
+                    &mut planner,
+                );
+
+                let num_frames = magnitudes.len();
+                let num_bins = fft_len / 2 + 1;
+
+                let mut chunk_start = 0;
+                let mut processed_chunks = 0;
+                let total_chunks = (num_frames + chunk_hop - 1) / chunk_hop;
+
+                while chunk_start < num_frames {
+                    let current_steps = expected_time_steps.min(num_frames - chunk_start);
+
+                    // Формирование 4D тензора [1, expected_channels, expected_bins, expected_time_steps]
+                    let mut tensor_data = Array4::<f32>::zeros((1, expected_channels, expected_bins, expected_time_steps));
+
+                    for t in 0..current_steps {
+                        let frame_idx = chunk_start + t;
+                        let max_k = num_bins.min(expected_bins);
+                        for k in 0..max_k {
+                            let m = magnitudes[frame_idx][k];
+                            let p = phases[frame_idx][k];
+
+                            if expected_channels >= 4 {
+                                // VR Architecture: Real & Imaginary / Complex components
+                                tensor_data[[0, 0, k, t]] = m * p.cos(); // Left Real
+                                tensor_data[[0, 1, k, t]] = m * p.sin(); // Left Imag
+                                tensor_data[[0, 2, k, t]] = m * p.cos(); // Right Real
+                                tensor_data[[0, 3, k, t]] = m * p.sin(); // Right Imag
+                            } else if expected_channels == 2 {
+                                tensor_data[[0, 0, k, t]] = m;
+                                tensor_data[[0, 1, k, t]] = m;
+                            } else {
+                                tensor_data[[0, 0, k, t]] = m;
+                            }
+                        }
+                    }
+
+                    // Инференс через ONNX Runtime
+                    let input_tensor = Tensor::from_array(tensor_data)
+                        .map_err(|e| format!("Ошибка формирования входного тензора DeReverb: {}", e))?;
+
+                    let outputs = session
+                        .run(ort::inputs![input_name.as_str() => input_tensor])
+                        .map_err(|e| format!("Ошибка инференса UVR De-Echo: {}", e))?;
+
+                    // Извлечение маски или предсказанной сухой спектрограммы
+                    if let Some(out_val) = outputs.values().next() {
+                        if let Ok((out_shape, out_slice)) = out_val.try_extract_tensor::<f32>() {
+                            let time_dim = if out_shape.len() >= 4 { out_shape[3] as usize } else { current_steps };
+                            let freq_dim = if out_shape.len() >= 3 { out_shape[2] as usize } else { num_bins };
+
+                            let steps_to_apply = current_steps.min(time_dim);
+                            let bins_to_apply = num_bins.min(freq_dim);
+
+                            for t in 0..steps_to_apply {
+                                let frame_idx = chunk_start + t;
+                                for k in 0..bins_to_apply {
+                                    let flat_idx = k * time_dim + t;
+                                    let predicted_val = if flat_idx < out_slice.len() {
+                                        out_slice[flat_idx].abs()
+                                    } else {
+                                        magnitudes[frame_idx][k]
+                                    };
+
+                                    let orig_mag = magnitudes[frame_idx][k];
+                                    let clean_mag = predicted_val.min(orig_mag).max(0.0);
+                                    magnitudes[frame_idx][k] = clean_mag;
+                                }
+                            }
+                        }
+                    }
+
+                    chunk_start += chunk_hop;
+                    processed_chunks += 1;
+
+                    let channel_base = (ch as f32 / num_channels as f32) * 75.0;
+                    let chunk_prog = (processed_chunks as f32 / total_chunks.max(1) as f32) * (75.0 / num_channels as f32);
+                    let current_pct = 10.0 + channel_base + chunk_prog;
+
+                    app_handle.emit("dereverb-progress", DereverbProgressPayload {
+                        percent: current_pct.min(88.0),
+                        current_frame: (chunk_start * HOP_SIZE).min(target_44k_len),
+                        total_frames: target_44k_len,
+                        stage: format!("Нейросетевое разделение стемов UVR De-Echo (Канал {}/{}, {})...", ch + 1, num_channels, provider),
+                    }).ok();
+                }
+
+                // Обратное БПФ iSTFT для восстановления идеального сухого вокала
+                let dry_channel = compute_istft_ola_normalized(
+                    &magnitudes,
+                    &phases,
+                    fft_len,
+                    HOP_SIZE,
+                    &win,
+                    &mut planner,
+                    target_44k_len,
+                );
+
+                // Фазово-корректное вычитание для получения изолированного хвоста комнаты
+                let reverb_channel = phase_subtract_reverb(&resampled_channels[ch], &dry_channel);
+
+                out_dry.push(dry_channel);
+                out_rev.push(reverb_channel);
+            }
+
+            Ok((out_dry, out_rev, provider))
+        })();
+
+        match neural_attempt {
+            Ok((dry, rev, prov)) => {
+                dry_channels_44k = dry;
+                reverb_channels_44k = rev;
+                (prov, true)
+            }
+            Err(e) => {
+                println!("[UVR-DeReverb] ⚠️ Предупреждение: Ошибка инференса нейросети ({}), бесшовное переключение на высокоточный DSP-движок...", e);
+                None // triggers fallback to DSP below
+            }
         }
-
-        (provider, true)
     } else {
-        // --- РЕЖИМ 2: ТОЧНЫЙ DSP-ДВИЖОК ДЛЯ ВЫБРАННОЙ МОДЕЛИ ДЕРЕВЕРБЕРАЦИИ ---
+        None
+    };
+
+    let (provider_used, is_neural) = if let Some((prov, neural)) = provider_used.map(|p| (p, is_neural)) {
+        (prov, neural)
+    } else {
+        // --- РЕЖИМ 2: ТОЧНЫЙ ВЫСОКОСКОРОСТНОЙ DSP-ДВИЖОК ДЛЯ ВЫБРАННОЙ МОДЕЛИ ДЕРЕВЕРБЕРАЦИИ ---
         let model_id = chosen_model.as_str();
         let (dsp_engine_name, max_atten_db): (&str, f32) = match model_id {
             "room_cleaner_neural" => ("Neural Room Cleaner (Room Mode & Resonance Notcher)", 22.0),

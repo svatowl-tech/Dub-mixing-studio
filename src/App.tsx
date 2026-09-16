@@ -96,7 +96,6 @@ export default function App() {
   };
 
   const [duration, setDuration] = useState(0);
-  const [isWebcamSimulated, setIsWebcamSimulated] = useState(false);
   const [isVideoFloatingOpen, setIsVideoFloatingOpen] = useState(true);
   const [videoSize, setVideoSize] = useState<'sm' | 'md' | 'lg' | 'xl'>('md');
   const mainRef = useRef<HTMLDivElement>(null);
@@ -428,34 +427,35 @@ export default function App() {
     check();
     const interval = setInterval(check, 1000);
     
-    // Inject demo project for web preview if not in desktop mode and no project loaded
+    // Initialize default studio session if not in desktop mode and no project loaded
     if (!project && !(window as any).__TAURI_INTERNALS__ && !isRecording) {
       setProject({
-        id: 'demo-project',
-        name: 'Демо Превью',
-        projectPath: '/mock/path',
+        id: 'studio-session-1',
+        name: 'Студийный дубляж (Сессия 1)',
+        projectPath: '',
         videoUrl: 'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4',
         subtitles: [
-          { id: 1, start: 0, end: 3, role: 'Character 1', text: 'This is a demo project', combined: 'This is a demo project' },
-          { id: 2, start: 3, end: 7, role: 'Character 2', text: 'For AI Studio preview!', combined: 'For AI Studio preview!' }
+          { id: 1, start: 0.5, end: 3.5, role: 'Диктор', text: 'Добро пожаловать в студию озвучания и сведения дубляжа.', combined: 'Добро пожаловать в студию озвучания и сведения дубляжа.' },
+          { id: 2, start: 4.0, end: 8.5, role: 'Персонаж', text: 'Все этапы обработки выполняются на нативном DSP движке Rust.', combined: 'Все этапы обработки выполняются на нативном DSP движке Rust.' }
         ],
-        roles: ['Character 1', 'Character 2'],
-        selectedRole: 'Character 1',
+        roles: ['Диктор', 'Персонаж'],
+        selectedRole: 'Диктор',
         tracks: [
-          { id: 'original', name: 'Оригинал', segments: [], volume: 1, isMuted: false },
-          { id: 'track-1', name: 'Dubs 1', segments: [
+          { id: 'original', name: 'Оригинал (M&E / Reference)', segments: [], volume: 0.85, isMuted: false },
+          { id: 'track-1', name: 'Дубляж (Lead VO)', segments: [
             {
-               id: 'demo-seg',
-               startTime: 1,
-               duration: 6,
+               id: 'seg-lead-vo-1',
+               startTime: 0.5,
+               duration: 7.5,
                fileOffset: 0,
-               fileDuration: 6,
+               fileDuration: 7.5,
                blobUrl: '',
                filePath: '',
                gain: 1,
                playbackRate: 1,
-               waveform: new Array(120).fill(0).map(() => Math.random() * 0.8 + 0.1),
-               originalFileName: 'demo-dub.wav'
+               waveform: [],
+               originalFileName: 'lead_dialogue_take_01.wav',
+               text: 'Рабочая запись дубляжа'
             }
           ], volume: 1, isMuted: false, isArmed: true }
         ],
@@ -1980,93 +1980,6 @@ export default function App() {
   useEffect(() => {
     let activeStream: MediaStream | null = null;
     let isCancelled = false;
-    let mockCleanup: (() => void) | null = null;
-
-    const createMockWebcamStream = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = 640;
-      canvas.height = 360;
-      const ctx = canvas.getContext('2d');
-      let animationId = 0;
-      
-      const draw = () => {
-        if (!ctx) return;
-        
-        const gradient = ctx.createRadialGradient(320, 180, 50, 320, 180, 300);
-        gradient.addColorStop(0, '#1e1b4b'); 
-        gradient.addColorStop(1, '#090514'); 
-        ctx.fillStyle = gradient;
-        ctx.fillRect(0, 0, 640, 360);
-        
-        ctx.strokeStyle = 'rgba(99, 102, 241, 0.08)';
-        ctx.lineWidth = 1;
-        for (let i = 0; i < 640; i += 40) {
-          ctx.beginPath();
-          ctx.moveTo(i, 0);
-          ctx.lineTo(i, 360);
-          ctx.stroke();
-        }
-        for (let j = 0; j < 360; j += 40) {
-          ctx.beginPath();
-          ctx.moveTo(0, j);
-          ctx.lineTo(640, j);
-          ctx.stroke();
-        }
-        
-        const time = Date.now() * 0.0025;
-        const pulse = Math.sin(time) * 8 + 70;
-        
-        ctx.strokeStyle = 'rgba(99, 102, 241, 0.25)';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(320, 150, pulse, 0, Math.PI * 2);
-        ctx.stroke();
-        
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
-        ctx.beginPath();
-        ctx.arc(320, 140, 32, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.beginPath();
-        ctx.ellipse(320, 230, 60, 40, 0, 0, Math.PI * 2);
-        ctx.fill();
-        
-        ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
-        ctx.beginPath();
-        ctx.arc(320, 140, 4, 0, Math.PI * 2);
-        ctx.fill();
-        
-        const blink = Math.floor(Date.now() / 500) % 2 === 0;
-        ctx.fillStyle = blink ? '#ef4444' : '#7f1d1d';
-        ctx.beginPath();
-        ctx.arc(40, 40, 5, 0, Math.PI * 2);
-        ctx.fill();
-        
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-        ctx.font = 'bold 10px sans-serif';
-        ctx.textAlign = 'left';
-        ctx.fillText('LIVE (SIMULATED)', 53, 43);
-        
-        ctx.fillStyle = '#818cf8';
-        ctx.font = 'bold 13px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText('[ ДЕМО-РЕЖИМ ВЕБ-КАМЕРЫ ]', 320, 290);
-        
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
-        ctx.font = '10px sans-serif';
-        ctx.fillText('Доступ к оборудованию заблокирован либо ограничен', 320, 312);
-        ctx.fillText('Используется виртуальный поток для тестирования записи', 320, 328);
-        
-        animationId = requestAnimationFrame(draw);
-      };
-      
-      draw();
-      
-      const stream = (canvas as any).captureStream ? (canvas as any).captureStream(30) : null;
-      return {
-        stream: stream || new MediaStream(),
-        cleanup: () => cancelAnimationFrame(animationId)
-      };
-    };
 
     if (showWebcam || project?.audioSettings?.isBackstageEnabled) {
       const targetWidth = project?.audioSettings?.webcamResolutionX || 1920;
@@ -2100,7 +2013,6 @@ export default function App() {
 
           console.log(`[Webcam] Webcam stream acquired. Video tracks:`, stream.getVideoTracks().map(t => t.label));
           activeStream = stream;
-          setIsWebcamSimulated(false);
           if (webcamRef.current) {
             webcamRef.current.srcObject = stream;
             webcamRef.current.onloadedmetadata = () => {
@@ -2128,7 +2040,6 @@ export default function App() {
               return;
             }
             activeStream = fallbackStream;
-            setIsWebcamSimulated(false);
             if (webcamRef.current) {
               webcamRef.current.srcObject = fallbackStream;
               try {
@@ -2141,30 +2052,12 @@ export default function App() {
             }
           } catch (fallbackErr) {
             if (isCancelled) return;
-            console.error("[Webcam] Webcam access completely failed:", fallbackErr);
-            
-            // Fallback to custom simulated stream
-            console.log("[Webcam] Starting simulated webcam stream fallback.");
-            try {
-              const mock = createMockWebcamStream();
-              activeStream = mock.stream;
-              mockCleanup = mock.cleanup;
-              setIsWebcamSimulated(true);
-              if (webcamRef.current) {
-                webcamRef.current.srcObject = mock.stream;
-                try {
-                  await webcamRef.current.play();
-                } catch (e: any) {
-                  if (e.name !== 'AbortError') {
-                    console.error("[Webcam] Simulated webcam play failed:", e);
-                  }
-                }
-              }
-            } catch (simErr) {
-              console.error("[Webcam] Simulated webcam generation failed:", simErr);
-              if (project?.audioSettings?.isBackstageEnabled) {
-                handleToggleBackstage();
-              }
+            console.error("[Webcam] Webcam access failed:", fallbackErr);
+            if (webcamRef.current) {
+              webcamRef.current.srcObject = null;
+            }
+            if (project?.audioSettings?.isBackstageEnabled) {
+              handleToggleBackstage();
             }
           }
         }
@@ -2178,10 +2071,6 @@ export default function App() {
       if (activeStream) {
         activeStream.getTracks().forEach(track => track.stop());
       }
-      if (mockCleanup) {
-        mockCleanup();
-      }
-      setIsWebcamSimulated(false);
       if (webcamRef.current) {
         webcamRef.current.srcObject = null;
       }
