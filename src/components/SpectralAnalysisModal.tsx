@@ -23,7 +23,8 @@ import {
 import { AudioSegment, AudioTrack } from '../types';
 import { getSafeFileUrl } from '../lib/utils';
 import { playbackEngine } from '../services/playbackEngine';
-import { SpectralAnalysisService, SpectrogramData } from '../services/spectralAnalysisService';
+import { computeSpectrogramFromFile, computeSpectrogramFromPcm, SpectrogramData } from '../lib/spectralBridge';
+import { freqToY, yToFreq, getColorRgb, formatFreqLabel, freqToNote } from '../lib/spectralUtils';
 
 interface SpectralAnalysisModalProps {
   segment: AudioSegment;
@@ -241,6 +242,27 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
         setRawAudioBuffer(decodedBuffer);
         sampleRateRef.current = decodedBuffer.sampleRate;
 
+        // Try Rust computeSpectrogramFromFile first if physical path exists
+        if (segment.filePath) {
+          try {
+            const spec = await computeSpectrogramFromFile(
+              segment.filePath,
+              segment.fileOffset || 0,
+              segment.duration || undefined,
+              fftSize,
+              0.25
+            );
+            if (!isCancelled) {
+              setSpectrogramData(spec);
+              setLoading(false);
+              setLoadingProgress(100);
+              return;
+            }
+          } catch (rustErr) {
+            console.warn("Direct file STFT via Rust failed, falling back to buffer decoding:", rustErr);
+          }
+        }
+
         // Extract the exact sub-segment samples based on fileOffset and duration
         const fullChannel = decodedBuffer.getChannelData(0);
         const fileOffset = segment.fileOffset || 0;
@@ -259,8 +281,8 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
 
         setLoadingProgress(90);
 
-        // Compute Spectrogram STFT
-        const spec = SpectralAnalysisService.computeSpectrogram(
+        // Compute Spectrogram STFT via Rust
+        const spec = await computeSpectrogramFromPcm(
           segSamples,
           decodedBuffer.sampleRate,
           fftSize,
@@ -275,7 +297,7 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
       } catch (err: any) {
         console.error("Spectral analysis load error:", err);
         if (!isCancelled) {
-          // Guaranteed fallback: never lock user out with an error
+          // Fallback through Rust PCM computation
           try {
             const fallbackCtx = audioCtxRef.current || new (window.AudioContext || (window as any).webkitAudioContext)();
             const fallbackBuffer = synthesizeAudioBufferFromWaveform(fallbackCtx, segment.duration || 3.0, segment.waveform);
@@ -283,7 +305,7 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
             sampleRateRef.current = fallbackBuffer.sampleRate;
             const segSamples = fallbackBuffer.getChannelData(0);
             samplesRef.current = segSamples;
-            const spec = SpectralAnalysisService.computeSpectrogram(segSamples, fallbackBuffer.sampleRate, fftSize, 0.25);
+            const spec = await computeSpectrogramFromPcm(segSamples, fallbackBuffer.sampleRate, fftSize, 0.25);
             setSpectrogramData(spec);
             setLoading(false);
           } catch (fallbackErr: any) {
@@ -307,20 +329,20 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
     };
   }, [segment.filePath, segment.blobUrl, (segment as any).url, segment.fileOffset, segment.duration, segment.id, segment.waveform]);
 
-  // Recompute STFT when FFT size changes
+  // Recompute STFT when FFT size changes via Rust
   useEffect(() => {
     if (!samplesRef.current || !sampleRateRef.current) return;
-    try {
-      const spec = SpectralAnalysisService.computeSpectrogram(
-        samplesRef.current,
-        sampleRateRef.current,
-        fftSize,
-        0.25
-      );
-      setSpectrogramData(spec);
-    } catch (e) {
-      console.error("FFT size update failed", e);
-    }
+    let isCancelled = false;
+    computeSpectrogramFromPcm(samplesRef.current, sampleRateRef.current, fftSize, 0.25)
+      .then((spec) => {
+        if (!isCancelled) setSpectrogramData(spec);
+      })
+      .catch((e) => {
+        console.error("FFT size update failed", e);
+      });
+    return () => {
+      isCancelled = true;
+    };
   }, [fftSize]);
 
   // Render the Spectrogram Heatmap to offscreen buffer & main canvas
@@ -346,7 +368,7 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
     // Create offscreen image for STFT pixels
     const frames = spectrogramData.frames;
     const numFrames = frames.length;
-    const numBins = spectrogramData.fftSize / 2;
+    const numBins = Math.floor(spectrogramData.fftSize / 2);
     const freqStep = spectrogramData.freqStep;
 
     const offscreen = document.createElement('canvas');
@@ -365,11 +387,11 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
 
       for (let y = 0; y < height; y++) {
         // Map Y pixel to frequency
-        const freq = SpectralAnalysisService.yToFreq(y, height, minFreq, maxFreq, scaleType);
+        const freq = yToFreq(y, height, minFreq, maxFreq, scaleType);
         const binIndex = Math.min(numBins - 1, Math.max(0, Math.round(freq / freqStep)));
-        const db = magnitudes[binIndex] || -120;
+        const db = magnitudes[binIndex] !== undefined ? magnitudes[binIndex] : -120;
 
-        const [r, g, b] = SpectralAnalysisService.getColorRgb(db, minDb, maxDb, palette, gamma);
+        const [r, g, b] = getColorRgb(db, minDb, maxDb, palette, gamma);
         // RGBA in Little-Endian: AABBGGRR
         const pixelIdx = y * numFrames + f;
         data32[pixelIdx] = (255 << 24) | (b << 16) | (g << 8) | r;
@@ -395,7 +417,7 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
 
     gridFreqs.forEach(hz => {
       if (hz < minFreq || hz > maxFreq) return;
-      const y = SpectralAnalysisService.freqToY(hz, height, minFreq, maxFreq, scaleType);
+      const y = freqToY(hz, height, minFreq, maxFreq, scaleType);
       
       // Guide line
       ctx.beginPath();
@@ -408,7 +430,7 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
       // Label background & text
       ctx.setLineDash([]);
       ctx.font = '10px "JetBrains Mono", monospace';
-      const label = SpectralAnalysisService.formatFreqLabel(hz);
+      const label = formatFreqLabel(hz);
       const textWidth = ctx.measureText(label).width;
 
       ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
@@ -422,7 +444,7 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
 
     // Mark Detected Cutoff if lossy MP3 compression is detected
     if (spectrogramData && spectrogramData.detectedCutoffFreq < maxFreq - 1500 && spectrogramData.detectedCutoffFreq > 8000) {
-      const cutoffY = SpectralAnalysisService.freqToY(spectrogramData.detectedCutoffFreq, height, minFreq, maxFreq, scaleType);
+      const cutoffY = freqToY(spectrogramData.detectedCutoffFreq, height, minFreq, maxFreq, scaleType);
       ctx.beginPath();
       ctx.strokeStyle = 'rgba(244, 63, 94, 0.85)';
       ctx.lineWidth = 1.5;
@@ -435,7 +457,7 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
       ctx.fillStyle = 'rgba(244, 63, 94, 0.9)';
       ctx.font = 'bold 9px sans-serif';
       ctx.textAlign = 'left';
-      ctx.fillText(`▲ MP3/Lossy Срез: ${SpectralAnalysisService.formatFreqLabel(spectrogramData.detectedCutoffFreq)}`, 8, cutoffY - 6);
+      ctx.fillText(`▲ MP3/Lossy Срез: ${formatFreqLabel(spectrogramData.detectedCutoffFreq)}`, 8, cutoffY - 6);
     }
   };
 
@@ -582,14 +604,14 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
 
     const timeRatio = Math.max(0, Math.min(1, x / w));
     const time = timeRatio * spectrogramData.duration;
-    const freq = SpectralAnalysisService.yToFreq(y, h, minFreq, maxFreq, scaleType);
+    const freq = yToFreq(y, h, minFreq, maxFreq, scaleType);
 
     // Find closest frame and magnitude
     const frameIdx = Math.min(spectrogramData.frames.length - 1, Math.max(0, Math.floor(timeRatio * spectrogramData.frames.length)));
     const frame = spectrogramData.frames[frameIdx];
-    const binIdx = Math.min(spectrogramData.fftSize / 2 - 1, Math.max(0, Math.round(freq / spectrogramData.freqStep)));
-    const db = frame ? frame.magnitudes[binIdx] : -120;
-    const note = SpectralAnalysisService.freqToNote(freq);
+    const binIdx = Math.min(Math.floor(spectrogramData.fftSize / 2) - 1, Math.max(0, Math.round(freq / spectrogramData.freqStep)));
+    const db = frame && frame.magnitudes[binIdx] !== undefined ? frame.magnitudes[binIdx] : -120;
+    const note = freqToNote(freq);
 
     setHoverInfo({
       x,
@@ -948,97 +970,97 @@ export const SpectralAnalysisModal: React.FC<SpectralAnalysisModalProps> = ({
                       <div className="flex items-center justify-between gap-3">
                         <span className="text-zinc-400 font-medium">Частота:</span>
                         <span className="font-mono font-bold text-amber-300">
-                          {SpectralAnalysisService.formatFreqLabel(hoverInfo.freq)}
-                          {hoverInfo.note && <span className="text-purple-300 ml-1">({hoverInfo.note})</span>}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="text-zinc-400 font-medium">Амплитуда:</span>
-                        <span className={`font-mono font-bold ${hoverInfo.db > -6 ? 'text-rose-400' : hoverInfo.db > -24 ? 'text-amber-300' : 'text-emerald-400'}`}>
-                          {hoverInfo.db} dBFS
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="text-zinc-400 font-medium">Время:</span>
-                        <span className="font-mono text-zinc-300">{formatTime(hoverInfo.time)}</span>
-                      </div>
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-          )}
+                      {formatFreqLabel(hoverInfo.freq)}
+                      {hoverInfo.note && <span className="text-purple-300 ml-1">({hoverInfo.note})</span>}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-zinc-400 font-medium">Амплитуда:</span>
+                    <span className={`font-mono font-bold ${hoverInfo.db > -6 ? 'text-rose-400' : hoverInfo.db > -24 ? 'text-amber-300' : 'text-emerald-400'}`}>
+                      {hoverInfo.db} dBFS
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-zinc-400 font-medium">Время:</span>
+                    <span className="font-mono text-zinc-300">{formatTime(hoverInfo.time)}</span>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
-          {/* Color Scale Legend on Right Border */}
-          <div className="w-14 border-l border-zinc-800 bg-zinc-950 flex flex-col justify-between py-4 px-2 select-none shrink-0">
-            <div className="text-[9px] font-mono text-amber-300 text-center font-bold">0 dB</div>
-            <div className="text-[9px] font-mono text-amber-400 text-center">-12 dB</div>
-            <div className="text-[9px] font-mono text-rose-400 text-center">-24 dB</div>
-            <div className="text-[9px] font-mono text-purple-400 text-center">-48 dB</div>
-            <div className="text-[9px] font-mono text-indigo-400 text-center">-72 dB</div>
-            <div className="text-[9px] font-mono text-zinc-500 text-center">-96 dB</div>
-            <div className="text-[9px] font-mono text-zinc-600 text-center">-120 dB</div>
+      {/* Color Scale Legend on Right Border */}
+      <div className="w-14 border-l border-zinc-800 bg-zinc-950 flex flex-col justify-between py-4 px-2 select-none shrink-0">
+        <div className="text-[9px] font-mono text-amber-300 text-center font-bold">0 dB</div>
+        <div className="text-[9px] font-mono text-amber-400 text-center">-12 dB</div>
+        <div className="text-[9px] font-mono text-rose-400 text-center">-24 dB</div>
+        <div className="text-[9px] font-mono text-purple-400 text-center">-48 dB</div>
+        <div className="text-[9px] font-mono text-indigo-400 text-center">-72 dB</div>
+        <div className="text-[9px] font-mono text-zinc-500 text-center">-96 dB</div>
+        <div className="text-[9px] font-mono text-zinc-600 text-center">-120 dB</div>
+      </div>
+    </div>
+
+    {/* Quality & Audio Health Diagnostics Footer (Audition / RX Style) */}
+    {spectrogramData && (
+      <div className="border-t border-zinc-800 bg-zinc-900/80 px-6 py-3 shrink-0 flex flex-wrap items-center justify-between gap-4 text-xs">
+        <div className="flex items-center gap-6">
+          {/* Format & Lossy Cutoff Card */}
+          <div className="flex items-center gap-2">
+            {spectrogramData.detectedCutoffFreq < 18500 ? (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-500/15 border border-rose-500/30 text-rose-300 font-semibold">
+                <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                <span>Срез: {formatFreqLabel(spectrogramData.detectedCutoffFreq)} (MP3/Сжатие)</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-semibold">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Lossless / Полный спектр ({formatFreqLabel(spectrogramData.detectedCutoffFreq)})</span>
+              </div>
+            )}
+          </div>
+
+          {/* Low-End Rumble Check */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-zinc-500">Инфранизкий гул (&lt;60Гц):</span>
+            {spectrogramData.hasLowRumble ? (
+              <span className="text-amber-400 font-bold flex items-center gap-1">
+                <AlertTriangle className="w-3 h-3" /> Присутствует
+              </span>
+            ) : (
+              <span className="text-emerald-400 font-medium">Чисто</span>
+            )}
+          </div>
+
+          {/* Sibilance Check */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-zinc-500">Сибилянты (5-8 кГц):</span>
+            {spectrogramData.hasSibilanceIssue ? (
+              <span className="text-rose-400 font-bold flex items-center gap-1">
+                <AlertTriangle className="w-3 h-3" /> Повышенная резкость
+              </span>
+            ) : (
+              <span className="text-emerald-400 font-medium">В норме</span>
+            )}
+          </div>
+
+          {/* Noise Floor */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-zinc-500">Уровень шума:</span>
+            <span className="font-mono text-zinc-300 font-bold">{spectrogramData.estimatedNoiseFloorDb} dBFS</span>
           </div>
         </div>
 
-        {/* Quality & Audio Health Diagnostics Footer (Audition / RX Style) */}
-        {spectrogramData && (
-          <div className="border-t border-zinc-800 bg-zinc-900/80 px-6 py-3 shrink-0 flex flex-wrap items-center justify-between gap-4 text-xs">
-            <div className="flex items-center gap-6">
-              {/* Format & Lossy Cutoff Card */}
-              <div className="flex items-center gap-2">
-                {spectrogramData.detectedCutoffFreq < 18500 ? (
-                  <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-500/15 border border-rose-500/30 text-rose-300 font-semibold">
-                    <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
-                    <span>Срез: {SpectralAnalysisService.formatFreqLabel(spectrogramData.detectedCutoffFreq)} (MP3/Сжатие)</span>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-semibold">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Lossless / Полный спектр ({SpectralAnalysisService.formatFreqLabel(spectrogramData.detectedCutoffFreq)})</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Low-End Rumble Check */}
-              <div className="flex items-center gap-1.5">
-                <span className="text-zinc-500">Инфранизкий гул (&lt;60Гц):</span>
-                {spectrogramData.hasLowRumble ? (
-                  <span className="text-amber-400 font-bold flex items-center gap-1">
-                    <AlertTriangle className="w-3 h-3" /> Присутствует
-                  </span>
-                ) : (
-                  <span className="text-emerald-400 font-medium">Чисто</span>
-                )}
-              </div>
-
-              {/* Sibilance Check */}
-              <div className="flex items-center gap-1.5">
-                <span className="text-zinc-500">Сибилянты (5-8 кГц):</span>
-                {spectrogramData.hasSibilanceIssue ? (
-                  <span className="text-rose-400 font-bold flex items-center gap-1">
-                    <AlertTriangle className="w-3 h-3" /> Повышенная резкость
-                  </span>
-                ) : (
-                  <span className="text-emerald-400 font-medium">В норме</span>
-                )}
-              </div>
-
-              {/* Noise Floor */}
-              <div className="flex items-center gap-1.5">
-                <span className="text-zinc-500">Уровень шума:</span>
-                <span className="font-mono text-zinc-300 font-bold">{spectrogramData.estimatedNoiseFloorDb} dBFS</span>
-              </div>
-            </div>
-
-            {/* Peak Frequency & Sample Rate */}
-            <div className="flex items-center gap-4 text-zinc-400 font-mono text-[11px]">
-              <div>
-                <span>Пик: </span>
-                <span className="text-amber-300 font-bold">
-                  {SpectralAnalysisService.formatFreqLabel(spectrogramData.globalPeakFreq)} ({spectrogramData.globalPeakDb} dBFS)
-                </span>
-              </div>
+        {/* Peak Frequency & Sample Rate */}
+        <div className="flex items-center gap-4 text-zinc-400 font-mono text-[11px]">
+          <div>
+            <span>Пик: </span>
+            <span className="text-amber-300 font-bold">
+              {formatFreqLabel(spectrogramData.globalPeakFreq)} ({spectrogramData.globalPeakDb} dBFS)
+            </span>
+          </div>
               <div className="w-px h-3 bg-zinc-700" />
               <div>
                 <span>Частота дискретизации: </span>

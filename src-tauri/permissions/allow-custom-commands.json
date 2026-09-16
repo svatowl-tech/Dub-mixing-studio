@@ -19,6 +19,7 @@
           "migrate_json_to_db",
           "extract_audio_peaks_bin",
           "generate_waveform_peaks",
+          "generate_waveform_peaks_from_pcm",
           "read_text_file",
           "read_binary_file",
           "open_devtools",
@@ -67,6 +68,8 @@
           "open_plugin_editor",
           "close_plugin_editor",
           "normalize_audio",
+          "estimate_lufs_from_pcm",
+          "apply_waveform_upward_compression",
           "match_eq_profile",
           "clean_clicks",
           "apply_deplosive",
@@ -92,7 +95,16 @@
           "seek_native_playback",
           "update_native_playback_tracks",
           "get_native_playback_position",
-          "clear_native_playback_cache"
+          "clear_native_playback_cache",
+          "compute_spectrogram_from_file",
+          "compute_spectrogram_from_pcm",
+          "transform_waveform_eq",
+          "transform_waveform_declick",
+          "transform_waveform_deplosive",
+          "transform_waveform_deesser",
+          "transform_waveform_denoise",
+          "transform_waveform_dereverb",
+          "transform_waveform_leveler"
         ],
         "deny": []
       }

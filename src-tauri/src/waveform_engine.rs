@@ -355,3 +355,43 @@ pub async fn generate_waveform_peaks(app_handle: AppHandle, file_path: String, p
     
     peaks_res
 }
+
+#[tauri::command]
+pub fn generate_waveform_peaks_from_pcm(samples: Vec<f32>, points: usize) -> Result<Vec<f32>, String> {
+    if samples.is_empty() {
+        return Ok(vec![0.0; points.max(1)]);
+    }
+
+    let pts = points.max(1);
+
+    let peaks: Vec<f32> = (0..pts)
+        .into_par_iter()
+        .map(|i| {
+            let start_norm = i as f64 / pts as f64;
+            let end_norm = (i + 1) as f64 / pts as f64;
+
+            let start_idx = (start_norm * samples.len() as f64) as usize;
+            let end_idx = ((end_norm * samples.len() as f64) as usize).min(samples.len());
+
+            if start_idx >= end_idx {
+                return 0.0;
+            }
+
+            let chunk = &samples[start_idx..end_idx];
+            let mut sum_squares = 0.0;
+            
+            for &s in chunk {
+                sum_squares += s * s;
+            }
+            
+            if chunk.is_empty() {
+                0.0
+            } else {
+                (sum_squares / chunk.len() as f32).sqrt()
+            }
+        })
+        .collect();
+
+    Ok(peaks)
+}
+

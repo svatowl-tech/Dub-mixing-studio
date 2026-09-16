@@ -1,89 +1,39 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { 
-  Mic, 
   Play, 
-  Pause, 
-  SkipBack, 
-  Settings, 
-  FileVideo, 
-  FolderOpen,
-  Type, 
   Layers, 
-  Download, 
-  Plus,
-  Trash2,
-  Volume2,
-  Monitor,
-  Video as VideoIcon,
-  ChevronRight,
-  Upload,
-  FileText,
-  AlertTriangle,
-  LayoutTemplate,
-  ZoomIn,
-  ZoomOut,
-  Activity,
-  Cpu,
-  Star,
-  GripVertical,
-  X,
-  Bookmark,
-  Music,
-  ScrollText,
-  ArrowUp,
-  ArrowDown,
-  Maximize2,
-  Minimize2,
-  Minus,
-  BookOpen,
-  Archive,
-  Circle,
-  Square,
-  Repeat
+  Monitor, 
+  Upload, 
+  AlertTriangle, 
+  GripVertical, 
+  X, 
+  Archive 
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useDropzone } from 'react-dropzone';
-import WaveSurfer from 'wavesurfer.js';
-import { cn, getSafeFileUrl, getGlobalAudioSettings, getDefaultKeyMap, safeConfirm, getAbsoluteFilePath } from './lib/utils';
-import { addToWebFileCache, tauriAPI } from './lib/tauriLegacyWrapper';
+import { getSafeFileUrl, getGlobalAudioSettings, safeConfirm, getAbsoluteFilePath } from './lib/utils';
+import { addToWebFileCache } from './lib/tauriLegacyWrapper';
 import { IOLogger } from './lib/ioLogger';
-import { FixesPanel } from './components/FixesPanel';
-import { Waveform } from './components/Waveform';
-import AudioSegmentView from './components/AudioSegmentView';
-import VUMeter from './components/VUMeter';
-import AudioDeviceManager from './components/AudioDeviceManager';
 import ExportModal from './components/ExportModal';
 import QuickImportModal from './components/QuickImportModal';
 import FixImportModal from './components/FixImportModal';
 import PreRollCountdown from './components/PreRollCountdown';
 import Teleprompter from './components/Teleprompter';
-import { Project, SubtitleLine, AudioTrack, AudioSegment, Fix, Marker, TrackProcessing } from './types';
+import { Project, AudioTrack, AudioSegment, Fix } from './types';
 import { SubtitleService, ParsedSubtitles } from './services/subtitleService';
 import { TextImportService } from './services/textImportService';
 import { LatencyCalibration } from './components/LatencyCalibration';
-import { WaveformService } from './services/waveformService';
-import { SmartAlignService } from './services/smartAlignService';
+import { generateWaveformPeaksFromBlob } from './lib/waveformBridge';
 import { FixService } from './services/fixService';
 import { BulkImportService } from './services/bulkImportService';
 import { UniversalParserService } from './services/UniversalParserService';
 import { playbackEngine } from './services/playbackEngine';
 import { logger } from './lib/logger';
-import { splitSegmentAtTime } from './lib/timelineUtils';
 
 // Extracted Components
 import PopoutWindow from './components/PopoutWindow';
-import StudioDashboard from './components/StudioDashboard';
 import AdvancedTimeline from './components/AdvancedTimeline';
-import DocumentViewer from './components/DocumentViewer';
-import VirtualizedWaveform from './components/VirtualizedWaveform';
-import TimelineCanvas from './components/TimelineCanvas';
-import TrackHeader from './components/TrackHeader';
-import Header from './components/Header';
-import Sidebar from './components/Sidebar';
 import TransportControls from './components/TransportControls';
-
-
-
 
 import { useProject } from './hooks/useProject';
 import { useTimelineState } from './hooks/useTimelineState';
@@ -1161,12 +1111,12 @@ export default function App() {
               }).catch(err => console.error("Drop video peaks error:", err));
             });
         } else if (!window.electronAPI) {
-          WaveformService.generatePeaks(file, 20000)
+          generateWaveformPeaksFromBlob(file, 20000)
             .then(peaks => {
               setProject(p => p ? { ...p, originalPeaks: peaks } : p);
             })
             .catch(err => {
-              console.warn("Could not generate peaks locally inside browser:", err);
+              console.warn("Could not generate peaks locally via Rust:", err);
             });
         }
       }

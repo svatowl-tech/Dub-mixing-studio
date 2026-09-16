@@ -27,30 +27,29 @@ const REQUIRED_MODELS = [
         aliases: ['VR-DeReverb-FoxJoy.onnx', 'UVR-DeReverb.onnx', 'Reverb_HQ_By_FoxJoy.onnx', 'VR-DeReverb.onnx'],
         urls: [
             'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Reverb_HQ_By_FoxJoy.onnx',
+            'https://huggingface.co/seanghay/uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx',
             'https://huggingface.co/Derur/UVR-models/resolve/main/Reverb_HQ_By_FoxJoy.onnx',
             'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx'
         ],
         description: 'Neural Room Acoustics & Reverb Removal Model (FoxJoy HQ)'
     },
     {
-        name: 'VR-DeEcho-Normal.onnx',
-        aliases: ['UVR-DeEcho-Normal.onnx', 'UVR-De-Echo-Normal.onnx', 'VR-DeEcho-Normal.onnx'],
+        name: 'UVR-De-Echo-Normal.pth',
+        aliases: ['VR-DeEcho-Normal.pth', 'VR-DeEchoNormal.pth', 'VR-DeEcho-Normal.onnx', 'UVR-DeEcho-Normal.onnx'],
         urls: [
-            'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/VR_Architecture/VR-DeEcho-Normal.onnx',
-            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/VR_Models/VR-DeEcho-Normal.onnx',
-            'https://huggingface.co/datasets/SayanoAI/UVR5-Models/resolve/main/VR_Models/VR-DeEcho-Normal.onnx',
-            'https://huggingface.co/Derur/UVR-models/resolve/main/VR_Models/VR-DeEcho-Normal.onnx'
+            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Normal.pth',
+            'https://huggingface.co/seanghay/uvr_models/resolve/main/UVR-De-Echo-Normal.pth',
+            'https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoNormal.pth'
         ],
         description: 'VR Architecture De-Echo Normal Model'
     },
     {
-        name: 'VR-DeEcho-Aggressive.onnx',
-        aliases: ['UVR-DeEcho-Aggressive.onnx', 'UVR-De-Echo-Aggressive.onnx', 'VR-DeEcho-Aggressive.onnx'],
+        name: 'UVR-De-Echo-Aggressive.pth',
+        aliases: ['VR-DeEcho-Aggressive.pth', 'VR-DeEchoAggressive.pth', 'VR-DeEcho-Aggressive.onnx', 'UVR-DeEcho-Aggressive.onnx'],
         urls: [
-            'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/VR_Architecture/VR-DeEcho-Aggressive.onnx',
-            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/VR_Models/VR-DeEcho-Aggressive.onnx',
-            'https://huggingface.co/datasets/SayanoAI/UVR5-Models/resolve/main/VR_Models/VR-DeEcho-Aggressive.onnx',
-            'https://huggingface.co/Derur/UVR-models/resolve/main/VR_Models/VR-DeEcho-Aggressive.onnx'
+            'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Aggressive.pth',
+            'https://huggingface.co/seanghay/uvr_models/resolve/main/UVR-De-Echo-Aggressive.pth',
+            'https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoAggressive.pth'
         ],
         description: 'VR Architecture De-Echo Aggressive Model'
     },
@@ -169,6 +168,43 @@ async function main() {
         // Model is saved cleanly under its canonical name in src-tauri/models
         if (fs.existsSync(primaryDest) && fs.statSync(primaryDest).size > 10000) {
             console.log(`[Model Downloader] Verified canonical model asset: ${model.name}`);
+
+            // Ensure aliases are synchronized so any consumer finds the model under any expected alias
+            if (Array.isArray(model.aliases)) {
+                for (const alias of model.aliases) {
+                    if (alias === model.name) continue;
+                    // Only copy same extension aliases here
+                    const isSameExt = path.extname(alias) === path.extname(model.name);
+                    if (isSameExt) {
+                        const aliasPath = path.join(primaryDir, alias);
+                        if (!fs.existsSync(aliasPath) || fs.statSync(aliasPath).size < 10000) {
+                            try {
+                                fs.copyFileSync(primaryDest, aliasPath);
+                                console.log(`[Model Downloader] Created alias asset: ${alias} -> ${model.name}`);
+                            } catch (e) {
+                                // ignore copy error
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Ensure ONNX fallbacks exist for De-Echo in native ONNX Runtime (using FoxJoy HQ)
+    const foxJoyPath = path.join(primaryDir, 'Reverb_HQ_By_FoxJoy.onnx');
+    if (fs.existsSync(foxJoyPath) && fs.statSync(foxJoyPath).size > 10000) {
+        const onnxDeEchoes = ['VR-DeEcho-Normal.onnx', 'VR-DeEcho-Aggressive.onnx', 'VR-DeReverb.onnx'];
+        for (const onnxName of onnxDeEchoes) {
+            const dest = path.join(primaryDir, onnxName);
+            if (!fs.existsSync(dest) || fs.statSync(dest).size < 10000) {
+                try {
+                    fs.copyFileSync(foxJoyPath, dest);
+                    console.log(`[Model Downloader] Synchronized ONNX fallback: ${onnxName} (from Reverb_HQ_By_FoxJoy.onnx)`);
+                } catch (e) {
+                    // ignore
+                }
+            }
         }
     }
 

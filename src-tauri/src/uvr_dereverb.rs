@@ -75,28 +75,45 @@ pub fn find_dereverb_model_path(app_handle: &AppHandle, model_name: &str) -> Opt
     let target_filename = match model_name {
         "uvr_deecho_normal" => "VR-DeEcho-Normal.onnx".to_string(),
         "uvr_deecho_aggressive" => "VR-DeEcho-Aggressive.onnx".to_string(),
-        m if m.ends_with(".onnx") => m.to_string(),
+        m if m.ends_with(".onnx") || m.ends_with(".pth") => m.to_string(),
         m => format!("{}.onnx", m),
     };
 
+    let check_names = vec![
+        target_filename.clone(),
+        format!("{}.pth", target_filename.trim_end_matches(".onnx")),
+        format!("{}.onnx", target_filename.trim_end_matches(".pth")),
+        "Reverb_HQ_By_FoxJoy.onnx".to_string(),
+        "UVR-De-Echo-Normal.pth".to_string(),
+        "UVR-De-Echo-Aggressive.pth".to_string(),
+    ];
+
     // 1. Каталог ресурсов приложения (resource_dir)
     if let Ok(resource_dir) = app_handle.path().resource_dir() {
-        candidates.push(resource_dir.join("resources").join("models").join(&target_filename));
-        candidates.push(resource_dir.join("models").join(&target_filename));
-        candidates.push(resource_dir.join(&target_filename));
+        for n in &check_names {
+            candidates.push(resource_dir.join("resources").join("models").join(n));
+            candidates.push(resource_dir.join("models").join(n));
+            candidates.push(resource_dir.join(n));
+        }
     }
 
     // 2. Каталог данных приложения (app_data_dir)
     if let Ok(app_data_dir) = app_handle.path().app_data_dir() {
-        candidates.push(app_data_dir.join("models").join(&target_filename));
-        candidates.push(app_data_dir.join(&target_filename));
+        for n in &check_names {
+            candidates.push(app_data_dir.join("models").join(n));
+            candidates.push(app_data_dir.join(n));
+        }
     }
 
     // 3. Текущая рабочая директория
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("resources").join("models").join(&target_filename));
-        candidates.push(cwd.join("models").join(&target_filename));
-        candidates.push(cwd.join("src-tauri").join("resources").join("models").join(&target_filename));
+        for n in &check_names {
+            candidates.push(cwd.join("src-tauri").join("models").join(n));
+            candidates.push(cwd.join("src-tauri").join("resources").join("models").join(n));
+            candidates.push(cwd.join("resources").join("models").join(n));
+            candidates.push(cwd.join("models").join(n));
+            candidates.push(cwd.join(n));
+        }
     }
 
     // Стандартные имена моделей де-реверберации экосистемы UVR / MDX
@@ -444,9 +461,9 @@ pub async fn run_dereverb_pipeline(
         if sep_status.python_found && sep_status.separator_installed {
             let py_model = match chosen_model.as_str() {
                 "reverb_foxjoy" | "foxjoy" | "room_cleaner_neural" | "rt_dereverb_v2" | "adaptive_gate" => "Reverb_HQ_By_FoxJoy.onnx",
-                "uvr_deecho_normal" | "deecho" => "UVR-De-Echo.onnx",
-                "uvr_deecho_aggressive" | "mdx23c" => "MDX23C-DeReverb.onnx",
-                m if m.ends_with(".onnx") => m,
+                "uvr_deecho_normal" | "deecho" => "UVR-De-Echo-Normal.pth",
+                "uvr_deecho_aggressive" | "mdx23c" => "UVR-De-Echo-Aggressive.pth",
+                m if m.ends_with(".onnx") || m.ends_with(".pth") => m,
                 _ => "Reverb_HQ_By_FoxJoy.onnx",
             };
 

@@ -7,7 +7,7 @@ import {
   FolderOpen, Mic, CheckSquare, ShieldCheck, Gauge
 } from 'lucide-react';
 import { useUIState } from '../contexts/UIContext';
-import { SpectralAnalysisService, SpectrogramData } from '../services/spectralAnalysisService';
+import { computeSpectrogramFromFile, computeSpectrogramFromPcm, SpectrogramData } from '../lib/spectralBridge';
 import { getSafeFileUrl, createPrefixedAudioPath, invalidateFileUrl } from '../lib/utils';
 import { open as rawOpen, save as rawSave } from '@tauri-apps/plugin-dialog';
 import SynchronizedAudioVisualizer from './SynchronizedAudioVisualizer';
@@ -170,10 +170,15 @@ export const SingleTrackStudioModal: React.FC = () => {
         setDuration(buf.duration);
         setCurrentTime(0);
 
-        // Compute Spectrogram for Original
-        const pcm = buf.getChannelData(0);
-        const spec = SpectralAnalysisService.computeSpectrogram(pcm, buf.sampleRate, fftSize, 0.25);
-        setSpectrogramDataA(spec);
+        // Compute Spectrogram for Original via Rust
+        try {
+          const spec = await computeSpectrogramFromFile(fileP, 0, undefined, fftSize, 0.25);
+          setSpectrogramDataA(spec);
+        } catch (_) {
+          const pcm = buf.getChannelData(0);
+          const spec = await computeSpectrogramFromPcm(pcm, buf.sampleRate, fftSize, 0.25);
+          setSpectrogramDataA(spec);
+        }
       }
 
       setIsProcessing(false);
@@ -209,7 +214,7 @@ export const SingleTrackStudioModal: React.FC = () => {
       setCurrentTime(0);
 
       const pcm = decoded.getChannelData(0);
-      const spec = SpectralAnalysisService.computeSpectrogram(pcm, decoded.sampleRate, fftSize, 0.25);
+      const spec = await computeSpectrogramFromPcm(pcm, decoded.sampleRate, fftSize, 0.25);
       setSpectrogramDataA(spec);
     } catch (err: any) {
       console.error(err);
@@ -330,9 +335,14 @@ export const SingleTrackStudioModal: React.FC = () => {
     const buf = await decodeFileToBuffer(outPath);
     if (buf) {
       setProcessedBuffer(buf);
-      const pcm = buf.getChannelData(0);
-      const spec = SpectralAnalysisService.computeSpectrogram(pcm, buf.sampleRate, fftSize, 0.25);
-      setSpectrogramDataB(spec);
+      try {
+        const spec = await computeSpectrogramFromFile(outPath, 0, undefined, fftSize, 0.25);
+        setSpectrogramDataB(spec);
+      } catch (_) {
+        const pcm = buf.getChannelData(0);
+        const spec = await computeSpectrogramFromPcm(pcm, buf.sampleRate, fftSize, 0.25);
+        setSpectrogramDataB(spec);
+      }
 
       // Automatically switch to Processed source B
       setActiveSource('B');

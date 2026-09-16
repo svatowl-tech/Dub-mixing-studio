@@ -744,7 +744,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           }
         }
 
-        const res = AudioDspService.applyNormalizationAndUpwardCompression(
+        const res = await AudioDspService.applyNormalizationAndUpwardCompression(
           project.tracks,
           activePreset.phase1.normalization,
           selectedSegment?.trackId,
@@ -802,7 +802,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           }
         }
 
-        const res = AudioDspService.applyDeClick(
+        const res = await AudioDspService.applyDeClick(
           project.tracks,
           activePreset.phase1.deClick,
           selectedSegment?.trackId,
@@ -848,7 +848,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           }
         }
 
-        const res = AudioDspService.applyEqMatching(
+        const res = await AudioDspService.applyEqMatching(
           project.tracks,
           activePreset.phase1.eqMatching,
           selectedSegment?.trackId,
@@ -896,7 +896,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           }
         }
 
-        const res = AudioDspService.applyDePlosive(
+        const res = await AudioDspService.applyDePlosive(
           project.tracks,
           activePreset.phase1.dePlosive,
           selectedSegment?.trackId,
@@ -952,7 +952,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           }
         }
 
-        const res = AudioDspService.applyDeEsser(
+        const res = await AudioDspService.applyDeEsser(
           project.tracks,
           activePreset.phase1.deEsser,
           selectedSegment?.trackId,
@@ -1013,7 +1013,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           }
         }
 
-        const res = AudioDspService.applyDenoise(
+        const res = await AudioDspService.applyDenoise(
           project.tracks,
           activePreset.phase1.denoise,
           selectedSegment?.trackId,
@@ -1087,7 +1087,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           }
         }
 
-        const res = AudioDspService.applyDeReverb(
+        const res = await AudioDspService.applyDeReverb(
           project.tracks,
           activePreset.phase1.dereverb,
           selectedSegment?.trackId,
@@ -1151,7 +1151,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           }
         }
 
-        const res = AudioDspService.applyVolumeLeveler(
+        const res = await AudioDspService.applyVolumeLeveler(
           project.tracks,
           activePreset.phase1.volumeLeveler,
           selectedSegment?.trackId,
@@ -2644,28 +2644,28 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
           // Обновление состояния в памяти через AudioDspService
           if (stepId === 'normalization') {
-            const dspRes = AudioDspService.applyNormalizationAndUpwardCompression(currentTracks, activePreset.phase1.normalization);
+            const dspRes = await AudioDspService.applyNormalizationAndUpwardCompression(currentTracks, activePreset.phase1.normalization);
             currentTracks = dspRes.updatedTracks;
           } else if (stepId === 'eqMatching') {
-            const dspRes = AudioDspService.applyEqMatching(currentTracks, activePreset.phase1.eqMatching);
+            const dspRes = await AudioDspService.applyEqMatching(currentTracks, activePreset.phase1.eqMatching);
             currentTracks = dspRes.updatedTracks;
           } else if (stepId === 'deClick') {
-            const dspRes = AudioDspService.applyDeClick(currentTracks, activePreset.phase1.deClick);
+            const dspRes = await AudioDspService.applyDeClick(currentTracks, activePreset.phase1.deClick);
             currentTracks = dspRes.updatedTracks;
           } else if (stepId === 'dePlosive') {
-            const dspRes = AudioDspService.applyDePlosive(currentTracks, activePreset.phase1.dePlosive);
+            const dspRes = await AudioDspService.applyDePlosive(currentTracks, activePreset.phase1.dePlosive);
             currentTracks = dspRes.updatedTracks;
           } else if (stepId === 'deEsser') {
-            const dspRes = AudioDspService.applyDeEsser(currentTracks, activePreset.phase1.deEsser);
+            const dspRes = await AudioDspService.applyDeEsser(currentTracks, activePreset.phase1.deEsser);
             currentTracks = dspRes.updatedTracks;
           } else if (stepId === 'denoise') {
-            const dspRes = AudioDspService.applyDenoise(currentTracks, activePreset.phase1.denoise);
+            const dspRes = await AudioDspService.applyDenoise(currentTracks, activePreset.phase1.denoise);
             currentTracks = dspRes.updatedTracks;
           } else if (stepId === 'dereverb') {
-            const dspRes = AudioDspService.applyDeReverb(currentTracks, activePreset.phase1.dereverb);
+            const dspRes = await AudioDspService.applyDeReverb(currentTracks, activePreset.phase1.dereverb);
             currentTracks = dspRes.updatedTracks;
           } else if (stepId === 'volumeLeveler') {
-            const dspRes = AudioDspService.applyVolumeLeveler(currentTracks, activePreset.phase1.volumeLeveler);
+            const dspRes = await AudioDspService.applyVolumeLeveler(currentTracks, activePreset.phase1.volumeLeveler);
             currentTracks = dspRes.updatedTracks;
           }
 

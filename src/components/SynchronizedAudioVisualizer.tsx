@@ -3,7 +3,8 @@ import {
   ZoomIn, ZoomOut, Maximize2, Sliders, Flame, Activity, 
   MoveHorizontal, Volume2, Sparkles, Filter
 } from 'lucide-react';
-import { SpectrogramData, SpectralAnalysisService } from '../services/spectralAnalysisService';
+import { SpectrogramData } from '../lib/spectralBridge';
+import { formatFreqLabel } from '../lib/spectralUtils';
 
 interface SynchronizedAudioVisualizerProps {
   originalBuffer: AudioBuffer | null;
@@ -317,7 +318,7 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
 
       ctx.fillStyle = '#ef4444';
       ctx.font = '10px monospace';
-      ctx.fillText(`▲ MP3 Срез: ${SpectralAnalysisService.formatFreqLabel(activeSpec.detectedCutoffFreq)}`, 8, cutoffY - 4);
+      ctx.fillText(`▲ MP3 Срез: ${formatFreqLabel(activeSpec.detectedCutoffFreq)}`, 8, cutoffY - 4);
     }
 
     // Draw 50Hz / 60Hz Power Hum line if in view to help inspect noise
@@ -356,7 +357,7 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
 
     freqSteps.forEach((f, idx) => {
       const y = (idx / 4) * (height - 14) + 10;
-      ctx.fillText(SpectralAnalysisService.formatFreqLabel(f), width - 50, y);
+      ctx.fillText(formatFreqLabel(f), width - 50, y);
     });
   }, [
     activeSpec, duration, startTime, endTime, visibleDuration, currentTime,
@@ -637,7 +638,7 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
             <div className="flex justify-between text-[11px] text-zinc-400 mb-1">
               <span>Верх диапазона (Макс Гц):</span>
               <span className="font-mono text-amber-400 font-bold">
-                {SpectralAnalysisService.formatFreqLabel(freqMax)}
+                {formatFreqLabel(freqMax)}
               </span>
             </div>
             <input
@@ -774,7 +775,7 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
             <Flame className="w-4 h-4 text-amber-400" />
             Спектральный анализ (STFT Spectrogram)
             <span className="text-[10px] font-normal text-zinc-400">
-              [{freqMin} Гц — {SpectralAnalysisService.formatFreqLabel(freqMax)}]
+              [{freqMin} Гц — {formatFreqLabel(freqMax)}]
             </span>
           </span>
 
@@ -826,13 +827,13 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
             <div className="bg-zinc-950 p-2 rounded-lg border border-white/5 flex flex-col">
               <span className="text-zinc-500">Пик спектра</span>
               <span className="text-amber-400 font-bold font-mono">
-                {SpectralAnalysisService.formatFreqLabel(activeSpec.globalPeakFreq)}
+                {formatFreqLabel(activeSpec.globalPeakFreq)}
               </span>
             </div>
             <div className="bg-zinc-950 p-2 rounded-lg border border-white/5 flex flex-col">
               <span className="text-zinc-500">Верхний срез</span>
               <span className="text-indigo-300 font-bold font-mono">
-                {SpectralAnalysisService.formatFreqLabel(activeSpec.detectedCutoffFreq)}
+                {formatFreqLabel(activeSpec.detectedCutoffFreq)}
               </span>
             </div>
             <div className="bg-zinc-950 p-2 rounded-lg border border-white/5 flex flex-col">

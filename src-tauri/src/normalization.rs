@@ -318,6 +318,114 @@ pub fn process_normalization(
     Ok(res_stats)
 }
 
+/// Helper function to estimate LUFS and RMS directly from PCM / peak buffer in Rust
+#[tauri::command]
+pub fn estimate_lufs_from_pcm(peaks: Vec<f32>, gain: Option<f64>) -> f64 {
+    if peaks.is_empty() {
+        let base_db = -22.0;
+        let g = gain.unwrap_or(1.0).max(0.001);
+        return base_db + 20.0 * g.log10();
+    }
+
+    let g = gain.unwrap_or(1.0) as f32;
+    let mut sum_squares = 0.0_f32;
+    let mut valid_samples = 0_usize;
+
+    for &p in &peaks {
+        let val = p * g;
+        if val > 0.0003 {
+            sum_squares += val * val;
+            valid_samples += 1;
+        }
+    }
+
+    if valid_samples == 0 {
+        return -70.0;
+    }
+
+    let rms = (sum_squares / valid_samples as f32).sqrt();
+    let lufs = 20.0 * (rms.max(0.00001)).log10() - 0.69;
+    (lufs as f64).clamp(-70.0, 0.0)
+}
+
+/// Waveform upward compression and gain calculation directly in Rust
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaveformUpwardResult {
+    pub new_waveform: Vec<f32>,
+    pub updated_gain: f64,
+    pub boosted_samples_count: usize,
+    pub initial_lufs: f64,
+    pub final_lufs: f64,
+}
+
+#[tauri::command]
+pub fn apply_waveform_upward_compression(
+    waveform: Vec<f32>,
+    current_gain: f64,
+    target_lufs: f64,
+    noise_floor_db: f64,
+    upward_threshold_db: f64,
+    upward_gain_db: f64,
+    upward_ratio: f64,
+) -> WaveformUpwardResult {
+    let initial_lufs = estimate_lufs_from_pcm(waveform.clone(), Some(current_gain));
+    let ratio = upward_ratio.max(1.0);
+    let mut boosted_count = 0;
+    let cur_g = current_gain.max(0.001) as f32;
+
+    let mut new_wf = waveform;
+    if !new_wf.is_empty() {
+        for val in new_wf.iter_mut() {
+            if *val <= 0.0001 {
+                *val = 0.0;
+                continue;
+            }
+            let sample_amp = *val * cur_g;
+            let sample_db = if sample_amp <= 0.00001 {
+                -100.0
+            } else {
+                20.0 * sample_amp.log10()
+            } as f64;
+
+            if sample_db <= noise_floor_db {
+                continue;
+            }
+
+            if sample_db < upward_threshold_db {
+                boosted_count += 1;
+                let t = (sample_db - noise_floor_db) / (upward_threshold_db - noise_floor_db);
+                let boost_factor = (1.0 - t).powf(1.0 / ratio);
+                let applied_boost_db = upward_gain_db * boost_factor;
+                let new_db = sample_db + applied_boost_db;
+                let new_amp = 10.0_f64.powf(new_db / 20.0) / (cur_g as f64);
+                *val = (new_amp as f32).clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    let post_upward_lufs = estimate_lufs_from_pcm(new_wf.clone(), Some(current_gain));
+    let lufs_delta = target_lufs - post_upward_lufs;
+    let target_multiplier = 10.0_f64.powf(lufs_delta / 20.0);
+    let updated_gain = (current_gain * target_multiplier).clamp(0.05, 4.5);
+    let updated_gain_rounded = (updated_gain * 100.0).round() / 100.0;
+
+    let final_factor = (updated_gain_rounded / current_gain) as f32;
+    for val in new_wf.iter_mut() {
+        *val = (*val * final_factor).clamp(0.0, 1.0);
+    }
+
+    let final_lufs = estimate_lufs_from_pcm(new_wf.clone(), Some(updated_gain_rounded));
+
+    WaveformUpwardResult {
+        new_waveform: new_wf,
+        updated_gain: updated_gain_rounded,
+        boosted_samples_count: boosted_count,
+        initial_lufs: (initial_lufs * 10.0).round() / 10.0,
+        final_lufs: (final_lufs * 10.0).round() / 10.0,
+    }
+}
+
 /// Tauri command exposing the normalization & upward compression module to frontend.
 /// Executes on a background thread pool via `tokio::task::spawn_blocking` to avoid blocking UI.
 #[tauri::command]

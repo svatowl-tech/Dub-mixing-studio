@@ -218,7 +218,7 @@ export class PipelineExecutionService {
             }
           }
 
-          const res = AudioDspService.applyNormalizationAndUpwardCompression(
+          const res = await AudioDspService.applyNormalizationAndUpwardCompression(
             project.tracks,
             activePreset.phase1.normalization
           );
@@ -322,7 +322,7 @@ export class PipelineExecutionService {
             }
           }
 
-          const res = AudioDspService.applyEqMatching(
+          const res = await AudioDspService.applyEqMatching(
             project.tracks,
             activePreset.phase1.eqMatching
           );
@@ -423,7 +423,7 @@ export class PipelineExecutionService {
             }
           }
 
-          const res = AudioDspService.applyDeClick(
+          const res = await AudioDspService.applyDeClick(
             project.tracks,
             activePreset.phase1.deClick
           );
@@ -526,7 +526,7 @@ export class PipelineExecutionService {
             }
           }
 
-          const res = AudioDspService.applyDePlosive(
+          const res = await AudioDspService.applyDePlosive(
             project.tracks,
             activePreset.phase1.dePlosive
           );
@@ -634,7 +634,7 @@ export class PipelineExecutionService {
             }
           }
 
-          const res = AudioDspService.applyDeEsser(
+          const res = await AudioDspService.applyDeEsser(
             project.tracks,
             activePreset.phase1.deEsser
           );
@@ -747,7 +747,7 @@ export class PipelineExecutionService {
             }
           }
 
-          const res = AudioDspService.applyDenoise(
+          const res = await AudioDspService.applyDenoise(
             project.tracks,
             activePreset.phase1.denoise
           );
@@ -874,7 +874,7 @@ export class PipelineExecutionService {
             }
           }
 
-          const res = AudioDspService.applyDeReverb(
+          const res = await AudioDspService.applyDeReverb(
             project.tracks,
             activePreset.phase1.dereverb
           );
@@ -992,7 +992,7 @@ export class PipelineExecutionService {
             }
           }
 
-          const res = AudioDspService.applyVolumeLeveler(
+          const res = await AudioDspService.applyVolumeLeveler(
             project.tracks,
             activePreset.phase1.volumeLeveler
           );

@@ -23,6 +23,8 @@ mod whisper_engine;
 mod smart_align;
 mod project_type_rules;
 mod conflict_detection;
+mod spectral_analysis;
+mod dsp_waveform;
 
 use audio_engine::{
     get_audio_devices, start_recording, stop_recording, force_stop_all, check_crashes,
@@ -37,7 +39,7 @@ use vst_host::{
     set_plugin_state, open_plugin_editor, close_plugin_editor,
     SharedVstHostState, VstHostState,
 };
-use normalization::normalize_audio;
+use normalization::{normalize_audio, estimate_lufs_from_pcm, apply_waveform_upward_compression};
 use eq_matching::match_eq_profile;
 use declick::clean_clicks;
 use deplosive::apply_deplosive;
@@ -54,9 +56,19 @@ use conflict_detection::validate_timeline_compliance;
 use audio_separator::{check_audio_separator_status, install_audio_separator_pkg, run_audio_separator_cmd};
 use export_engine::{export_audio, export_stems, export_all_stems, quick_preview_export, batch_export, export_audio_book, export_backstage_video};
 use db::{AppState, init_db, save_project_to_db, load_project_from_db, migrate_json_to_db, save_subtitles, generate_stress_test, load_segments_in_range, check_project_assets, verify_project_files, cleanup_orphaned_files, relink_segment_file, calculate_file_hash, find_file_by_hash};
-use waveform_engine::{extract_audio_peaks_bin, generate_waveform_peaks};
+use waveform_engine::{extract_audio_peaks_bin, generate_waveform_peaks, generate_waveform_peaks_from_pcm};
 use file_io::{read_text_file, read_binary_file, list_audio_files, write_audio_file, init_project_folder, get_file_info, save_media_recorder_take, save_project_file, copy_file_to_project, ensure_track_audio_wav, move_project_folder, open_path};
 use media_processor::{create_proxy_video, mux_video, merge_segments, merge_project_segments, render_final_video, concat_backstage_videos, get_media_info, extract_mkv_assets, create_blank_video, apply_audio_effect, process_media_effect};
+use spectral_analysis::{compute_spectrogram_from_file, compute_spectrogram_from_pcm};
+use dsp_waveform::{
+    transform_waveform_eq,
+    transform_waveform_declick,
+    transform_waveform_deplosive,
+    transform_waveform_deesser,
+    transform_waveform_denoise,
+    transform_waveform_dereverb,
+    transform_waveform_leveler,
+};
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -300,6 +312,7 @@ fn main() {
             migrate_json_to_db,
             extract_audio_peaks_bin,
             generate_waveform_peaks,
+            generate_waveform_peaks_from_pcm,
             read_text_file,
             read_binary_file,
             list_audio_files,
@@ -337,6 +350,8 @@ fn main() {
             install_audio_separator_pkg,
             run_audio_separator_cmd,
             normalize_audio,
+            estimate_lufs_from_pcm,
+            apply_waveform_upward_compression,
             match_eq_profile,
             clean_clicks,
             apply_deplosive,
@@ -355,7 +370,16 @@ fn main() {
             process_media_effect,
             process_vad_split,
             move_project_folder,
-            open_path
+            open_path,
+            compute_spectrogram_from_file,
+            compute_spectrogram_from_pcm,
+            transform_waveform_eq,
+            transform_waveform_declick,
+            transform_waveform_deplosive,
+            transform_waveform_deesser,
+            transform_waveform_denoise,
+            transform_waveform_dereverb,
+            transform_waveform_leveler
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
