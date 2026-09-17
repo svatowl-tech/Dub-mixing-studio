@@ -137,12 +137,12 @@ export interface TrackProcessing {
   denoise?: {
     enabled: boolean;
     strength: number; // 0..100
-    model: 'deep_noise' | 'spectral_gate' | 'rnnoise' | 'intel_ai_denoise' | 'uvr_denoise_lite' | 'uvr_denoise_foxjoy' | 'uvr_denoise_full' | 'cascade_net';
+    model: 'deep_noise' | 'spectral_gate' | 'rnnoise' | 'intel_ai_denoise' | 'uvr_denoise_lite' | 'uvr_denoise_foxjoy' | 'uvr_denoise_full' | 'deepfilternet3' | 'cascade_net';
   };
   dereverb?: {
     enabled: boolean;
     strength: number; // 0..100
-    model: 'rt_dereverb_v2' | 'room_cleaner_neural' | 'adaptive_gate' | 'uvr_deecho_normal' | 'uvr_deecho_aggressive';
+    model: 'rt_dereverb_v2' | 'room_cleaner_neural' | 'adaptive_gate' | 'uvr_deecho_normal' | 'uvr_deecho_aggressive' | 'reverb_foxjoy' | 'mdx_dereverb_room';
   };
   vstPlugins?: VstPluginInstance[];
   lufsNormalize?: {
@@ -340,6 +340,8 @@ export interface VstStepConfig {
 export interface PrepProcessingConfig {
   enabled: boolean;
   vstSteps?: Record<string, VstStepConfig>;
+  // Поведение при отсутствии скачанной нейросетевой модели: DSP-фоллбэк или пропуск шага
+  missingModelBehavior?: 'fallback_dsp' | 'skip';
   
   // Нормализация громкости (Target LUFS)
   normalization: {
@@ -352,10 +354,10 @@ export interface PrepProcessingConfig {
     bypass: boolean;
   };
   
-  // Приведение АЧХ к одному знаменателю (EQ Matching / Tone profiling)
+  // Приведение АЧХ к одному знаменателю (EQ Matching / Tone profiling / Neural Voice Matching)
   eqMatching: {
     enabled: boolean;
-    profileModel: 'flat' | 'vocal_presence' | 'warm_analog' | 'reference_match';
+    profileModel: 'flat' | 'vocal_presence' | 'warm_analog' | 'reference_match' | 'vocal_spectral_matcher' | 'voicefixer_fe' | 'vocal_timbre_transfer';
     targetProfilePath?: string;
     bypass: boolean;
   };
@@ -395,7 +397,7 @@ export interface PrepProcessingConfig {
   denoise: {
     enabled: boolean;
     strength: number; // 0..100
-    model: 'deep_noise' | 'spectral_gate' | 'rnnoise' | 'intel_ai_denoise' | 'uvr_denoise_lite' | 'uvr_denoise_foxjoy' | 'uvr_denoise_full';
+    model: 'deep_noise' | 'spectral_gate' | 'rnnoise' | 'intel_ai_denoise' | 'uvr_denoise_lite' | 'uvr_denoise_foxjoy' | 'uvr_denoise_full' | 'deepfilternet3';
     bypass: boolean;
   };
   
@@ -403,7 +405,7 @@ export interface PrepProcessingConfig {
   dereverb: {
     enabled: boolean;
     strength: number; // 0..100
-    model: 'rt_dereverb_v2' | 'room_cleaner_neural' | 'adaptive_gate' | 'uvr_deecho_normal' | 'uvr_deecho_aggressive';
+    model: 'rt_dereverb_v2' | 'room_cleaner_neural' | 'adaptive_gate' | 'uvr_deecho_normal' | 'uvr_deecho_aggressive' | 'reverb_foxjoy' | 'mdx_dereverb_room';
     bypass: boolean;
   };
   
@@ -418,7 +420,7 @@ export interface PrepProcessingConfig {
   // Разделение оригинального трека из видео на голос и музыку (UVR / Demucs / M&E)
   sourceSeparation: {
     enabled: boolean;
-    model: 'htdemucs_vocals_bgm' | 'uvr_v5_vocal' | 'mdx_net_karaoke' | 'MDX23C-8Step-VocFT.onnx' | 'UVR-MDX-NET-Voc_FT.onnx' | '5_HP-Karaoke-UVR.onnx' | 'fast_dsp_splitter';
+    model: 'htdemucs_vocals_bgm' | 'uvr_v5_vocal' | 'mdx_net_karaoke' | 'MDX23C-8Step-VocFT.onnx' | 'UVR-MDX-NET-Voc_FT.onnx' | '5_HP-Karaoke-UVR.onnx' | 'fast_dsp_splitter' | 'mel_band_roformer_vocals' | 'htdemucs_ft';
     keepSeparatedStems: boolean;
     bypass: boolean;
   };

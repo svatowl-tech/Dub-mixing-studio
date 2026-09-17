@@ -1,67 +1,148 @@
-import { useCallback, useRef, useState, Dispatch, SetStateAction } from 'react';
+import { useCallback, useRef, useState, useEffect, Dispatch, SetStateAction } from 'react';
 import { Project, AudioTrack } from '../types';
 import { playbackEngine } from '../services/playbackEngine';
+import { TimelineHistoryService } from '../services/timelineHistoryService';
 
+/**
+ * Высокопроизводительный хук истории действий на таймлайне.
+ * Ликвидирует хранение сотен тяжелых клонов массивов AudioTrack в памяти JS!
+ * Все состояния сохраняются и извлекаются в виде прямых и обратных дельта-патчей
+ * (RFC 6902 JSON Patch) в SQLite таблице `timeline_history` на бэкенде.
+ */
 export function useTimelineHistory(
   project: Project | null,
   setProject: Dispatch<SetStateAction<Project | null>>
 ) {
-  const [history, setHistory] = useState<AudioTrack[][]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  const isUndoRedoActionRef = useRef<boolean>(false);
+  const [canUndo, setCanUndo] = useState<boolean>(false);
+  const [canRedo, setCanRedo] = useState<boolean>(false);
+  const [undoDescription, setUndoDescription] = useState<string | null>(null);
+  const [redoDescription, setRedoDescription] = useState<string | null>(null);
 
-  // Take a snapshot manually before an action
-  const saveSnapshot = useCallback((targetId?: string) => {
-    if (!project) return;
-    setHistory(prev => {
-      const currentHistory = prev.slice(0, historyIndex + 1);
-      
-      let newTracksSnapshot;
-      if (targetId) {
-        newTracksSnapshot = project.tracks.map(t => 
-          t.id === targetId ? { ...t, segments: [...t.segments] } : t
-        );
-      } else {
-        newTracksSnapshot = project.tracks.map(t => ({ ...t, segments: [...t.segments] }));
+  const isPerformingUndoRedoRef = useRef<boolean>(false);
+  const projectRef = useRef<Project | null>(project);
+  projectRef.current = project;
+
+  const initializedProjectIdRef = useRef<string | null>(null);
+
+  // При открытии/смене проекта инициализируем базовое состояние в SQLite
+  useEffect(() => {
+    if (!project || !project.id) {
+      initializedProjectIdRef.current = null;
+      setCanUndo(false);
+      setCanRedo(false);
+      setUndoDescription(null);
+      setRedoDescription(null);
+      return;
+    }
+
+    if (initializedProjectIdRef.current !== project.id) {
+      initializedProjectIdRef.current = project.id;
+      TimelineHistoryService.initBaseState(project.id, project.tracks)
+        .then(() => {
+          setCanUndo(false);
+          setCanRedo(false);
+          setUndoDescription(null);
+          setRedoDescription(null);
+        })
+        .catch(err => {
+          console.warn('[useTimelineHistory] Failed to init base state in SQLite:', err);
+        });
+    }
+  }, [project?.id]);
+
+  // Запись действия в нативную историю SQLite
+  const saveSnapshot = useCallback((actionDescOrTargetId?: string) => {
+    const currentProj = projectRef.current;
+    if (!currentProj || !currentProj.id || isPerformingUndoRedoRef.current) return;
+
+    // Формируем человекочитаемое описание действия
+    const description = (actionDescOrTargetId && !actionDescOrTargetId.startsWith('track-') && !actionDescOrTargetId.startsWith('seg-'))
+      ? actionDescOrTargetId
+      : 'Timeline modification';
+
+    TimelineHistoryService.recordAction(currentProj.id, description, currentProj.tracks)
+      .then(status => {
+        setCanUndo(status.canUndo);
+        setCanRedo(status.canRedo);
+        setUndoDescription(status.undoActionDescription || null);
+        setRedoDescription(status.redoActionDescription || null);
+      })
+      .catch(err => {
+        console.warn('[useTimelineHistory] Failed to record action to SQLite:', err);
+      });
+  }, []);
+
+  // Выполнение отката (Undo) через дельта-хранилище SQLite
+  const undo = useCallback(async () => {
+    const currentProj = projectRef.current;
+    if (!currentProj || !currentProj.id || isPerformingUndoRedoRef.current) return;
+
+    try {
+      isPerformingUndoRedoRef.current = true;
+      const response = await TimelineHistoryService.undo(currentProj.id);
+
+      if (response.success && response.tracks) {
+        const restoredTracks = response.tracks as AudioTrack[];
+        setProject(prev => prev ? { ...prev, tracks: restoredTracks } : prev);
+        playbackEngine.reconcile(restoredTracks);
+
+        setCanUndo(response.status.canUndo);
+        setCanRedo(response.status.canRedo);
+        setUndoDescription(response.status.undoActionDescription || null);
+        setRedoDescription(response.status.redoActionDescription || null);
       }
-      
-      const newHistory = [...currentHistory, newTracksSnapshot];
-      setHistoryIndex(newHistory.length - 1);
-      return newHistory;
-    });
-  }, [project, historyIndex]);
-
-  const undo = useCallback(() => {
-    if (historyIndex > 0 && project) {
-      isUndoRedoActionRef.current = true;
-      const previousTracks = history[historyIndex - 1];
-      setProject(prev => prev ? { ...prev, tracks: previousTracks } : prev);
-      playbackEngine.reconcile(previousTracks);
-      setHistoryIndex(prev => prev - 1);
-    } else if (historyIndex === 0 && project && history.length > 0) {
-      // If we go back to the original state right before our first snapshot:
-      // Wait, let's keep index 0 as the initial state of the first modification.
-      // So index 0 is our earliest state.
-      // We can't undo beyond the first snapshot unless we take an initial one on load.
-      isUndoRedoActionRef.current = true;
-      const previousTracks = history[0];
-      setProject(prev => prev ? { ...prev, tracks: previousTracks } : prev);
-      playbackEngine.reconcile(previousTracks);
+    } catch (err) {
+      console.warn('[useTimelineHistory] Undo failed:', err);
+      // Запрашиваем актуальный статус
+      const status = await TimelineHistoryService.getStatus(currentProj.id);
+      setCanUndo(status.canUndo);
+      setCanRedo(status.canRedo);
+    } finally {
+      // Защитный интервал для предотвращения гонок
+      setTimeout(() => {
+        isPerformingUndoRedoRef.current = false;
+      }, 50);
     }
-  }, [historyIndex, history, project, setProject]);
+  }, [setProject]);
 
-  const redo = useCallback(() => {
-    if (historyIndex < history.length - 1 && project) {
-      isUndoRedoActionRef.current = true;
-      const nextTracks = history[historyIndex + 1];
-      setProject(prev => prev ? { ...prev, tracks: nextTracks } : prev);
-      playbackEngine.reconcile(nextTracks);
-      setHistoryIndex(prev => prev + 1);
+  // Выполнение повтора (Redo) через дельта-хранилище SQLite
+  const redo = useCallback(async () => {
+    const currentProj = projectRef.current;
+    if (!currentProj || !currentProj.id || isPerformingUndoRedoRef.current) return;
+
+    try {
+      isPerformingUndoRedoRef.current = true;
+      const response = await TimelineHistoryService.redo(currentProj.id);
+
+      if (response.success && response.tracks) {
+        const restoredTracks = response.tracks as AudioTrack[];
+        setProject(prev => prev ? { ...prev, tracks: restoredTracks } : prev);
+        playbackEngine.reconcile(restoredTracks);
+
+        setCanUndo(response.status.canUndo);
+        setCanRedo(response.status.canRedo);
+        setUndoDescription(response.status.undoActionDescription || null);
+        setRedoDescription(response.status.redoActionDescription || null);
+      }
+    } catch (err) {
+      console.warn('[useTimelineHistory] Redo failed:', err);
+      const status = await TimelineHistoryService.getStatus(currentProj.id);
+      setCanUndo(status.canUndo);
+      setCanRedo(status.canRedo);
+    } finally {
+      setTimeout(() => {
+        isPerformingUndoRedoRef.current = false;
+      }, 50);
     }
-  }, [historyIndex, history, project, setProject]);
+  }, [setProject]);
 
-  const canUndo = historyIndex > 0;
-  const canRedo = historyIndex < history.length - 1;
-
-  return { saveSnapshot, undo, redo, canUndo, canRedo };
+  return {
+    saveSnapshot,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    undoDescription,
+    redoDescription,
+  };
 }

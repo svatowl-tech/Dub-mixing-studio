@@ -6,9 +6,8 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Instant;
-use chrono::{Datelike, Local, Timelike, Utc};
+use chrono::{Datelike, Local, Timelike};
 use hound::{SampleFormat, WavReader};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};

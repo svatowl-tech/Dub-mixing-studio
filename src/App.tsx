@@ -147,7 +147,7 @@ export default function App() {
     isStartingRecordingRef
   } = useAudioEngine(project, setProject, videoRef, currentTimeRef, isPlayingRef, togglePlay, webcamRef);
 
-  const { saveSnapshot, undo, redo, canUndo, canRedo } = useTimelineHistory(project, setProject);
+  const { saveSnapshot, undo, redo, canUndo, canRedo, undoDescription, redoDescription } = useTimelineHistory(project, setProject);
 
   
   const isRippleEnabledRef = useRef(isRippleEnabled);
@@ -2770,7 +2770,7 @@ export default function App() {
 
   const projectContextValue = {
     project, setProject, recentProjects, handleNewProject, handleOpenProject, handleSaveProject, onLoadProject,
-    undo, redo, canUndo, canRedo
+    undo, redo, canUndo, canRedo, undoDescription, redoDescription
   };
   const timelineContextValue = {
     currentTime, duration, isPlaying, zoomLevel, timelineHeight, isAutoHeight, sidebarWidth,

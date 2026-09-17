@@ -10,7 +10,7 @@ use tokio::process::Command;
 
 use crate::db::SubtitleLine;
 use crate::file_io::{find_ffmpeg_path, normalize_windows_path};
-use crate::logger::{log_debug, log_error, log_info};
+use crate::logger::{log_error, log_info};
 
 // ============================================================================
 // DATA STRUCTURES & CONFIGURATION

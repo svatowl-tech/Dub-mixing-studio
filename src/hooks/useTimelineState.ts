@@ -115,28 +115,21 @@ export const useTimelineState = (
     }
   }, [duration]);
 
-  // Sync playback engine and timeline with video or master audio clock
+  // Sync playback engine and timeline with hardware Transport Clock Master (Rust)
   useEffect(() => {
     if (!isPlaying) return;
 
-    let rafId: number;
-    let lastClock = performance.now();
+    const isTauri = typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
+
+    let isCleanedUp = false;
+    let unlistenTick: (() => void) | null = null;
+    let rafId: number | null = null;
     let lastRenderTime = 0;
-    
-    const sync = async () => {
-      if (!isPlayingRef.current) return;
+    let lastAckTime = 0;
 
-      const now = performance.now();
-      const deltaSec = (now - lastClock) / 1000;
-      lastClock = now;
+    const processTick = async (time: number) => {
+      if (!isPlayingRef.current || isCleanedUp) return;
 
-      let time: number;
-      if (videoRef.current && !videoRef.current.paused && !isNaN(videoRef.current.currentTime)) {
-        time = videoRef.current.currentTime;
-      } else {
-        time = currentTimeRef.current + deltaSec;
-      }
-      
       // Loop Logic
       if (isLooping && loopRange && time >= loopRange.end) {
         time = loopRange.start;
@@ -154,18 +147,103 @@ export const useTimelineState = (
       currentTimeRef.current = time;
       await playbackEngine.tick(time, tracksRef.current);
 
+      // Synchronize video player drift (> 35 ms)
+      if (videoRef.current && !videoRef.current.seeking) {
+        const drift = Math.abs(videoRef.current.currentTime - time);
+        if (drift > 0.035) {
+          videoRef.current.currentTime = time;
+        }
+      }
+      if (referenceAudioRef.current) {
+        const drift = Math.abs(referenceAudioRef.current.currentTime - time);
+        if (drift > 0.035) {
+          referenceAudioRef.current.currentTime = time;
+        }
+      }
+
       // Throttle React state render to ~40fps (25ms) to prevent JS thread stalls
-      if (Math.abs(time - lastRenderTime) >= 0.025) {
-        lastRenderTime = time;
+      const now = performance.now();
+      if (now - lastRenderTime >= 25) {
+        lastRenderTime = now;
         setCurrentTime(time);
       }
-      
-      rafId = requestAnimationFrame(sync);
     };
 
-    rafId = requestAnimationFrame(sync);
-    return () => cancelAnimationFrame(rafId);
+    if (isTauri) {
+      import('@tauri-apps/api/event').then(({ listen }) => {
+        if (isCleanedUp) return;
+        listen<any>('transport-tick', (event) => {
+          if (isCleanedUp) return;
+          const snap = event.payload;
+          processTick(snap.timeSec);
+
+          const now = performance.now();
+          if (now - lastAckTime >= 30) {
+            lastAckTime = now;
+            import('@tauri-apps/api/core').then(({ invoke }) => {
+              invoke('transport_ui_ack').catch(() => {});
+            }).catch(() => {});
+          }
+        }).then((fn) => {
+          if (isCleanedUp) {
+            fn();
+          } else {
+            unlistenTick = fn;
+          }
+        });
+      });
+    } else {
+      // Browser RAF fallback
+      let lastClock = performance.now();
+      const syncRaf = async () => {
+        if (!isPlayingRef.current || isCleanedUp) return;
+
+        const now = performance.now();
+        const deltaSec = (now - lastClock) / 1000;
+        lastClock = now;
+
+        let time: number;
+        if (videoRef.current && !videoRef.current.paused && !isNaN(videoRef.current.currentTime)) {
+          time = videoRef.current.currentTime;
+        } else {
+          time = currentTimeRef.current + deltaSec;
+        }
+
+        await processTick(time);
+        if (!isCleanedUp && isPlayingRef.current) {
+          rafId = requestAnimationFrame(syncRaf);
+        }
+      };
+      rafId = requestAnimationFrame(syncRaf);
+    }
+
+    return () => {
+      isCleanedUp = true;
+      if (unlistenTick) unlistenTick();
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
   }, [isPlaying, isLooping, loopRange, duration, togglePlay, videoRef, referenceAudioRef]);
+
+  // Synchronize loop region with Rust hardware Transport Clock
+  useEffect(() => {
+    const isTauri = typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
+    if (!isTauri) return;
+
+    if (isLooping && loopRange) {
+      import('@tauri-apps/api/core').then(({ invoke }) => {
+        const sr = 48000;
+        invoke('transport_set_loop', {
+          startSample: Math.round(loopRange.start * sr),
+          endSample: Math.round(loopRange.end * sr),
+          enabled: true,
+        }).catch(() => {});
+      }).catch(() => {});
+    } else {
+      import('@tauri-apps/api/core').then(({ invoke }) => {
+        invoke('transport_clear_loop').catch(() => {});
+      }).catch(() => {});
+    }
+  }, [isLooping, loopRange]);
 
   // Preload audio buffers for project tracks in the background
   useEffect(() => {

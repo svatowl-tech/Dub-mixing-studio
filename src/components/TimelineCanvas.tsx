@@ -1,26 +1,35 @@
 import React, { useEffect, useRef, useState, useLayoutEffect } from 'react';
-import { Project } from '../types';
+import { Project, AudioSegment } from '../types';
+import { getTimelineVisiblePeaks, renderTrackPeaksToCanvas, TimelineTrackData, WaveformRenderOptions } from '../lib/waveformBridge';
+
+export { renderTrackPeaksToCanvas, type WaveformRenderOptions } from '../lib/waveformBridge';
+
+export interface TimelineCanvasProps {
+  project: Project;
+  duration: number;
+  zoom: number;
+  visibleRange: { start: number; end: number };
+  loopRange: { start: number; end: number } | null;
+  renderTrackWaveforms?: boolean;
+}
 
 export const TimelineCanvas = React.memo(({ 
   project, 
   duration, 
   zoom, 
   visibleRange: vRange,
-  loopRange
-}: { 
-  project: Project, 
-  duration: number, 
-  zoom: number, 
-  visibleRange: { start: number, end: number },
-  loopRange: { start: number, end: number } | null
-}) => {
+  loopRange,
+  renderTrackWaveforms = false,
+}: TimelineCanvasProps) => {
   if (!project) return null;
 
   const containerRef = useRef<HTMLDivElement>(null);
   const staticCanvasRef = useRef<HTMLCanvasElement>(null);
+  const waveformCanvasRef = useRef<HTMLCanvasElement>(null);
   const dynamicCanvasRef = useRef<HTMLCanvasElement>(null);
 
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const pendingWaveformRafRef = useRef<number | null>(null);
 
   useLayoutEffect(() => {
     const el = containerRef.current;
@@ -116,7 +125,99 @@ export const TimelineCanvas = React.memo(({
 
   }, [dimensions, project.subtitles, project.selectedRole, duration, zoom, vRange]);
 
-  // 2. Draw Dynamic Elements (Loop Range)
+  // 2. Hardware-accelerated Waveform Layer (Rust Frustum Culling Engine)
+  useEffect(() => {
+    if (!renderTrackWaveforms) return;
+
+    const canvas = waveformCanvasRef.current;
+    if (!canvas || dimensions.width === 0 || dimensions.height === 0) return;
+    const ctx = canvas.getContext('2d', { alpha: true });
+    if (!ctx) return;
+
+    if (pendingWaveformRafRef.current) {
+      cancelAnimationFrame(pendingWaveformRafRef.current);
+    }
+
+    pendingWaveformRafRef.current = requestAnimationFrame(async () => {
+      const width = dimensions.width;
+      const height = dimensions.height;
+      const dpr = window.devicePixelRatio || 1;
+
+      const targetWidth = width * dpr;
+      const targetHeight = height * dpr;
+
+      if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+      }
+
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, width, height);
+
+      const offsetSec = (project.audioOffsetMs || 0) / 1000;
+      const vStartMs = Math.max(0, Math.floor((vRange.start - offsetSec) * 1000));
+      const vEndMs = Math.max(1, Math.ceil((vRange.end - offsetSec) * 1000));
+
+      const rustTracks: TimelineTrackData[] = project.tracks.map((t) => ({
+        id: t.id,
+        name: t.name,
+        volume: t.volume ?? 1.0,
+        isMuted: t.isMuted,
+        isSolo: t.isSolo,
+        segments: t.segments.map((seg: AudioSegment) => ({
+          id: seg.id,
+          filePath: seg.filePath,
+          bufferId: (seg as any).bufferId,
+          startTime: seg.startTime,
+          duration: seg.duration,
+          fileOffset: seg.fileOffset ?? 0,
+          gain: seg.gain ?? 1.0,
+          isMuted: (seg as any).isMuted ?? false,
+          waveform: seg.waveform,
+        })),
+      }));
+
+      try {
+        const payload = await getTimelineVisiblePeaks({
+          viewportStartMs: vStartMs,
+          viewportEndMs: vEndMs,
+          canvasWidthPx: width,
+          activeTrackIds: project.tracks.filter((t) => !t.isMuted).map((t) => t.id),
+          tracks: rustTracks,
+        });
+
+        // Отрисовка полос каждой дорожки
+        let currentY = 40; // Начало под линейкой
+        for (const track of project.tracks) {
+          const trackHeight = track.height || 80;
+          const trackPeaks = payload.tracks.find((t) => t.trackId === track.id);
+          if (trackPeaks && trackPeaks.peaks.length > 0) {
+            renderTrackPeaksToCanvas(ctx, trackPeaks.peaks, currentY, trackHeight, {
+              color: '#38bdf8',
+              fillGradient: true,
+              style: 'envelope',
+              centerLine: false,
+              verticalMargin: 4,
+            });
+          }
+          currentY += trackHeight;
+        }
+      } catch (err) {
+        console.warn('Rust timeline peaks fetch failed:', err);
+      }
+    });
+
+    return () => {
+      if (pendingWaveformRafRef.current) {
+        cancelAnimationFrame(pendingWaveformRafRef.current);
+      }
+    };
+  }, [dimensions, renderTrackWaveforms, project.tracks, project.audioOffsetMs, vRange, zoom]);
+
+  // 3. Draw Dynamic Elements (Loop Range)
   useEffect(() => {
     const canvas = dynamicCanvasRef.current;
     if (!canvas || dimensions.width === 0 || dimensions.height === 0) return;
@@ -162,6 +263,9 @@ export const TimelineCanvas = React.memo(({
   return (
     <div ref={containerRef} className="sticky left-0 h-full w-[100vw] sm:w-[calc(100vw-256px)] pointer-events-none z-20 overflow-hidden">
       <canvas ref={staticCanvasRef} className="absolute top-0 left-0 h-full pointer-events-none" />
+      {renderTrackWaveforms && (
+        <canvas ref={waveformCanvasRef} className="absolute top-0 left-0 h-full pointer-events-none opacity-85" />
+      )}
       <canvas ref={dynamicCanvasRef} className="absolute top-0 left-0 h-full pointer-events-none" />
     </div>
   );
@@ -174,10 +278,11 @@ export const TimelineCanvas = React.memo(({
     prevProps.loopRange?.start === nextProps.loopRange?.start &&
     prevProps.loopRange?.end === nextProps.loopRange?.end &&
     prevProps.project.selectedRole === nextProps.project.selectedRole &&
-    prevProps.project.subtitles === nextProps.project.subtitles
+    prevProps.project.subtitles === nextProps.project.subtitles &&
+    prevProps.renderTrackWaveforms === nextProps.renderTrackWaveforms &&
+    prevProps.project.tracks === nextProps.project.tracks
   );
 });
 
+TimelineCanvas.displayName = 'TimelineCanvas';
 export default TimelineCanvas;
-
-

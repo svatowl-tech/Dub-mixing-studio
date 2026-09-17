@@ -13,6 +13,8 @@ export interface ProjectContextType {
   redo: () => void;
   canUndo: boolean;
   canRedo: boolean;
+  undoDescription?: string | null;
+  redoDescription?: string | null;
 }
 
 const ProjectContext = createContext<ProjectContextType | null>(null);

@@ -8,6 +8,7 @@ import { PlaybackEngine } from './playbackEngine';
 import { AudioSeparatorService } from './audioSeparatorService';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { invalidateFileUrl, createPrefixedAudioPath } from '../lib/utils';
+import { AIModelService } from './aiModelService';
 
 export interface ExecuteStepParams {
   stepId: string;
@@ -244,8 +245,30 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'eqMatching') {
-          const profileModel = activePreset.phase1.eqMatching.profileModel || 'vocal_presence';
+          let profileModel = activePreset.phase1.eqMatching.profileModel || 'vocal_presence';
           const targetPath = activePreset.phase1.eqMatching.targetProfilePath;
+          const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
+          const isNeuralMatch = ['vocal_spectral_matcher', 'voicefixer_fe', 'vocal_timbre_transfer'].includes(profileModel);
+
+          if (isNeuralMatch) {
+            const isInstalled = await AIModelService.getInstance().checkModelInstalled(profileModel);
+            if (!isInstalled) {
+              if (missingBehavior === 'skip') {
+                const skipMsg = `⏭️ Шаг EQ Matching пропущен: нейросетевая модель "${profileModel}" не скачана в Настройках.`;
+                console.log(`[Pipeline] ${skipMsg}`);
+                setStepExecution(prev => ({
+                  ...prev,
+                  [stepId]: { status: 'success', progress: 100, log: skipMsg, hasRollback: false }
+                }));
+                showToast(skipMsg);
+                return;
+              } else {
+                console.log(`[Pipeline] ⚡ Нейросетевая модель "${profileModel}" не скачана. Применен встроенный DSP-эквалайзер "vocal_presence" без ИИ.`);
+                profileModel = 'vocal_presence';
+              }
+            }
+          }
+
           const profileParam = (profileModel === 'reference_match' && targetPath) ? targetPath : profileModel;
 
           setStepExecution(prev => ({
@@ -655,15 +678,38 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'denoise') {
-          console.group(`%c[Pipeline] ▶ Этап: Шумоподавление (UVR DeNoise)`, 'color: #0d9488; font-weight: bold; font-size: 13px;');
-          console.log(`[Pipeline] Модель: ${activePreset.phase1.denoise.model || 'UVR-DeNoise'}, Сила: ${activePreset.phase1.denoise.strength}%, Bypass: ${activePreset.phase1.denoise.bypass}`);
+          let modelName = activePreset.phase1.denoise.model || 'UVR-DeNoise';
+          const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
+          const isNeuralModel = ['uvr_denoise', 'uvr_denoise_lite', 'uvr_denoise_foxjoy', 'uvr_denoise_full', 'deepfilternet3', 'deep_noise', 'cascade_net', 'intel_ai_denoise', 'UVR-DeNoise'].includes(modelName);
+
+          if (isNeuralModel) {
+            const isInstalled = await AIModelService.getInstance().checkModelInstalled(modelName);
+            if (!isInstalled) {
+              if (missingBehavior === 'skip') {
+                const skipMsg = `⏭️ Шаг шумоподавления пропущен: AI-модель "${modelName}" не скачана в Настройках.`;
+                console.log(`[Pipeline] ${skipMsg}`);
+                setStepExecution(prev => ({
+                  ...prev,
+                  [stepId]: { status: 'success', progress: 100, log: skipMsg, hasRollback: false }
+                }));
+                showToast(skipMsg);
+                return;
+              } else {
+                console.log(`[Pipeline] ⚡ AI-модель "${modelName}" не скачана. Применен встроенный спектральный DSP-гейт "spectral_gate" без ИИ.`);
+                modelName = 'spectral_gate';
+              }
+            }
+          }
+
+          console.group(`%c[Pipeline] ▶ Этап: Шумоподавление (${modelName})`, 'color: #0d9488; font-weight: bold; font-size: 13px;');
+          console.log(`[Pipeline] Модель: ${modelName}, Сила: ${activePreset.phase1.denoise.strength}%, Bypass: ${activePreset.phase1.denoise.bypass}`);
           
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
               ...prev[stepId],
               progress: 25,
-              log: `Нейросетевое шумоподавление UVR DeNoise (${activePreset.phase1.denoise.model}, сила ${activePreset.phase1.denoise.strength}%)...`
+              log: `Шумоподавление (${modelName}, сила ${activePreset.phase1.denoise.strength}%)...`
             }
           }));
 
@@ -684,7 +730,7 @@ export class PipelineExecutionService {
                       const rep = await invoke<DenoiseReport>('process_denoise', {
                         inputPath,
                         outputPath: outPath,
-                        modelName: activePreset.phase1.denoise.model || 'UVR-DeNoise',
+                        modelName: modelName,
                         strength: activePreset.phase1.denoise.strength,
                       });
                       if (rep) {
@@ -781,15 +827,38 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'dereverb') {
-          console.group(`%c[Pipeline] ▶ Этап: Дереверберация (UVR De-Echo / De-Reverb)`, 'color: #6366f1; font-weight: bold; font-size: 13px;');
-          console.log(`[Pipeline] Модель: ${activePreset.phase1.dereverb.model || 'rt_dereverb_v2'}, Сила: ${activePreset.phase1.dereverb.strength}%, Bypass: ${activePreset.phase1.dereverb.bypass}`);
+          let modelName = activePreset.phase1.dereverb.model || 'rt_dereverb_v2';
+          const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
+          const isNeuralModel = ['uvr_deecho_normal', 'uvr_deecho_aggressive', 'reverb_foxjoy', 'mdx_dereverb_room', 'room_cleaner_neural'].includes(modelName);
+
+          if (isNeuralModel) {
+            const isInstalled = await AIModelService.getInstance().checkModelInstalled(modelName);
+            if (!isInstalled) {
+              if (missingBehavior === 'skip') {
+                const skipMsg = `⏭️ Шаг дереверберации пропущен: AI-модель "${modelName}" не скачана в Настройках.`;
+                console.log(`[Pipeline] ${skipMsg}`);
+                setStepExecution(prev => ({
+                  ...prev,
+                  [stepId]: { status: 'success', progress: 100, log: skipMsg, hasRollback: false }
+                }));
+                showToast(skipMsg);
+                return;
+              } else {
+                console.log(`[Pipeline] ⚡ AI-модель "${modelName}" не скачана. Применен встроенный DSP-деревербератор "rt_dereverb_v2" без ИИ.`);
+                modelName = 'rt_dereverb_v2';
+              }
+            }
+          }
+
+          console.group(`%c[Pipeline] ▶ Этап: Дереверберация (${modelName})`, 'color: #6366f1; font-weight: bold; font-size: 13px;');
+          console.log(`[Pipeline] Модель: ${modelName}, Сила: ${activePreset.phase1.dereverb.strength}%, Bypass: ${activePreset.phase1.dereverb.bypass}`);
 
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
               ...prev[stepId],
               progress: 25,
-              log: `Нейросетевое разделение стемов UVR De-Echo / De-Reverb (сила ${(activePreset.phase1.dereverb.strength)}%)...`
+              log: `Подавление эха и реверберации (${modelName}, сила ${(activePreset.phase1.dereverb.strength)}%)...`
             }
           }));
 
@@ -810,7 +879,7 @@ export class PipelineExecutionService {
                       const rep = await invoke<DereverbResult>('process_uvr_dereverb', {
                         inputPath,
                         outputPath: outPath,
-                        modelName: activePreset.phase1.dereverb.model || 'rt_dereverb_v2',
+                        modelName: modelName,
                         reverbTailExportPath: null,
                         strength: (activePreset.phase1.dereverb.strength || 85) / 100.0,
                       });
@@ -1020,16 +1089,38 @@ export class PipelineExecutionService {
             const defaultOriginalFile = originalTrack?.segments?.[0]?.filePath || project?.referenceAudioPath || project?.videoPath || '';
 
             if (typeof window !== 'undefined' && isTauri() && defaultOriginalFile) {
+              let modelName = activePreset.phase1.sourceSeparation.model || 'UVR-MDX-NET-Voc_FT';
+              const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
+              const isNeural = modelName !== 'fast_dsp_splitter';
+
+              if (isNeural) {
+                const isInstalled = await AIModelService.getInstance().checkModelInstalled(modelName);
+                if (!isInstalled) {
+                  if (missingBehavior === 'skip') {
+                    const skipMsg = `⏭️ Шаг разделения стемов пропущен: AI-модель "${modelName}" не скачана в Настройках.`;
+                    console.log(`[Pipeline] ${skipMsg}`);
+                    setStepExecution(prev => ({
+                      ...prev,
+                      [stepId]: { status: 'success', progress: 100, log: skipMsg, hasRollback: false }
+                    }));
+                    showToast(skipMsg);
+                    return;
+                  } else {
+                    console.log(`[Pipeline] ⚡ AI-модель "${modelName}" не скачана. Применен быстрый фазово-спектральный разделитель (DSP-фоллбэк без ИИ).`);
+                    modelName = 'fast_dsp_splitter';
+                  }
+                }
+              }
+
               setStepExecution(prev => ({
                 ...prev,
                 [stepId]: {
                   ...prev[stepId],
                   progress: 10,
-                  log: 'Запуск нейросетевого разделения стемов через Rust/Python (MDX-NET / Demucs)...'
+                  log: `Разделение стемов (${modelName})...`
                 }
               }));
 
-              const modelName = activePreset.phase1.sourceSeparation.model || 'UVR-MDX-NET-Voc_FT';
               const sepResult = await AudioSeparatorService.separateStems(
                 defaultOriginalFile,
                 project.projectPath || undefined,
@@ -1041,7 +1132,7 @@ export class PipelineExecutionService {
                     [stepId]: {
                       ...prev[stepId],
                       progress: Math.max(10, Math.min(99, Math.round(percent))),
-                      log: detail?.stage || `Разделение стемов UVR MDX-NET: ${Math.round(percent)}%`
+                      log: detail?.stage || `Разделение стемов (${modelName}): ${Math.round(percent)}%`
                     }
                   }));
                 }
@@ -1257,6 +1348,25 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'whisper') {
+          const whisperModel = activePreset.phase2.whisper?.model || 'whisper_base';
+          const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
+          const isInstalled = await AIModelService.getInstance().checkModelInstalled(whisperModel);
+
+          if (!isInstalled) {
+            if (missingBehavior === 'skip') {
+              const skipMsg = `⏭️ Шаг распознавания Whisper пропущен: модель "${whisperModel}" не скачана в Настройках.`;
+              console.log(`[Pipeline] ${skipMsg}`);
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: { status: 'success', progress: 100, log: skipMsg, hasRollback: false }
+              }));
+              showToast(skipMsg);
+              return;
+            } else {
+              console.log(`[Pipeline] ⚡ Модель Whisper "${whisperModel}" не скачана. Применяется эвристическое сопоставление по таймкодам субтитров.`);
+            }
+          }
+
           const origTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
           setStepExecution(prev => ({
             ...prev,

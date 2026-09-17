@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -9,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use tauri::State;
 
-use crate::db::{AppState, ProjectData, SubtitleLine};
+use crate::db::{AppState, SubtitleLine};
 use crate::logger::log_debug;
 
 // ============================================================================

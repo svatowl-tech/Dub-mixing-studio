@@ -40,6 +40,39 @@ mod ducking_engine;
 mod realtime_analyzer;
 mod vocal_rack_dsp;
 mod project_repository;
+mod transport_clock;
+mod timeline_culling_engine;
+mod pipeline_orchestrator;
+mod subtitle_compiler;
+mod timeline_history_engine;
+mod model_manager;
+
+use subtitle_compiler::{compile_and_validate_subtitles, parse_subtitles_native};
+use model_manager::{
+    cancel_model_download, check_model_installed, delete_ai_model, download_ai_model,
+    get_available_models_info, open_models_directory,
+};
+use timeline_history_engine::{
+    clear_timeline_history, get_timeline_history_status, init_timeline_history_base,
+    record_timeline_action, redo_timeline_action, undo_timeline_action,
+};
+
+use pipeline_orchestrator::{
+    cancel_pipeline_execution, get_pipeline_status, pause_pipeline_execution,
+    resume_pipeline_execution, start_pipeline_execution, PipelineOrchestratorState,
+};
+
+use timeline_culling_engine::{
+    get_timeline_visible_peaks, set_timeline_culling_tracks, clear_timeline_culling_cache,
+    TimelineCullingState,
+};
+
+use transport_clock::{
+    transport_play, transport_pause, transport_seek, transport_seek_ms,
+    transport_set_loop, transport_clear_loop, transport_start_preroll,
+    transport_stop_preroll, transport_get_snapshot, transport_ui_ack,
+    start_tick_worker, TransportClock,
+};
 
 use project_repository::{
     save_project_atomic, load_project_by_id, undo_project_action, redo_project_action,
@@ -209,6 +242,10 @@ fn main() {
 
     let vst_state: SharedVstHostState = Arc::new(std::sync::Mutex::new(VstHostState::default()));
 
+    let transport_clock = Arc::new(TransportClock::new(48000));
+    let player = NativeAudioPlayer::with_clock(transport_clock.clone());
+    let transport_clock_setup = transport_clock.clone();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -320,6 +357,9 @@ fn main() {
                 }
             });
 
+            // Start the 60 Hz Hardware Master Clock Tick Thread
+            start_tick_worker(transport_clock_setup.clone(), app_handle.clone());
+
             Ok(())
         })
         .manage(app_state)
@@ -328,9 +368,12 @@ fn main() {
         .manage(RealtimeLoudnessMeter::new())
         .manage(RealtimeAnalyzerState::default())
         .manage(Arc::new(VocalRackManager::new()) as SharedVocalRackManager)
+        .manage(TimelineCullingState::new())
+        .manage(PipelineOrchestratorState::new())
         .manage(AudioState {
             recorder: std::sync::Mutex::new(AudioRecorder::default()),
-            player: std::sync::Mutex::new(NativeAudioPlayer::default()),
+            player: std::sync::Mutex::new(player),
+            clock: transport_clock.clone(),
         })
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -470,7 +513,39 @@ fn main() {
             undo_project_action,
             redo_project_action,
             list_all_projects,
-            delete_project
+            delete_project,
+            transport_play,
+            transport_pause,
+            transport_seek,
+            transport_seek_ms,
+            transport_set_loop,
+            transport_clear_loop,
+            transport_start_preroll,
+            transport_stop_preroll,
+            transport_get_snapshot,
+            transport_ui_ack,
+            get_timeline_visible_peaks,
+            set_timeline_culling_tracks,
+            clear_timeline_culling_cache,
+            start_pipeline_execution,
+            cancel_pipeline_execution,
+            pause_pipeline_execution,
+            resume_pipeline_execution,
+            get_pipeline_status,
+            compile_and_validate_subtitles,
+            parse_subtitles_native,
+            record_timeline_action,
+            undo_timeline_action,
+            redo_timeline_action,
+            get_timeline_history_status,
+            init_timeline_history_base,
+            clear_timeline_history,
+            get_available_models_info,
+            download_ai_model,
+            cancel_model_download,
+            delete_ai_model,
+            open_models_directory,
+            check_model_installed
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

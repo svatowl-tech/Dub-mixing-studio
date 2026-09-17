@@ -258,7 +258,7 @@ pub fn resolve_model_path(model_type_or_path: Option<&str>) -> Result<PathBuf, S
     }
 
     // Поиск в стандартных локальных папках
-    let search_paths = vec![
+    let mut search_paths = vec![
         PathBuf::from(default_name),
         PathBuf::from("models").join(default_name),
         PathBuf::from("resources").join("models").join(default_name),
@@ -266,6 +266,14 @@ pub fn resolve_model_path(model_type_or_path: Option<&str>) -> Result<PathBuf, S
         PathBuf::from("..").join("models").join(default_name),
         PathBuf::from("models").join("whisper").join(default_name),
     ];
+
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        search_paths.push(PathBuf::from(appdata).join("com.dubmixingstudio.desktop").join("models").join(default_name));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        search_paths.push(PathBuf::from(&home).join(".local").join("share").join("com.dubmixingstudio.desktop").join("models").join(default_name));
+        search_paths.push(PathBuf::from(&home).join("Library").join("Application Support").join("com.dubmixingstudio.desktop").join("models").join(default_name));
+    }
 
     for path in search_paths {
         if path.exists() && path.is_file() {

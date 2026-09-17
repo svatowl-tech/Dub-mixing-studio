@@ -83,6 +83,8 @@ import { MixingService } from '../services/mixingService';
 import { FinalRenderService } from '../services/finalRenderService';
 import { AudioDspService } from '../services/audioDspService';
 import { PipelineExecutionService } from '../services/pipelineExecutionService';
+import { useUIState } from '../contexts/UIContext';
+import { AIModelService } from '../services/aiModelService';
 import { MixingStepSettingsModal } from './MixingStepSettingsModal';
 import { ConflictDetectionPanel } from './ConflictDetectionPanel';
 import { MixingAuditLogModal } from './MixingAuditLogModal';
@@ -232,6 +234,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   
   // Notification tooltip
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const { setActiveModal: setAppActiveModal } = useUIState();
   
   // Processing animation states
   const [isProcessing, setIsProcessing] = useState(false);
@@ -804,8 +807,21 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           : res.logSummary;
         showToast(summaryMsg);
       } else if (effectType === 'smarteq') {
-        const profileModel = activePreset.phase1.eqMatching.profileModel || 'vocal_presence';
+        let profileModel = activePreset.phase1.eqMatching.profileModel || 'vocal_presence';
         const targetPath = activePreset.phase1.eqMatching.targetProfilePath;
+        const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
+        const isNeuralMatch = ['vocal_spectral_matcher', 'voicefixer_fe', 'vocal_timbre_transfer'].includes(profileModel);
+
+        if (isNeuralMatch && !AIModelService.getInstance().isModelInstalled(profileModel)) {
+          if (missingBehavior === 'skip') {
+            showToast(`⏭️ Шаг EQ Matching пропущен: модель "${profileModel}" не скачана в Настройках.`);
+            return;
+          } else {
+            showToast(`⚡ Модель "${profileModel}" не скачана. Применен встроенный DSP-эквалайзер "vocal_presence".`);
+            profileModel = 'vocal_presence';
+          }
+        }
+
         const profileParam = (profileModel === 'reference_match' && targetPath) ? targetPath : profileModel;
 
         if (isTauriAvailable()) {
@@ -956,9 +972,22 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       } else if (effectType === 'denoise') {
         let lastNativeReport: DenoiseReport | null = null;
         let processedTracksCount = 0;
+        let modelName = activePreset.phase1.denoise.model || 'UVR-DeNoise';
+        const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
+        const isNeuralModel = ['uvr_denoise', 'uvr_denoise_lite', 'uvr_denoise_foxjoy', 'uvr_denoise_full', 'deepfilternet3', 'deep_noise', 'cascade_net', 'intel_ai_denoise', 'UVR-DeNoise'].includes(modelName);
+
+        if (isNeuralModel && !AIModelService.getInstance().isModelInstalled(modelName)) {
+          if (missingBehavior === 'skip') {
+            showToast(`⏭️ Шаг шумоподавления пропущен: модель "${modelName}" не скачана в Настройках.`);
+            return;
+          } else {
+            showToast(`⚡ Модель "${modelName}" не скачана. Применен встроенный спектральный DSP-гейт "spectral_gate".`);
+            modelName = 'spectral_gate';
+          }
+        }
 
         console.group(`%c[MixingPanel] ▶ Шумоподавление (Denoise)`, 'color: #0d9488; font-weight: bold;');
-        console.log(`Параметры: модель = ${activePreset.phase1.denoise.model}, сила = ${activePreset.phase1.denoise.strength}%`);
+        console.log(`Параметры: модель = ${modelName}, сила = ${activePreset.phase1.denoise.strength}%`);
 
         if (isTauriAvailable()) {
           const targetTracks = selectedSegment?.trackId
@@ -972,13 +1001,13 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
             for (const seg of segs) {
               const inPath = seg.filePath;
-              if (inPath && !inPath.startsWith('blob:') && !inPath.startsWith('data:')) {
+              if (inPath && !inPath.startsWith('blob:') && !inputPathStartsWithData(inPath)) {
                 try {
                   console.log(`[MixingPanel] Вызов process_denoise для: ${inPath}`);
                   const rep = await invoke<DenoiseReport>('process_denoise', {
                     inputPath: inPath,
                     outputPath: inPath,
-                    modelName: activePreset.phase1.denoise.model || 'UVR-DeNoise',
+                    modelName: modelName,
                     strength: activePreset.phase1.denoise.strength,
                   });
                   if (rep) {
@@ -1002,7 +1031,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
         const res = await AudioDspService.applyDenoise(
           project.tracks,
-          activePreset.phase1.denoise,
+          { ...activePreset.phase1.denoise, model: modelName },
           selectedSegment?.trackId,
           selectedSegment?.segment?.id
         );
@@ -1029,9 +1058,22 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       } else if (effectType === 'dereverb') {
         let nativeReport: any = null;
         let processedTracksCount = 0;
+        let modelName = activePreset.phase1.dereverb.model || 'rt_dereverb_v2';
+        const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
+        const isNeuralModel = ['uvr_deecho_normal', 'uvr_deecho_aggressive', 'reverb_foxjoy', 'mdx_dereverb_room', 'room_cleaner_neural'].includes(modelName);
+
+        if (isNeuralModel && !AIModelService.getInstance().isModelInstalled(modelName)) {
+          if (missingBehavior === 'skip') {
+            showToast(`⏭️ Шаг дереверберации пропущен: модель "${modelName}" не скачана в Настройках.`);
+            return;
+          } else {
+            showToast(`⚡ Модель "${modelName}" не скачана. Применен встроенный DSP-деревербератор "rt_dereverb_v2".`);
+            modelName = 'rt_dereverb_v2';
+          }
+        }
 
         console.group(`%c[MixingPanel] ▶ Дереверберация (De-Reverb)`, 'color: #6366f1; font-weight: bold;');
-        console.log(`Параметры: модель = ${activePreset.phase1.dereverb.model}, сила = ${activePreset.phase1.dereverb.strength}%`);
+        console.log(`Параметры: модель = ${modelName}, сила = ${activePreset.phase1.dereverb.strength}%`);
 
         if (isTauriAvailable()) {
           const targetTracks = selectedSegment?.trackId
@@ -1051,7 +1093,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                   const rep = await invoke<any>('process_uvr_dereverb', {
                     inputPath: inPath,
                     outputPath: inPath,
-                    modelName: activePreset.phase1.dereverb.model || 'rt_dereverb_v2',
+                    modelName: modelName,
                     reverbTailExportPath: null,
                     strength: (activePreset.phase1.dereverb.strength || 85) / 100.0,
                   });
@@ -1076,7 +1118,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
         const res = await AudioDspService.applyDeReverb(
           project.tracks,
-          activePreset.phase1.dereverb,
+          { ...activePreset.phase1.dereverb, model: modelName },
           selectedSegment?.trackId,
           selectedSegment?.segment?.id
         );
@@ -3350,6 +3392,46 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
                 {activePreset.phase1.enabled && (
                   <div className="space-y-4 opacity-100 transition-opacity">
+                    {/* Настройка AI-моделей: поведение при отсутствии моделей и быстрый переход в Настройки */}
+                    <div className="bg-zinc-950/70 p-2.5 rounded-xl border border-white/5 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <Cpu className="w-3.5 h-3.5 text-indigo-400" />
+                          <span className="text-[10px] font-black uppercase text-zinc-300">AI-модели и фоллбэк</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setAppActiveModal('settings')}
+                          className="flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30 text-[10px] text-indigo-300 font-semibold transition-colors cursor-pointer"
+                          title="Открыть раздел скачивания моделей в Настройках"
+                        >
+                          <Download className="w-3 h-3 text-indigo-400" />
+                          <span>Менеджер моделей</span>
+                        </button>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="text-[10px] text-zinc-400 block font-medium">
+                          Если выбранная AI-модель не скачана:
+                        </label>
+                        <select
+                          value={activePreset.phase1.missingModelBehavior || 'fallback_dsp'}
+                          onChange={(e) => updatePhase1({
+                            missingModelBehavior: e.target.value as 'fallback_dsp' | 'skip'
+                          })}
+                          className="w-full bg-zinc-900 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-200 font-sans focus:border-indigo-500 focus:outline-none cursor-pointer"
+                        >
+                          <option value="fallback_dsp">⚡ Использовать встроенный DSP-фоллбэк без ИИ (автоматически)</option>
+                          <option value="skip">⏭️ Пропускать шаг предобработки (Skip)</option>
+                        </select>
+                        <p className="text-[9px] text-zinc-500 leading-tight">
+                          {activePreset.phase1.missingModelBehavior === 'skip'
+                            ? 'Пайплайн пропустит данный шаг без ошибок, если веса модели отсутствуют.'
+                            : 'При отсутствии скачанной нейросети UVR/ONNX автоматически задействуется оффлайн DSP-обработка (spectral gate, RT dereverb, vocal presence).'}
+                        </p>
+                      </div>
+                    </div>
+
                     {/* Кнопка добавления VST-шага */}
                     <div className="flex items-center justify-between bg-zinc-900/30 p-2.5 rounded-xl border border-white/5">
                       <div className="flex flex-col">
@@ -3951,15 +4033,17 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 })}
                                 className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 mb-2 font-mono"
                               >
-                                <optgroup label="⚡ Встроенные (DSP / Оффлайн)">
-                                  <option value="spectral_gate">Спектральный гейт (AFFTDN)</option>
-                                  <option value="deep_noise">Deep Denoise AI (RNNoise)</option>
-                                  <option value="intel_ai_denoise">Intel Voice Clean (Экспандер)</option>
+                                <optgroup label="⚡ Встроенные (DSP / Оффлайн без ИИ)">
+                                  <option value="spectral_gate">Спектральный гейт (AFFTDN - DSP)</option>
+                                  <option value="deep_noise">Deep Denoise (RNNoise DSP)</option>
+                                  <option value="intel_ai_denoise">Intel Voice Clean (Экспандер DSP)</option>
                                 </optgroup>
-                                <optgroup label="🧠 VR Архитектура (UVR5 / Нейросеть)">
-                                  <option value="uvr_denoise_lite">VR-DeNoise Lite (Быстрая очистка)</option>
+                                <optgroup label="🧠 VR / AI Архитектура (Требуют загрузки в Настройках)">
                                   <option value="uvr_denoise_foxjoy">VR-DeNoise FoxJoy (Вокал / Речь)</option>
+                                  <option value="deepfilternet3">DeepFilterNet 3 (Full-band 48kHz HQ)</option>
+                                  <option value="uvr_denoise_lite">VR-DeNoise Lite (Быстрая очистка)</option>
                                   <option value="uvr_denoise_full">VR-DeNoise Full (Глубокое подавление)</option>
+                                  <option value="cascade_net">Cascade-Net Dual Denoise (Двухкаскадный)</option>
                                 </optgroup>
                               </select>
                             </div>
@@ -4002,12 +4086,14 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 })}
                                 className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-mono"
                               >
-                                <optgroup label="⚡ Встроенные (DSP / Оффлайн)">
-                                  <option value="rt_dereverb_v2">RT_Dereverb v2 (DSP подавление)</option>
-                                  <option value="room_cleaner_neural">Neural Room Cleaner (Резонансы)</option>
-                                  <option value="adaptive_gate">Адаптивный гейт (Transient Gate)</option>
+                                <optgroup label="⚡ Встроенные (DSP / Оффлайн без ИИ)">
+                                  <option value="rt_dereverb_v2">RT_Dereverb v2 (DSP спектральное вычитание)</option>
+                                  <option value="room_cleaner_neural">Neural Room Cleaner (Резонансы DSP)</option>
+                                  <option value="adaptive_gate">Адаптивный гейт (Transient Gate DSP)</option>
                                 </optgroup>
-                                <optgroup label="🧠 VR Архитектура (UVR5 / Нейросеть)">
+                                <optgroup label="🧠 VR / MDX Архитектура (Требуют загрузки в Настройках)">
+                                  <option value="reverb_foxjoy">UVR Reverb FoxJoy HQ (Де-реверберация)</option>
+                                  <option value="mdx_dereverb_room">MDX-Net Dereverb Room (Акустические комнаты)</option>
                                   <option value="uvr_deecho_normal">VR-DeEcho Normal (Мягкая очистка)</option>
                                   <option value="uvr_deecho_aggressive">VR-DeEcho Aggressive (Глубокое подавление)</option>
                                 </optgroup>
@@ -4108,10 +4194,17 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                               })}
                               className="w-full bg-zinc-950 border border-white/10 rounded-lg p-2 text-xs text-zinc-300 cursor-pointer"
                             >
-                              <option value="vocal_presence">Vocal Presence (+3 dB 3-5 кГц, срез саб-низа &lt;80 Гц)</option>
-                              <option value="warm_analog">Warm Analog (плотный низ 200-300 Гц, срез 12-16 кГц)</option>
-                              <option value="reference_match">Пользовательский WAV-референс (EQ Matching)</option>
-                              <option value="flat">Плоская характеристика (Flat EQ)</option>
+                              <optgroup label="⚡ Встроенные DSP-профили (Оффлайн без ИИ)">
+                                <option value="vocal_presence">Vocal Presence (+3 dB 3-5 кГц, срез саб-низа &lt;80 Гц)</option>
+                                <option value="warm_analog">Warm Analog (плотный низ 200-300 Гц, срез 12-16 кГц)</option>
+                                <option value="reference_match">Пользовательский WAV-референс (FFT 1/3-octave Match)</option>
+                                <option value="flat">Плоская характеристика (Flat EQ)</option>
+                              </optgroup>
+                              <optgroup label="🧠 Нейросетевой EQ & Timbre Matching (AI ONNX)">
+                                <option value="vocal_spectral_matcher">Vocal Spectral Matcher (Нейро-сопоставление спектра)</option>
+                                <option value="voicefixer_fe">VoiceFixer Feature Extractor (Восстановление формант)</option>
+                                <option value="vocal_timbre_transfer">Vocal Timbre Transfer (Трансфер тембра и микрофона)</option>
+                              </optgroup>
                             </select>
 
                             {activePreset.phase1.eqMatching.profileModel === 'reference_match' && (
@@ -4275,14 +4368,16 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 }}
                                 className="w-full bg-zinc-950 border border-white/10 rounded-lg p-2 text-xs text-zinc-300 font-mono"
                               >
-                                <optgroup label="🧠 Нейросети UVR5 / Demucs (Высокое качество)">
+                                <optgroup label="🧠 Нейросети UVR5 / Demucs / RoFormer (Требуют загрузки)">
+                                  <option value="UVR-MDX-NET-Voc_FT.onnx">UVR MDX-Net Vocals (FT ONNX - Чистый голос)</option>
+                                  <option value="mel_band_roformer_vocals">Mel-Band RoFormer Vocals (SOTA вокал)</option>
+                                  <option value="htdemucs_ft">HTDemucs FT (Demucs v4 Fine-Tuned)</option>
                                   <option value="htdemucs">htdemucs (Demucs v4 - Вокал / Музыка)</option>
                                   <option value="htdemucs_vocals_bgm">htdemucs_vocals_bgm (Вокал + BGM)</option>
                                   <option value="MDX23C-8Step-VocFT.onnx">MDX23C 8-Step Vocal FT (Премиум вокал)</option>
-                                  <option value="UVR-MDX-NET-Voc_FT.onnx">UVR MDX-Net Vocals (Чистый голос)</option>
                                   <option value="5_HP-Karaoke-UVR.onnx">5_HP Karaoke UVR (Караоке / Шумы)</option>
                                 </optgroup>
-                                <optgroup label="⚡ Быстрые DSP алгоритмы">
+                                <optgroup label="⚡ Быстрые DSP алгоритмы без ИИ (Фоллбэк)">
                                   <option value="fast_dsp_splitter">Быстрый стерео/фазовый сплиттер (DSP)</option>
                                 </optgroup>
                               </select>

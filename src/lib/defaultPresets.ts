@@ -37,6 +37,7 @@ export const DEFAULT_PHASE4_ORDER = [
 
 export const createDefaultPhase1 = (type: MixingType) => ({
   enabled: true,
+  missingModelBehavior: 'fallback_dsp' as const,
   vstSteps: {},
   normalization: {
     enabled: type !== MixingType.VOICEOVER,

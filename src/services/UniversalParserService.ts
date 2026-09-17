@@ -1,4 +1,4 @@
-import { parse as parseAss } from 'ass-compiler';
+import { SubtitleService } from './subtitleService';
 import mammoth from 'mammoth';
 import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
@@ -63,26 +63,7 @@ export class UniversalParserService {
 
   private static parseASS(content: string): SubtitleLine[] {
     try {
-      const parsed = parseAss(content);
-      // Map Dialogue events to our SubtitleLine structure using 'any' cast to bypass strict ass-compiler type mismatches
-      return parsed.events.dialogue.map((dialogue: any, index: number) => {
-        let rawText = dialogue.Text?.combined || dialogue.text?.combined || '';
-        if (!rawText) rawText = '';
-        const cleanText = rawText
-          .replace(/\{[^}]+\}/g, '')
-          .replace(/\\N/g, '\n')
-          .replace(/\\n/g, '\n')
-          .replace(/\\h/g, ' ')
-          .trim();
-
-        return {
-          id: `ass-${index}-${Date.now()}`,
-          start: dialogue.Start || dialogue.start || 0,
-          end: dialogue.End || dialogue.end || 0,
-          text: cleanText,
-          role: dialogue.Name || dialogue.who || 'Default',
-        };
-      });
+      return SubtitleService.parseASS(content).subtitles;
     } catch (err) {
       console.error('ASS parsing failed:', err);
       return [];

@@ -154,15 +154,15 @@ fn interpolate_release(t_norm: f32, target_gain: f32, curve: CurveType) -> f32 {
 
 /// Внутренний расширенный диапазон огибающей даккинга в сэмплах
 #[derive(Debug, Clone)]
-struct SampleDuckWindow {
+pub struct SampleDuckWindow {
     /// Индекс начала фазы затухания (Attack start): start - lookahead - attack
-    attack_start_sample: usize,
+    pub attack_start_sample: usize,
     /// Индекс завершения затухания и выхода на целевой уровень: start - lookahead
-    attack_end_sample: usize,
+    pub attack_end_sample: usize,
     /// Индекс окончания фазы удержания: end + hold
-    hold_end_sample: usize,
+    pub hold_end_sample: usize,
     /// Индекс полного возврата уровня: end + hold + release
-    release_end_sample: usize,
+    pub release_end_sample: usize,
 }
 
 // ============================================================================

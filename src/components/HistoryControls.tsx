@@ -4,14 +4,22 @@ import { useProjectData } from '../contexts/ProjectContext';
 import { cn } from '../lib/utils';
 
 const HistoryControls: React.FC = () => {
-  const { undo, redo, canUndo, canRedo } = useProjectData();
+  const { undo, redo, canUndo, canRedo, undoDescription, redoDescription } = useProjectData();
+
+  const undoTitle = canUndo
+    ? `Отменить: ${undoDescription || 'Действие'} (Ctrl+Z)`
+    : 'Отменить (Ctrl+Z)';
+
+  const redoTitle = canRedo
+    ? `Повторить: ${redoDescription || 'Действие'} (Ctrl+Y)`
+    : 'Повторить (Ctrl+Y)';
 
   return (
     <div className="flex items-center gap-1 bg-zinc-800/80 px-2 py-1.5 rounded-lg border border-white/5 mr-2">
       <button
         onClick={undo}
         disabled={!canUndo}
-        title="Отменить (Ctrl+Z)"
+        title={undoTitle}
         className={cn(
           "p-1.5 rounded-md transition-all",
           canUndo 
@@ -24,7 +32,7 @@ const HistoryControls: React.FC = () => {
       <button
         onClick={redo}
         disabled={!canRedo}
-        title="Повторить (Ctrl+Y)"
+        title={redoTitle}
         className={cn(
           "p-1.5 rounded-md transition-all",
           canRedo 

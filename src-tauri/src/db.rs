@@ -16,7 +16,7 @@ pub struct AppState {
 
 // --- STRUCTURES THAT MATCH TYPESCRIPT INTERFACES ---
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubtitleLine {
     pub id: String,
     pub start: f64,
@@ -138,6 +138,7 @@ pub async fn init_db(db_path: &str) -> Result<Pool<Sqlite>, sqlx::Error> {
 
     // MIGRATION: Schema Setup for Legacy and Modern Project Repository
     crate::project_repository::run_project_migrations(&pool).await?;
+    crate::timeline_history_engine::run_timeline_history_migrations(&pool).await?;
 
     // Maintain backwards compatibility for legacy segments table if needed
     sqlx::query("

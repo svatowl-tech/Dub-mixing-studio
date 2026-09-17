@@ -89,6 +89,7 @@ impl Default for AudioRecorder {
 pub struct AudioState {
     pub recorder: Mutex<AudioRecorder>,
     pub player: Mutex<NativeAudioPlayer>,
+    pub clock: Arc<crate::transport_clock::TransportClock>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -181,6 +182,7 @@ impl CachedAudioFile {
 }
 
 pub struct NativeAudioPlayer {
+    pub clock: Arc<crate::transport_clock::TransportClock>,
     pub is_playing: Arc<AtomicBool>,
     pub current_sample_frame: Arc<std::sync::atomic::AtomicU64>,
     pub device_sample_rate: Arc<std::sync::atomic::AtomicU32>,
@@ -194,18 +196,23 @@ unsafe impl Sync for NativeAudioPlayer {}
 
 impl Default for NativeAudioPlayer {
     fn default() -> Self {
+        Self::with_clock(Arc::new(crate::transport_clock::TransportClock::new(48000)))
+    }
+}
+
+impl NativeAudioPlayer {
+    pub fn with_clock(clock: Arc<crate::transport_clock::TransportClock>) -> Self {
         Self {
-            is_playing: Arc::new(AtomicBool::new(false)),
-            current_sample_frame: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            device_sample_rate: Arc::new(std::sync::atomic::AtomicU32::new(48000)),
+            is_playing: clock.is_playing.clone(),
+            current_sample_frame: clock.current_sample.clone(),
+            device_sample_rate: clock.sample_rate.clone(),
+            clock,
             tracks: Arc::new(std::sync::RwLock::new(Vec::new())),
             audio_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             stream: None,
         }
     }
-}
 
-impl NativeAudioPlayer {
     pub fn preload_buffers(&self, paths: Vec<String>) -> Result<Vec<String>, String> {
         let mut loaded = Vec::new();
         for p in paths {
@@ -258,9 +265,9 @@ impl NativeAudioPlayer {
         let sample_rate = config.sample_rate().0;
         let channels = config.channels() as usize;
         self.device_sample_rate.store(sample_rate, Ordering::SeqCst);
+        self.clock.sample_rate.store(sample_rate, Ordering::SeqCst);
 
-        let is_playing = Arc::clone(&self.is_playing);
-        let current_sample_frame = Arc::clone(&self.current_sample_frame);
+        let clock = Arc::clone(&self.clock);
         let tracks = Arc::clone(&self.tracks);
         let cache = Arc::clone(&self.audio_cache);
 
@@ -269,7 +276,7 @@ impl NativeAudioPlayer {
         let stream = device.build_output_stream(
             &stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                mix_audio_buffer(data, channels, sample_rate, &is_playing, &current_sample_frame, &tracks, &cache);
+                mix_audio_buffer(data, channels, sample_rate, &clock, &tracks, &cache);
             },
             |err| log_debug(&format!("Rust audio output stream error: {}", err)),
             None,
@@ -298,23 +305,23 @@ impl NativeAudioPlayer {
 
         self.ensure_stream()?;
 
-        let sr = self.device_sample_rate.load(Ordering::SeqCst);
+        let sr = self.clock.sample_rate.load(Ordering::SeqCst);
         let frame = (start_time.max(0.0) * sr as f64).round() as u64;
-        self.current_sample_frame.store(frame, Ordering::SeqCst);
-        self.is_playing.store(true, Ordering::SeqCst);
+        self.clock.seek(frame);
+        self.clock.play();
 
         Ok(())
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
-        self.is_playing.store(false, Ordering::SeqCst);
+        self.clock.pause();
         Ok(())
     }
 
     pub fn seek(&mut self, time: f64) -> Result<(), String> {
-        let sr = self.device_sample_rate.load(Ordering::SeqCst);
+        let sr = self.clock.sample_rate.load(Ordering::SeqCst);
         let frame = (time.max(0.0) * sr as f64).round() as u64;
-        self.current_sample_frame.store(frame, Ordering::SeqCst);
+        self.clock.seek(frame);
         Ok(())
     }
 
@@ -325,8 +332,8 @@ impl NativeAudioPlayer {
     }
 
     pub fn get_position(&self) -> f64 {
-        let frame = self.current_sample_frame.load(Ordering::Relaxed);
-        let sr = self.device_sample_rate.load(Ordering::Relaxed).max(1);
+        let frame = self.clock.current_sample.load(Ordering::Relaxed);
+        let sr = self.clock.sample_rate.load(Ordering::Relaxed).max(1);
         frame as f64 / sr as f64
     }
 }
@@ -335,18 +342,25 @@ fn mix_audio_buffer(
     data: &mut [f32],
     channels: usize,
     device_sample_rate: u32,
-    is_playing: &Arc<AtomicBool>,
-    current_sample_frame: &Arc<std::sync::atomic::AtomicU64>,
+    clock: &Arc<crate::transport_clock::TransportClock>,
     tracks_lock: &Arc<std::sync::RwLock<Vec<NativePlaybackTrack>>>,
     cache_lock: &Arc<std::sync::RwLock<std::collections::HashMap<String, Arc<CachedAudioFile>>>>,
 ) {
-    if !is_playing.load(Ordering::Relaxed) {
-        data.fill(0.0);
+    let num_frames = data.len() / channels.max(1);
+    data.fill(0.0);
+
+    // 1. Предзапись (Pre-roll Countdown): отсчет метронома в Rust перед включением записи
+    if clock.is_preroll.load(Ordering::Relaxed) {
+        clock.synthesize_metronome(data, channels, device_sample_rate, num_frames);
+        clock.advance_samples(num_frames);
         return;
     }
 
-    let num_frames = data.len() / channels.max(1);
-    let start_frame = current_sample_frame.load(Ordering::Relaxed);
+    if !clock.is_playing.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let start_frame = clock.current_sample.load(Ordering::Relaxed);
     data.fill(0.0);
 
     let tracks = match tracks_lock.read() {
@@ -432,7 +446,7 @@ fn mix_audio_buffer(
         }
     }
 
-    current_sample_frame.fetch_add(num_frames as u64, Ordering::Relaxed);
+    clock.advance_samples(num_frames);
 }
 
 // --- NOISE GATE LOGIC ---
