@@ -806,7 +806,7 @@ pub fn process_mastering_limiter(
         final_loudness_range_lu: (final_lra * 10.0).round() / 10.0,
         true_peak_ceiling_dbtp: ceiling_dbtp,
         normalization_gain_applied_db: (norm_gain_db * 10.0).round() / 10.0,
-        max_gain_reduction_db: (max_gain_reduction_db * 10.0).round() / 10.0,
+        max_gain_reduction_db: (max_gain_reduction_db as f64 * 10.0).round() / 10.0,
         total_limited_events,
         is_compliant,
         sample_rate,

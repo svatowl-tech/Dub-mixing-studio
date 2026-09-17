@@ -569,7 +569,7 @@ pub async fn run_dereverb_pipeline(
             
             // Определение имени входного тензора и ожидаемой формы
             let input_name = session.inputs().first()
-                .map(|inp| inp.name.clone())
+                .map(|inp| inp.name().to_string())
                 .unwrap_or_else(|| "input".to_string());
 
             println!("[UVR-DeReverb] ONNX Модель загружена. Имя входа: '{}', Провайдер: {}", input_name, provider);
@@ -583,7 +583,7 @@ pub async fn run_dereverb_pipeline(
 
             if let Some(first_input) = session.inputs().first() {
                 // Если удалось получить информацию о размерах входного тензора
-                if let ort::value::ValueType::Tensor { shape, .. } = &first_input.input_type {
+                if let ort::value::ValueType::Tensor { shape, .. } = &first_input.dtype() {
                     if shape.len() == 4 {
                         let ch = shape[1];
                         if ch > 0 { expected_channels = ch as usize; }

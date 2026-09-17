@@ -500,7 +500,7 @@ pub async fn denoise_audio_task(
             let (mut session, prov) = init_onnx_session(path)?;
             
             let input_name = session.inputs().first()
-                .map(|inp| inp.name.clone())
+                .map(|inp| inp.name().to_string())
                 .unwrap_or_else(|| "input".to_string());
 
             println!("[UVR-DeNoise] Провайдер ONNX Runtime: {}, имя входа: '{}'", prov, input_name);
@@ -511,7 +511,7 @@ pub async fn denoise_audio_task(
             let mut fft_len = FFT_SIZE;
 
             if let Some(first_input) = session.inputs().first() {
-                if let ort::value::ValueType::Tensor { shape, .. } = &first_input.input_type {
+                if let ort::value::ValueType::Tensor { shape, .. } = &first_input.dtype() {
                     if shape.len() == 4 {
                         let ch = shape[1];
                         if ch > 0 { expected_channels = ch as usize; }

@@ -21,7 +21,7 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use tauri::{AppHandle, State};
+use tauri::State;
 use uuid::Uuid;
 
 use crate::file_io::normalize_windows_path;

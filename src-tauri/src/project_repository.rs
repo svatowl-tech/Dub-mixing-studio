@@ -13,7 +13,7 @@ use sqlx::{Pool, Row, Sqlite};
 use tauri::{command, State};
 
 use crate::db::AppState;
-use crate::logger::{log_debug, log_error, log_info};
+use crate::logger::{log_debug, log_info};
 
 // ============================================================================
 // 1. DATA TRANSFER OBJECTS (DTO / IPC PAYLOADS)

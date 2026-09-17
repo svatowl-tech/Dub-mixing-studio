@@ -12,13 +12,13 @@
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
-use tauri::{command, AppHandle, State};
+use tauri::{command, State};
 use vst::plugin::Plugin;
 
 use crate::logger::log_info;
-use crate::vst_host::{PluginParameter, SharedVstHostState};
+use crate::vst_host::SharedVstHostState;
 
 // ============================================================================
 // 1. КОНФИГУРАЦИОННЫЕ ТИПЫ ДАННЫХ РЭКА
@@ -873,7 +873,7 @@ impl Vst3SlotDsp {
         self.config = config;
     }
 
-    pub fn process_block(&mut self, buffer: &mut [f32], channels: usize, sample_rate: u32, host: Option<&SharedVstHostState>) {
+    pub fn process_block(&mut self, buffer: &mut [f32], _channels: usize, sample_rate: u32, host: Option<&SharedVstHostState>) {
         if !self.config.enabled || self.config.bypass || self.config.plugin_path.is_empty() {
             return;
         }
@@ -963,7 +963,7 @@ impl ChannelStripRack {
     }
 
     /// Потоковая обработка аудио-буфера сэмплов (in-place)
-    pub fn process_buffer(&mut self, buffer: &mut [f32], channels: usize, sample_rate: u32) {
+    pub fn process_buffer(&mut self, buffer: &mut [f32], _channels: usize, sample_rate: u32) {
         if self.state.bypass_all || buffer.is_empty() {
             return;
         }
@@ -1090,7 +1090,7 @@ impl VocalRackManager {
     }
 
     /// Обработка аудио буфера для конкретной дорожки
-    pub fn process_track_audio(&self, track_id: &str, buffer: &mut [f32], channels: usize, sample_rate: u32) {
+    pub fn process_track_audio(&self, track_id: &str, buffer: &mut [f32], _channels: usize, sample_rate: u32) {
         if let Ok(mut racks) = self.racks.write() {
             if let Some(rack) = racks.get_mut(track_id) {
                 rack.process_buffer(buffer, channels, sample_rate);

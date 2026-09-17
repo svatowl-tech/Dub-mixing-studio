@@ -6,7 +6,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+
 use std::time::{Duration, Instant};
 
 use ebur128::{EbuR128, Mode};
@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 
 use crate::audio_buffer_manager::AudioBufferCache;
 use crate::file_io::normalize_windows_path;
-use crate::logger::{log_debug, log_error, log_info};
+use crate::logger::{log_debug, log_info};
 
 // ============================================================================
 // СТРУКТУРЫ ОТЧЕТОВ И СООБЩЕНИЙ
@@ -140,7 +140,7 @@ pub fn calculate_ebu_loudness(
             }
         }
 
-        if let Ok(s) = ebu.loudness_short_term() {
+        if let Ok(s) = ebu.loudness_shortterm() {
             if s > max_short_term && s > -100.0 {
                 max_short_term = s;
             }
@@ -272,7 +272,7 @@ impl RealtimeLoudnessMeter {
                 *last_emit = Instant::now();
 
                 let momentary = ebu.loudness_momentary().unwrap_or(-70.0).max(-70.0);
-                let short_term = ebu.loudness_short_term().unwrap_or(-70.0).max(-70.0);
+                let short_term = ebu.loudness_shortterm().unwrap_or(-70.0).max(-70.0);
                 let integrated = ebu.loudness_global().unwrap_or(-70.0).max(-70.0);
 
                 let mut tp_max = 0.0f64;

@@ -5,7 +5,7 @@
 // Стек: rustfft = "6.2.0", ringbuf = "0.2", rayon = "1.10.0", hound = "3.5.1", tauri = "2.11"
 // ============================================================================
 
-use hound::{SampleFormat, WavReader};
+
 use rayon::prelude::*;
 use ringbuf::RingBuffer;
 use rustfft::num_complex::Complex;
@@ -14,14 +14,14 @@ use serde::{Deserialize, Serialize};
 use std::f32::consts::PI;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{command, AppHandle, Emitter, State};
 
-use crate::audio_buffer_manager::{AudioBufferCache, AudioBufferData};
-use crate::logger::{log_debug, log_error, log_info};
+use crate::audio_buffer_manager::AudioBufferCache;
+use crate::logger::log_info;
 
 pub const FFT_SIZE: usize = 2048;
 pub const NUM_OCTAVE_BANDS: usize = 64;
@@ -143,8 +143,8 @@ impl SpectralDspProcessor {
 
         // Коэффициенты сглаживания: Attack 10ms, Decay 150ms при вызове с частотой 60 Гц (dt ≈ 16.67ms)
         let dt = 1.0 / 60.0;
-        let attack_coeff = 1.0 - (-dt / 0.010).exp();
-        let decay_coeff = 1.0 - (-dt / 0.150).exp();
+        let attack_coeff = 1.0 - (-dt / 0.010_f32).exp();
+        let decay_coeff = 1.0 - (-dt / 0.150_f32).exp();
 
         Self {
             fft_size,
