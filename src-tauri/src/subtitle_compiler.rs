@@ -29,6 +29,7 @@ pub enum SubtitleFormat {
     Vtt,
 }
 
+#[allow(dead_code)]
 impl SubtitleFormat {
     pub fn extension(&self) -> &'static str {
         match self {

@@ -50,6 +50,7 @@ pub enum PipelinePhase {
     Phase4_FinalMastering = 4,
 }
 
+#[allow(dead_code)]
 impl PipelinePhase {
     pub fn from_u8(val: u8) -> Self {
         match val {
@@ -527,11 +528,11 @@ async fn run_native_pipeline(
 
     let phase2_input = if denoise_out.exists() { denoise_out } else { denoise_in };
     let mut speech_cues = Vec::new();
-    let mut sample_rate_detected = 48000u32;
+    let mut _sample_rate_detected = 48000u32;
 
     if phase2_input.exists() {
         if let Ok(audio) = resolve_audio_samples(&phase2_input.to_string_lossy(), Some(&audio_cache)) {
-            sample_rate_detected = audio.sample_rate;
+            _sample_rate_detected = audio.sample_rate;
             let mut vad_cfg = SilenceSplitConfig::default();
             vad_cfg.onset_threshold_db = settings.vad_onset_db;
             vad_cfg.offset_threshold_db = settings.vad_offset_db;

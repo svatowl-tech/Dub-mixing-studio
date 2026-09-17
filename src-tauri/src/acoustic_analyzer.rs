@@ -316,6 +316,7 @@ fn estimate_drr_and_t60(samples: &[f32], sample_rate: u32) -> (f32, u32, f32) {
 // 3. СПЕКТРАЛЬНЫЙ АНАЛИЗ И КЛАССИФИКАЦИЯ ОКРАСКИ (RUSTFFT / SPECTRAL SHAPING)
 // =========================================================================================
 
+#[allow(dead_code)]
 struct SpectralMetrics {
     centroid_hz: f32,
     bandwidth_hz: f32,

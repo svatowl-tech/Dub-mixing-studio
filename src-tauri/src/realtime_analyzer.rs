@@ -65,6 +65,7 @@ pub struct WaveformMipmap {
 }
 
 /// Метаданные кэша Mipmap волновой формы на диске
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WaveformMipmapHeader {
@@ -286,6 +287,7 @@ impl Default for RealtimeAnalyzerState {
 
 impl RealtimeAnalyzerState {
     /// Быстрая неблокирующая подача сэмплов из CPAL/аудио-движка в анализатор
+    #[allow(dead_code)]
     pub fn push_samples_lockfree(&self, samples: &[f32], channels: usize) {
         if !self.is_active.load(Ordering::Relaxed) {
             return;

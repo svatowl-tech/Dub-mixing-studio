@@ -309,6 +309,9 @@ jobs:
     name: Publish GitHub Release
     needs: [prepare, build-binaries]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -330,16 +333,62 @@ jobs:
           cat SHA256SUMS.txt
           cd ..
 
-      - name: Create or Update GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.prepare.outputs.tag_name }}
-          name: "Dub Mixing Studio ${{ needs.prepare.outputs.tag_name }}"
-          draft: ${{ needs.prepare.outputs.is_draft == 'true' }}
-          prerelease: false
-          target_commitish: ${{ github.sha }}
-          generate_release_notes: true
-          files: |
-            all-release-assets/*
+      - name: Publish GitHub Release via GitHub CLI
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
+          IS_DRAFT: ${{ needs.prepare.outputs.is_draft }}
+          TARGET_COMMIT: ${{ github.sha }}
+        run: |
+          set -e
+          echo "Publishing release for tag: $TAG_NAME (Commit: $TARGET_COMMIT)"
+
+          # Check if release already exists
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Release $TAG_NAME already exists. Updating release metadata..."
+            gh release edit "$TAG_NAME" --target "$TARGET_COMMIT" --title "Dub Mixing Studio $TAG_NAME"
+          else
+            echo "Creating new release $TAG_NAME..."
+            DRAFT_FLAG=""
+            if [ "$IS_DRAFT" = "true" ]; then
+              DRAFT_FLAG="--draft"
+            fi
+
+            gh release create "$TAG_NAME" \
+              --title "Dub Mixing Studio $TAG_NAME" \
+              --target "$TARGET_COMMIT" \
+              --generate-notes \
+              $DRAFT_FLAG
+          fi
+
+          echo "Uploading release assets with resilient retry..."
+          for file in all-release-assets/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              echo "==> Uploading $filename ($(du -h "$file" | cut -f1))..."
+
+              # Retry upload up to 4 times with exponential backoff for large assets
+              success=false
+              for attempt in 1 2 3 4; do
+                echo "Attempt $attempt for $filename..."
+                if gh release upload "$TAG_NAME" "$file" --clobber; then
+                  echo "Successfully uploaded $filename!"
+                  success=true
+                  break
+                else
+                  wait_time=$((attempt * 5))
+                  echo "Upload failed on attempt $attempt. Retrying in ${wait_time}s..."
+                  sleep $wait_time
+                fi
+              done
+
+              if [ "$success" = false ]; then
+                echo "Error: Failed to upload $filename after 4 attempts."
+                exit 1
+              fi
+            fi
+          done
+
+          echo "=== All release assets published successfully! ==="
+          gh release view "$TAG_NAME"

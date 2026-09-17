@@ -141,6 +141,7 @@ impl Default for BwfBextMetadata {
 }
 
 /// Потоковый BWF-райтер с аппаратной буферизацией 64 КБ
+#[allow(dead_code)]
 pub struct BwfWavWriter {
     file_path: PathBuf,
     writer: BufWriter<File>,
@@ -356,6 +357,7 @@ impl BwfWavWriter {
 // ============================================================================
 
 /// Внутреннее представление аудио-сегмента на таймлайне DAW
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct TimelineSegmentSource {
     pub segment_id: String,

@@ -426,6 +426,7 @@ impl DirectForm2Biquad {
         y
     }
 
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn reset(&mut self) {
         self.s1 = 0.0;
@@ -467,6 +468,7 @@ impl LookaheadDelayBuffer {
         self.buffer[read_idx]
     }
 
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn reset(&mut self) {
         self.buffer = [0.0; 256];
@@ -475,6 +477,7 @@ impl LookaheadDelayBuffer {
 }
 
 /// Полное независимое DSP-состояние для одного аудиоканала
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct VocalBusChannelState {
     pub sample_rate: f32,
@@ -584,6 +587,7 @@ impl VocalBusChannelState {
     }
 
     /// Сброс всех внутренних состояний регистров (например, перед началом нового трека)
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.hpf_biquad1.reset();
         self.hpf_biquad2.reset();
@@ -702,6 +706,7 @@ impl VocalBusRack {
     }
 
     /// Сброс всех внутренних состояний
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         for ch in self.channels.iter_mut() {
             ch.reset();
@@ -920,6 +925,7 @@ impl VocalBusRack {
     }
 
     /// Обработка аудио-буфера одного канала in-place без аллокаций
+    #[allow(dead_code)]
     pub fn process_channel(&mut self, channel_idx: usize, buffer: &mut [f32]) {
         for sample in buffer.iter_mut() {
             *sample = self.process_sample(channel_idx, *sample);
@@ -927,6 +933,7 @@ impl VocalBusRack {
     }
 
     /// Обработка стерео-буферов (L/R) in-place без аллокаций
+    #[allow(dead_code)]
     pub fn process_stereo(&mut self, left: &mut [f32], right: &mut [f32]) {
         let len = left.len().min(right.len());
         for i in 0..len {

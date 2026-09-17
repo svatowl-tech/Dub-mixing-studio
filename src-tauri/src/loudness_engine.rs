@@ -204,6 +204,7 @@ pub fn calculate_ebu_loudness(
 // ============================================================================
 
 /// Структура управления потоковым измерением громкости в реальном времени
+#[allow(dead_code)]
 pub struct RealtimeLoudnessMeter {
     ebu: Mutex<Option<EbuR128>>,
     channels: u16,
@@ -227,6 +228,7 @@ impl Default for RealtimeLoudnessMeter {
     }
 }
 
+#[allow(dead_code)]
 impl RealtimeLoudnessMeter {
     pub fn new() -> Self {
         Self::default()

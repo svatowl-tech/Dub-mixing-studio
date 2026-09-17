@@ -23,9 +23,10 @@ pub const FFT_SIZE: usize = 2048;
 pub const HOP_SIZE: usize = 512;
 
 /// Длина временного окна одного чанка инференса (256 кадров спектрограммы ~ 2.97 сек)
+#[allow(dead_code)]
 pub const CHUNK_TIME_STEPS: usize = 256;
 
-/// Шаг смещения чанков инференса с перекрытием 50% для устранения граничных артефактов
+#[allow(dead_code)]
 pub const CHUNK_HOP_STEPS: usize = 128;
 
 /// Структура прогресса для отправки в UI через tauri::Emitter

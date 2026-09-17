@@ -311,6 +311,7 @@ impl RenderAudioBuffer {
     }
 
     /// Создает пустой тихий буфер указанной длительности
+    #[allow(dead_code)]
     pub fn create_silent(sample_rate: u32, channels: u16, duration_seconds: f64) -> Self {
         let frames = (sample_rate as f64 * duration_seconds).ceil() as usize;
         let mut channel_samples = Vec::new();

@@ -388,6 +388,7 @@ pub async fn apply_adaptive_ducking(
 
     let me_track_id = me_track.id.clone();
 
+    #[allow(dead_code)]
     struct VoiceSegItem {
         start_time: f64,
         duration: f64,
@@ -415,6 +416,7 @@ pub async fn apply_adaptive_ducking(
         })
         .collect();
 
+    #[allow(dead_code)]
     struct MeSegItem {
         id: String,
         start_time: f64,

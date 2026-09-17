@@ -181,6 +181,7 @@ impl CachedAudioFile {
     }
 }
 
+#[allow(dead_code)]
 pub struct NativeAudioPlayer {
     pub clock: Arc<crate::transport_clock::TransportClock>,
     pub is_playing: Arc<AtomicBool>,

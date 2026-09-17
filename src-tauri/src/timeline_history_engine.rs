@@ -29,6 +29,7 @@ pub const MAX_HISTORY_STEPS: i64 = 200;
 // ============================================================================
 
 /// Запись в таблице `timeline_history`
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineHistoryEntry {
