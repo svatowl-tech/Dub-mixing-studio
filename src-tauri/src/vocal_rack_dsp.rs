@@ -13,9 +13,9 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tauri::{command, AppHandle, State};
+use vst::plugin::Plugin;
 
 use crate::logger::log_info;
 use crate::vst_host::{PluginParameter, SharedVstHostState};
@@ -608,7 +608,6 @@ pub struct CompressorDsp {
 
 impl CompressorDsp {
     pub fn new(config: CompressorConfig, sample_rate: u32) -> Self {
-        let sr = sample_rate.max(8000) as f32;
         let makeup_lin = 10.0f32.powf(config.makeup_gain_db / 20.0);
         let mut dsp = Self {
             config: config.clone(),

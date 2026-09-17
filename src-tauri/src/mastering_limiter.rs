@@ -295,7 +295,7 @@ pub struct TruePeak4xDetector {
 }
 
 impl TruePeak4xDetector {
-    pub fn new(channels: usize, sample_rate: u32) -> Result<Self, MasteringError> {
+    pub fn new(channels: usize, _sample_rate: u32) -> Result<Self, MasteringError> {
         let chunk_size = 1024;
         let params = SincInterpolationParameters {
             sinc_len: 128,

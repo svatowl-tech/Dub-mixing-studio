@@ -5,7 +5,6 @@
 // ============================================================================
 
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
-use rayon::prelude::*;
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 use serde::{Deserialize, Serialize};
@@ -321,7 +320,7 @@ pub fn calculate_gcc_phat_lag(
 
     // Нормализуем масштаб IFFT
     let norm_factor = 1.0 / (fft_size as f32);
-    let mut gcc_corr: Vec<f32> = cross_spectrum.iter().map(|c| c.re * norm_factor).collect();
+    let gcc_corr: Vec<f32> = cross_spectrum.iter().map(|c| c.re * norm_factor).collect();
 
     // 4. Поиск пика в пределах заданного окна задержки max_search_offset_ms
     let max_lag_samples = ((max_search_offset_ms / 1000.0) * (sample_rate as f64)).round() as i64;
@@ -503,7 +502,7 @@ pub fn compute_dynamic_time_warping(
 pub fn calculate_segment_adjustments(
     dtw_path: &[DtwPoint],
     orig_dur_ms: f64,
-    dub_dur_ms: f64,
+    _dub_dur_ms: f64,
     num_subsegments: usize,
 ) -> Vec<SegmentAdjustment> {
     if dtw_path.is_empty() || num_subsegments == 0 {
@@ -780,7 +779,7 @@ pub fn perform_smart_alignment_analysis(
 /// Вычисление интеллектуального выравнивания таймингов (GCC-PHAT + DTW + Time Stretch Ratio)
 #[command]
 pub async fn calculate_smart_alignment(
-    app: AppHandle,
+    _app: AppHandle,
     cache_state: State<'_, AudioBufferCache>,
     original_cue_id: String,
     dub_cue_id: String,
@@ -813,7 +812,7 @@ pub async fn calculate_smart_alignment(
 /// Выравнивание и рендер вокального клипа с сохранением файла
 #[command]
 pub async fn align_vocal_clip(
-    app: AppHandle,
+    _app: AppHandle,
     cache_state: State<'_, AudioBufferCache>,
     original_clip_path: String,
     dubbed_clip_path: String,

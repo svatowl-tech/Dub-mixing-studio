@@ -618,7 +618,7 @@ impl VideoMuxEngine {
 #[tauri::command]
 pub async fn execute_final_video_render(
     app_handle: AppHandle,
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     request: FinalRenderRequest,
 ) -> Result<FinalRenderOutput, String> {
     log_debug(&format!(

@@ -5,7 +5,6 @@ use std::time::Instant;
 use chrono::Utc;
 use ebur128::{EbuR128, Mode};
 use hound::{SampleFormat, WavReader};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use tauri::State;
