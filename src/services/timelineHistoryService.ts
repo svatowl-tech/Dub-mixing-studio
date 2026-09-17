@@ -8,6 +8,12 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { AudioTrack } from '../types';
 import { IOLogger } from '../lib/ioLogger';
 
+export interface AffectedEntities {
+  trackIds: string[];
+  segmentIds: string[];
+  modifiedPaths: string[];
+}
+
 export interface HistoryStatus {
   projectId: string;
   canUndo: boolean;
@@ -23,6 +29,7 @@ export interface TimelineHistoryResponse {
   success: boolean;
   status: HistoryStatus;
   tracks?: AudioTrack[] | null;
+  affectedEntities?: AffectedEntities | null;
   appliedAction?: string | null;
 }
 

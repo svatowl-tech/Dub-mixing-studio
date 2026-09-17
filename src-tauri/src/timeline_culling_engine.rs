@@ -221,12 +221,16 @@ fn create_synthetic_mipmap(peaks: &[f32], duration_seconds: f64) -> WaveformMipm
     let lod_100x = downsample_peaks(&lod_10x, 10);
     let lod_1000x = downsample_peaks(&lod_100x, 10);
 
+    let total_samples = (dur * sr as f64).round() as u64;
+
     WaveformMipmap {
+        sample_rate: sr,
+        total_samples,
+        duration_seconds: dur,
         lod_1x,
         lod_10x,
         lod_100x,
         lod_1000x,
-        sample_rate: sr,
     }
 }
 

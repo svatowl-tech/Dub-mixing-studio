@@ -1001,7 +1001,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
             for (const seg of segs) {
               const inPath = seg.filePath;
-              if (inPath && !inPath.startsWith('blob:') && !inputPathStartsWithData(inPath)) {
+              if (inPath && !inPath.startsWith('blob:') && !inPath.startsWith('data:')) {
                 try {
                   console.log(`[MixingPanel] Вызов process_denoise для: ${inPath}`);
                   const rep = await invoke<DenoiseReport>('process_denoise', {

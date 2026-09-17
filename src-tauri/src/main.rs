@@ -249,7 +249,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
+        .setup(move |app| {
             log_debug("--- APPLICATION STARTUP ---");
             let app_handle = app.handle().clone();
             
@@ -342,11 +342,12 @@ fn main() {
             let db_path = app_data_dir.join("dev.db");
             let db_path_str = db_path.to_string_lossy().to_string();
 
+            let app_handle_db = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 // Initialize database asynchronously 
                 match init_db(&db_path_str).await {
                     Ok(pool) => {
-                        let state = app_handle.state::<AppState>();
+                        let state = app_handle_db.state::<AppState>();
                         let mut db_lock = state.db.lock().await;
                         *db_lock = Some(pool);
                         println!("SQLx Database initialized successfully at {}", db_path_str);

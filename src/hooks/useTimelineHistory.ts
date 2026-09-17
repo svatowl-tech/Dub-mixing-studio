@@ -1,22 +1,46 @@
+// ============================================================================
+// DUB MIXING STUDIO PRO - REACT HOOK FOR SQLITE TIMELINE HISTORY
+// ============================================================================
+// Архитектура:
+// 1. Нулевой оверхед памяти в браузере/рендерере: массивы треков и клипов не
+//    дублируются в JS-стеках.
+// 2. Все изменения передаются на бэкенд в SQLite дельта-движок (JSON-Patch).
+// 3. Откат/повтор запрашивает вычисленное состояние и список затронутых сущностей.
+// 4. Поддержка глобальных клавиатурных сочетаний (Ctrl+Z / Cmd+Z, Ctrl+Y / Cmd+Shift+Z).
+// ============================================================================
+
 import { useCallback, useRef, useState, useEffect, Dispatch, SetStateAction } from 'react';
 import { Project, AudioTrack } from '../types';
 import { playbackEngine } from '../services/playbackEngine';
-import { TimelineHistoryService } from '../services/timelineHistoryService';
+import { TimelineHistoryService, HistoryStatus, AffectedEntities } from '../services/timelineHistoryService';
+
+export interface UseTimelineHistoryReturn {
+  saveSnapshot: (actionDescription?: string) => void;
+  undo: () => Promise<void>;
+  redo: () => Promise<void>;
+  canUndo: boolean;
+  canRedo: boolean;
+  undoDescription: string | null;
+  redoDescription: string | null;
+  totalUndoSteps: number;
+  totalRedoSteps: number;
+  isProcessingHistory: boolean;
+}
 
 /**
- * Высокопроизводительный хук истории действий на таймлайне.
- * Ликвидирует хранение сотен тяжелых клонов массивов AudioTrack в памяти JS!
- * Все состояния сохраняются и извлекаются в виде прямых и обратных дельта-патчей
- * (RFC 6902 JSON Patch) в SQLite таблице `timeline_history` на бэкенде.
+ * Высокопроизводительный минималистичный React-хук для работы с нативной историей в SQLite.
  */
 export function useTimelineHistory(
   project: Project | null,
   setProject: Dispatch<SetStateAction<Project | null>>
-) {
+): UseTimelineHistoryReturn {
   const [canUndo, setCanUndo] = useState<boolean>(false);
   const [canRedo, setCanRedo] = useState<boolean>(false);
   const [undoDescription, setUndoDescription] = useState<string | null>(null);
   const [redoDescription, setRedoDescription] = useState<string | null>(null);
+  const [totalUndoSteps, setTotalUndoSteps] = useState<number>(0);
+  const [totalRedoSteps, setTotalRedoSteps] = useState<number>(0);
+  const [isProcessingHistory, setIsProcessingHistory] = useState<boolean>(false);
 
   const isPerformingUndoRedoRef = useRef<boolean>(false);
   const projectRef = useRef<Project | null>(project);
@@ -24,7 +48,17 @@ export function useTimelineHistory(
 
   const initializedProjectIdRef = useRef<string | null>(null);
 
-  // При открытии/смене проекта инициализируем базовое состояние в SQLite
+  // Обновление локальных флагов доступности истории
+  const updateStatus = useCallback((status: HistoryStatus) => {
+    setCanUndo(status.canUndo);
+    setCanRedo(status.canRedo);
+    setUndoDescription(status.undoActionDescription || null);
+    setRedoDescription(status.redoActionDescription || null);
+    setTotalUndoSteps(status.totalUndoSteps);
+    setTotalRedoSteps(status.totalRedoSteps);
+  }, []);
+
+  // Инициализация базового снимка в SQLite при открытии нового проекта
   useEffect(() => {
     if (!project || !project.id) {
       initializedProjectIdRef.current = null;
@@ -32,6 +66,8 @@ export function useTimelineHistory(
       setCanRedo(false);
       setUndoDescription(null);
       setRedoDescription(null);
+      setTotalUndoSteps(0);
+      setTotalRedoSteps(0);
       return;
     }
 
@@ -43,9 +79,11 @@ export function useTimelineHistory(
           setCanRedo(false);
           setUndoDescription(null);
           setRedoDescription(null);
+          setTotalUndoSteps(0);
+          setTotalRedoSteps(0);
         })
         .catch(err => {
-          console.warn('[useTimelineHistory] Failed to init base state in SQLite:', err);
+          console.warn('[useTimelineHistory] Init base state error in SQLite:', err);
         });
     }
   }, [project?.id]);
@@ -55,86 +93,112 @@ export function useTimelineHistory(
     const currentProj = projectRef.current;
     if (!currentProj || !currentProj.id || isPerformingUndoRedoRef.current) return;
 
-    // Формируем человекочитаемое описание действия
+    // Форматируем читаемое описание действия (Сдвиг клипа, Разрез, Изменение громкости и т.д.)
     const description = (actionDescOrTargetId && !actionDescOrTargetId.startsWith('track-') && !actionDescOrTargetId.startsWith('seg-'))
       ? actionDescOrTargetId
-      : 'Timeline modification';
+      : 'Модификация таймлайна';
 
     TimelineHistoryService.recordAction(currentProj.id, description, currentProj.tracks)
       .then(status => {
-        setCanUndo(status.canUndo);
-        setCanRedo(status.canRedo);
-        setUndoDescription(status.undoActionDescription || null);
-        setRedoDescription(status.redoActionDescription || null);
+        updateStatus(status);
       })
       .catch(err => {
-        console.warn('[useTimelineHistory] Failed to record action to SQLite:', err);
+        console.warn('[useTimelineHistory] Record action to SQLite failed:', err);
       });
-  }, []);
+  }, [updateStatus]);
 
-  // Выполнение отката (Undo) через дельта-хранилище SQLite
+  // Атомарный откат (Undo) через SQLite
   const undo = useCallback(async () => {
     const currentProj = projectRef.current;
     if (!currentProj || !currentProj.id || isPerformingUndoRedoRef.current) return;
 
     try {
       isPerformingUndoRedoRef.current = true;
+      setIsProcessingHistory(true);
       const response = await TimelineHistoryService.undo(currentProj.id);
 
       if (response.success && response.tracks) {
         const restoredTracks = response.tracks as AudioTrack[];
         setProject(prev => prev ? { ...prev, tracks: restoredTracks } : prev);
         playbackEngine.reconcile(restoredTracks);
-
-        setCanUndo(response.status.canUndo);
-        setCanRedo(response.status.canRedo);
-        setUndoDescription(response.status.undoActionDescription || null);
-        setRedoDescription(response.status.redoActionDescription || null);
+        updateStatus(response.status);
       }
     } catch (err) {
       console.warn('[useTimelineHistory] Undo failed:', err);
-      // Запрашиваем актуальный статус
       const status = await TimelineHistoryService.getStatus(currentProj.id);
-      setCanUndo(status.canUndo);
-      setCanRedo(status.canRedo);
+      updateStatus(status);
     } finally {
-      // Защитный интервал для предотвращения гонок
+      setIsProcessingHistory(false);
+      // Защитный интервал для предотвращения случайной перезаписи дельты
       setTimeout(() => {
         isPerformingUndoRedoRef.current = false;
       }, 50);
     }
-  }, [setProject]);
+  }, [setProject, updateStatus]);
 
-  // Выполнение повтора (Redo) через дельта-хранилище SQLite
+  // Атомарный повтор (Redo) через SQLite
   const redo = useCallback(async () => {
     const currentProj = projectRef.current;
     if (!currentProj || !currentProj.id || isPerformingUndoRedoRef.current) return;
 
     try {
       isPerformingUndoRedoRef.current = true;
+      setIsProcessingHistory(true);
       const response = await TimelineHistoryService.redo(currentProj.id);
 
       if (response.success && response.tracks) {
         const restoredTracks = response.tracks as AudioTrack[];
         setProject(prev => prev ? { ...prev, tracks: restoredTracks } : prev);
         playbackEngine.reconcile(restoredTracks);
-
-        setCanUndo(response.status.canUndo);
-        setCanRedo(response.status.canRedo);
-        setUndoDescription(response.status.undoActionDescription || null);
-        setRedoDescription(response.status.redoActionDescription || null);
+        updateStatus(response.status);
       }
     } catch (err) {
       console.warn('[useTimelineHistory] Redo failed:', err);
       const status = await TimelineHistoryService.getStatus(currentProj.id);
-      setCanUndo(status.canUndo);
-      setCanRedo(status.canRedo);
+      updateStatus(status);
     } finally {
+      setIsProcessingHistory(false);
       setTimeout(() => {
         isPerformingUndoRedoRef.current = false;
       }, 50);
     }
-  }, [setProject]);
+  }, [setProject, updateStatus]);
+
+  // Глобальные горячие клавиши (Ctrl+Z / Cmd+Z для Undo, Ctrl+Y / Cmd+Shift+Z для Redo)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Игнорируем нажатия внутри текстовых полей и редакторов
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+
+      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+      const isCmdOrCtrl = isMac ? e.metaKey : e.ctrlKey;
+
+      if (isCmdOrCtrl && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          // Redo: Cmd+Shift+Z / Ctrl+Shift+Z
+          if (canRedo) redo();
+        } else {
+          // Undo: Cmd+Z / Ctrl+Z
+          if (canUndo) undo();
+        }
+      } else if (isCmdOrCtrl && e.key.toLowerCase() === 'y') {
+        // Redo: Ctrl+Y
+        e.preventDefault();
+        if (canRedo) redo();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [canUndo, canRedo, undo, redo]);
 
   return {
     saveSnapshot,
@@ -144,5 +208,8 @@ export function useTimelineHistory(
     canRedo,
     undoDescription,
     redoDescription,
+    totalUndoSteps,
+    totalRedoSteps,
+    isProcessingHistory,
   };
 }

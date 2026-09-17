@@ -3,7 +3,7 @@
  * This helps in debugging file-related issues in both Tauri and Web environments.
  */
 
-type IOLayer = 'PROJECT' | 'MEDIA' | 'SUBTITLES' | 'EXPORT' | 'BRIDGE';
+type IOLayer = 'PROJECT' | 'MEDIA' | 'SUBTITLES' | 'EXPORT' | 'BRIDGE' | 'HISTORY';
 
 interface LogEntry {
   timestamp: string;

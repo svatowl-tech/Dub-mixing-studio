@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use dashmap::DashMap;
@@ -750,7 +750,7 @@ pub async fn download_ai_model(
 
     if success && temp_dest.exists() {
         // Переименовываем временный файл в итоговое имя модели
-        if let Err(e) = std::fs::rename(&temp_dest, &final_dest) {
+        if let Err(_e) = std::fs::rename(&temp_dest, &final_dest) {
             // Если rename между дисками не удался, пробуем копирование
             if let Err(copy_err) = std::fs::copy(&temp_dest, &final_dest) {
                 let err_msg = format!("Ошибка финализации файла модели: {}", copy_err);

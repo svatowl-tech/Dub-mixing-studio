@@ -1,23 +1,31 @@
 // ============================================================================
-// DUB MIXING STUDIO PRO - TIMELINE HISTORY ENGINE (RUST / SQLITE)
-// Модуль высокоскоростного дельта-хранилища Undo/Redo в SQLite.
-// Хранение истории действий в виде легковесных прямых и обратных патчей
-// (RFC 6902 JSON-Patch diff) с моментальным применением на уровне транзакций.
+// DUB MIXING STUDIO PRO - HIGH-PERFORMANCE SQLITE TIMELINE HISTORY ENGINE (RUST)
+// ============================================================================
+// Архитектура:
+// 1. Нулевой оверхед памяти в JS: все состояния и дельты хранятся в SQLite WAL.
+// 2. Дельта-хранилище: прямые (Redo) и обратные (Undo) патчи по стандарту RFC 6902 JSON Patch.
+// 3. Кольцевой буфер: автоматическое ограничение глубины стека до 200 шагов (триггер + транзакция).
+// 4. Атомарность: операции Undo/Redo выполняются в единой транзакции SQLite с возвратом
+//    восстановленного состояния и списка затронутых сущностей (AffectedEntities).
+// 5. Защита от сбоев: SQLite в режиме WAL (Write-Ahead Logging) гарантирует целостность
+//    стека отката даже при аварийном завершении приложения.
 // ============================================================================
 
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Pool, Row, Sqlite};
-use std::sync::Arc;
+use std::collections::HashSet;
 use tauri::{command, State};
 
 use crate::db::AppState;
-use crate::logger::{log_debug, log_error, log_info};
+use crate::logger::{log_debug, log_info};
 use crate::timeline_culling_engine::TimelineTrackData;
 
+/// Максимальный размер кольцевого буфера истории (согласно ТЗ: 200 шагов)
+pub const MAX_HISTORY_STEPS: i64 = 200;
+
 // ============================================================================
-// 1. DATA TRANSFER OBJECTS (DTOs & JSON-PATCH ENGINE)
+// 1. DATA TRANSFER OBJECTS (DTOs) & STRUCTURES
 // ============================================================================
 
 /// Запись в таблице `timeline_history`
@@ -32,7 +40,7 @@ pub struct TimelineHistoryEntry {
     pub created_at: String,
 }
 
-/// Статус стека истории проекта (для реактивного UI: кнопки, горячие клавиши)
+/// Статус стека истории проекта для реактивного интерфейса
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryStatus {
@@ -46,14 +54,25 @@ pub struct HistoryStatus {
     pub current_pointer_id: Option<i64>,
 }
 
+/// Список сущностей проекта, затронутых операцией Undo / Redo
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AffectedEntities {
+    pub track_ids: Vec<String>,
+    pub segment_ids: Vec<String>,
+    pub modified_paths: Vec<String>,
+}
+
 /// Ответ при выполнении Undo/Redo/Push
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineHistoryResponse {
     pub success: bool,
     pub status: HistoryStatus,
-    /// Восстановленное состояние дорожек таймлайна (если было применено)
+    /// Восстановленное состояние дорожек таймлайна
     pub tracks: Option<Vec<TimelineTrackData>>,
+    /// Затронутые дорожки и сегменты для избирательного ре-рендера
+    pub affected_entities: Option<AffectedEntities>,
     pub applied_action: Option<String>,
 }
 
@@ -82,12 +101,12 @@ pub struct JsonPatchOp {
 pub type JsonPatch = Vec<JsonPatchOp>;
 
 // ============================================================================
-// 2. ИНИЦИАЛИЗАЦИЯ И МИГРАЦИЯ ТАБЛИЦ ИСТОРИИ
+// 2. ИНИЦИАЛИЗАЦИЯ И МИГРАЦИЯ ТАБЛИЦ ИСТОРИИ В SQLITE
 // ============================================================================
 
-/// Создание таблицы timeline_history и указателя текущей позиции
+/// Создание таблицы timeline_history, указателя и кольцевого триггера
 pub async fn run_timeline_history_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
-    // 1. Основная таблица истории действий согласно ТЗ
+    // 1. Основная таблица истории действий (RFC 6902 дельты)
     sqlx::query("
         CREATE TABLE IF NOT EXISTS timeline_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,13 +118,13 @@ pub async fn run_timeline_history_migrations(pool: &Pool<Sqlite>) -> Result<(), 
         );
     ").execute(pool).await?;
 
-    // 2. Индекс по project_id для мгновенных выборок
+    // 2. Индекс для мгновенного поиска по проекту и хронологии
     sqlx::query("
         CREATE INDEX IF NOT EXISTS idx_timeline_history_project_id 
         ON timeline_history(project_id, id);
     ").execute(pool).await?;
 
-    // 3. Таблица указателя текущего состояния истории (Timeline History Pointer)
+    // 3. Таблица указателя текущего состояния истории проекта
     sqlx::query("
         CREATE TABLE IF NOT EXISTS timeline_history_state (
             project_id TEXT PRIMARY KEY,
@@ -115,12 +134,28 @@ pub async fn run_timeline_history_migrations(pool: &Pool<Sqlite>) -> Result<(), 
         );
     ").execute(pool).await?;
 
-    log_info("Timeline History SQLite migrations executed successfully.");
+    // 4. Триггер кольцевого буфера: автоматическая очистка записей старше 200 шагов
+    sqlx::query(&format!("
+        CREATE TRIGGER IF NOT EXISTS trg_timeline_history_ring_buffer
+        AFTER INSERT ON timeline_history
+        BEGIN
+            DELETE FROM timeline_history
+            WHERE project_id = NEW.project_id
+              AND id NOT IN (
+                  SELECT id FROM timeline_history
+                  WHERE project_id = NEW.project_id
+                  ORDER BY id DESC
+                  LIMIT {}
+              );
+        END;
+    ", MAX_HISTORY_STEPS)).execute(pool).await?;
+
+    log_info("Timeline History SQLite migrations (WAL + 200-step Ring Buffer) executed successfully.");
     Ok(())
 }
 
 // ============================================================================
-// 3. ВЫСОКОСКОРОСТНОЙ JSON-PATCH ДВИЖОК
+// 3. ВЫСОКОСКОРОСТНОЙ JSON-PATCH ДВИЖОК (RFC 6902 DIFF & APPLY)
 // ============================================================================
 
 /// Вычисляет двунаправленный RFC 6902 патч между двумя JSON-состояниями (old_val -> new_val).
@@ -147,7 +182,7 @@ fn diff_values(
 
     match (old_val, new_val) {
         (Value::Object(old_map), Value::Object(new_map)) => {
-            // Удаленные ключи
+            // Удаленные свойства
             for (key, val) in old_map {
                 let sub_path = format!("{}/{}", path, escape_json_pointer(key));
                 if !new_map.contains_key(key) {
@@ -166,7 +201,7 @@ fn diff_values(
                 }
             }
 
-            // Добавленные ключи
+            // Добавленные свойства
             for (key, val) in new_map {
                 let sub_path = format!("{}/{}", path, escape_json_pointer(key));
                 if !old_map.contains_key(key) {
@@ -185,7 +220,7 @@ fn diff_values(
                 }
             }
 
-            // Измененные общие ключи
+            // Измененные пересекающиеся свойства
             for (key, old_sub) in old_map {
                 if let Some(new_sub) = new_map.get(key) {
                     if old_sub != new_sub {
@@ -196,8 +231,7 @@ fn diff_values(
             }
         }
         (Value::Array(old_arr), Value::Array(new_arr)) => {
-            // Для массивов сегментов или дорожек: если длина совпадает или близка,
-            // оптимизируем по элементам, иначе заменяем массив целиком для надежности.
+            // Если длина массивов совпадает, проводим попарный diff элементов
             if old_arr.len() == new_arr.len() {
                 for i in 0..old_arr.len() {
                     let sub_path = format!("{}/{}", path, i);
@@ -206,7 +240,7 @@ fn diff_values(
                     }
                 }
             } else {
-                // Прямой Replace массива
+                // При изменении структуры/количества элементов заменяем срез массива
                 forward.push(JsonPatchOp {
                     op: PatchOpType::Replace,
                     path: path.to_string(),
@@ -222,7 +256,7 @@ fn diff_values(
             }
         }
         _ => {
-            // Примитивы: число, строка, булево
+            // Примитивы (числа, строки, булевы значения)
             forward.push(JsonPatchOp {
                 op: PatchOpType::Replace,
                 path: path.to_string(),
@@ -247,7 +281,7 @@ fn unescape_json_pointer(s: &str) -> String {
     s.replace("~1", "/").replace("~0", "~")
 }
 
-/// Применяет RFC 6902 JSON Patch к документу Value
+/// Применяет набор операций RFC 6902 JSON Patch к документу Value
 pub fn apply_json_patch(target: &mut Value, patch: &[JsonPatchOp]) -> Result<(), String> {
     for op in patch {
         match op.op {
@@ -445,11 +479,50 @@ fn patch_remove(target: &mut Value, path: &str) -> Result<Value, String> {
     }
 }
 
+/// Извлечение идентификаторов затронутых сущностей из JSON Patch операций и состояния
+pub fn extract_affected_entities(patch: &[JsonPatchOp], state: &Value) -> AffectedEntities {
+    let mut track_ids = HashSet::new();
+    let mut segment_ids = HashSet::new();
+    let mut modified_paths = Vec::new();
+
+    for op in patch {
+        modified_paths.push(op.path.clone());
+        let tokens = split_pointer(&op.path);
+
+        // Анализ пути: /0/segments/1/startTime или /tracks/0/segments/...
+        if !tokens.is_empty() {
+            if let Ok(track_idx) = tokens[0].parse::<usize>() {
+                if let Some(track_val) = state.get(track_idx) {
+                    if let Some(tid) = track_val.get("id").and_then(|v| v.as_str()) {
+                        track_ids.insert(tid.to_string());
+                    }
+
+                    if tokens.len() >= 3 && tokens[1] == "segments" {
+                        if let Ok(seg_idx) = tokens[2].parse::<usize>() {
+                            if let Some(seg_val) = track_val.get("segments").and_then(|s| s.get(seg_idx)) {
+                                if let Some(sid) = seg_val.get("id").and_then(|v| v.as_str()) {
+                                    segment_ids.insert(sid.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    AffectedEntities {
+        track_ids: track_ids.into_iter().collect(),
+        segment_ids: segment_ids.into_iter().collect(),
+        modified_paths,
+    }
+}
+
 // ============================================================================
 // 4. ТРАНЗАКЦИОННЫЙ UNDO / REDO ДВИЖОК ДЛЯ TIMELINE
 // ============================================================================
 
-/// Запись нового действия в историю с автоматическим вычислением дельты
+/// Запись нового действия в историю с автоматическим вычислением дельты в транзакции
 pub async fn record_timeline_action_internal(
     pool: &Pool<Sqlite>,
     project_id: &str,
@@ -458,7 +531,7 @@ pub async fn record_timeline_action_internal(
 ) -> Result<HistoryStatus, String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    // Получаем текущее состояние
+    // Получаем текущее сохраненное состояние проекта
     let state_row = sqlx::query("
         SELECT current_history_id, current_state_json
         FROM timeline_history_state
@@ -482,13 +555,13 @@ pub async fn record_timeline_action_internal(
         None => (None, Value::Array(Vec::new())),
     };
 
-    // Если состояние не изменилось - не плодим дубликат
+    // Защита от дубликатов: если состояние идентично, не создаем шаг
     if old_state_val == new_state_val {
         tx.rollback().await.map_err(|e| e.to_string())?;
         return get_timeline_history_status_internal(pool, project_id).await;
     }
 
-    // Если указатель был где-то в прошлом (после серии Undo), отсекаем ветку Redo
+    // Если указатель находился в прошлом (после цепочки Undo), отсекаем ветку Redo
     if let Some(pointer_id) = cur_hist_id {
         sqlx::query("DELETE FROM timeline_history WHERE project_id = ? AND id > ?")
             .bind(project_id)
@@ -497,7 +570,6 @@ pub async fn record_timeline_action_internal(
             .await
             .map_err(|e| e.to_string())?;
     } else {
-        // Если указатель пустой (были в самом начале)
         let count_row = sqlx::query("SELECT COUNT(*) as cnt FROM timeline_history WHERE project_id = ?")
             .bind(project_id)
             .fetch_one(&mut *tx)
@@ -513,12 +585,12 @@ pub async fn record_timeline_action_internal(
         }
     }
 
-    // Вычисляем прямую и обратную дельту (RFC 6902 Patch)
+    // Вычисляем прямую и обратную дельты (RFC 6902 Patch)
     let (undo_patch_ops, redo_patch_ops) = create_json_patch_diff(&old_state_val, &new_state_val);
     let undo_patch_str = serde_json::to_string(&undo_patch_ops).unwrap_or_else(|_| "[]".to_string());
     let redo_patch_str = serde_json::to_string(&redo_patch_ops).unwrap_or_else(|_| "[]".to_string());
 
-    // Вставляем запись в timeline_history
+    // Вставляем дельта-запись в таблицу истории
     let ins_res = sqlx::query("
         INSERT INTO timeline_history (project_id, action_description, undo_patch, redo_patch, created_at)
         VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
@@ -533,7 +605,7 @@ pub async fn record_timeline_action_internal(
 
     let new_history_id = ins_res.last_insert_rowid();
 
-    // Обновляем текущее состояние в timeline_history_state
+    // Обновляем указатель на последнее состояние
     sqlx::query("
         INSERT INTO timeline_history_state (project_id, current_history_id, current_state_json, updated_at)
         VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
@@ -549,8 +621,7 @@ pub async fn record_timeline_action_internal(
     .await
     .map_err(|e| e.to_string())?;
 
-    // Ограничиваем историю 100 действиями для экономии места
-    let max_history = 100i64;
+    // Принудительное ограничение кольцевого буфера на уровне транзакции (200 шагов)
     sqlx::query("
         DELETE FROM timeline_history 
         WHERE project_id = ? AND id NOT IN (
@@ -562,7 +633,7 @@ pub async fn record_timeline_action_internal(
     ")
     .bind(project_id)
     .bind(project_id)
-    .bind(max_history)
+    .bind(MAX_HISTORY_STEPS)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -577,14 +648,14 @@ pub async fn record_timeline_action_internal(
     get_timeline_history_status_internal(pool, project_id).await
 }
 
-/// Выполнение операции Undo
+/// Атомарная операция отката (Undo)
 pub async fn undo_timeline_action_internal(
     pool: &Pool<Sqlite>,
     project_id: &str,
 ) -> Result<TimelineHistoryResponse, String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    // Получаем текущую позицию
+    // Получаем текущую позицию указателя
     let state_row = sqlx::query("
         SELECT current_history_id, current_state_json
         FROM timeline_history_state
@@ -609,7 +680,7 @@ pub async fn undo_timeline_action_internal(
         None => return Err("Cannot undo: already at earliest state".to_string()),
     };
 
-    // Загружаем патч отката для target_id
+    // Загружаем обратный дельта-патч
     let entry_row = sqlx::query("
         SELECT id, action_description, undo_patch
         FROM timeline_history
@@ -635,11 +706,13 @@ pub async fn undo_timeline_action_internal(
     let mut current_val: Value = serde_json::from_str(&cur_state_json)
         .map_err(|e| format!("Failed to parse current state JSON: {}", e))?;
 
-    // Применяем откат
+    // Применяем откат состояния
     apply_json_patch(&mut current_val, &undo_ops)
         .map_err(|e| format!("Failed to apply undo patch: {}", e))?;
 
-    // Находим предыдущий id в timeline_history
+    let affected = extract_affected_entities(&undo_ops, &current_val);
+
+    // Находим предыдущий ID записи истории
     let prev_row = sqlx::query("
         SELECT id FROM timeline_history
         WHERE project_id = ? AND id < ?
@@ -655,7 +728,7 @@ pub async fn undo_timeline_action_internal(
     let prev_id: Option<i64> = prev_row.map(|r| r.get("id"));
     let updated_json = serde_json::to_string(&current_val).map_err(|e| e.to_string())?;
 
-    // Обновляем состояние указателя
+    // Атомарно смещаем указатель
     sqlx::query("
         UPDATE timeline_history_state
         SET current_history_id = ?, current_state_json = ?, updated_at = CURRENT_TIMESTAMP
@@ -684,11 +757,12 @@ pub async fn undo_timeline_action_internal(
         success: true,
         status,
         tracks: Some(restored_tracks),
+        affected_entities: Some(affected),
         applied_action: Some(action_description),
     })
 }
 
-/// Выполнение операции Redo
+/// Атомарная операция повтора (Redo)
 pub async fn redo_timeline_action_internal(
     pool: &Pool<Sqlite>,
     project_id: &str,
@@ -714,7 +788,7 @@ pub async fn redo_timeline_action_internal(
         None => return Err("No history initialized for this project".to_string()),
     };
 
-    // Ищем следующее действие вперед
+    // Находим следующую запись для наката
     let next_row = match cur_id {
         Some(id) => {
             sqlx::query("
@@ -760,13 +834,14 @@ pub async fn redo_timeline_action_internal(
     let mut current_val: Value = serde_json::from_str(&cur_state_json)
         .map_err(|e| format!("Failed to parse current state JSON: {}", e))?;
 
-    // Применяем прямой патч (Redo)
+    // Накатываем прямой патч
     apply_json_patch(&mut current_val, &redo_ops)
         .map_err(|e| format!("Failed to apply redo patch: {}", e))?;
 
+    let affected = extract_affected_entities(&redo_ops, &current_val);
     let updated_json = serde_json::to_string(&current_val).map_err(|e| e.to_string())?;
 
-    // Обновляем указатель на next_id
+    // Атомарно обновляем указатель
     sqlx::query("
         UPDATE timeline_history_state
         SET current_history_id = ?, current_state_json = ?, updated_at = CURRENT_TIMESTAMP
@@ -795,6 +870,7 @@ pub async fn redo_timeline_action_internal(
         success: true,
         status,
         tracks: Some(restored_tracks),
+        affected_entities: Some(affected),
         applied_action: Some(action_description),
     })
 }
@@ -816,7 +892,7 @@ pub async fn get_timeline_history_status_internal(
 
     let cur_id: Option<i64> = state_row.and_then(|r| r.get("current_history_id"));
 
-    // Количество шагов Undo и описание
+    // Количество шагов Undo и описание действия на вершине стека
     let (can_undo, total_undo, undo_desc) = match cur_id {
         Some(id) => {
             let row = sqlx::query("
@@ -846,7 +922,7 @@ pub async fn get_timeline_history_status_internal(
         None => (false, 0, None),
     };
 
-    // Количество шагов Redo и описание
+    // Количество шагов Redo и описание действия впереди
     let (can_redo, total_redo, redo_desc) = match cur_id {
         Some(id) => {
             let row = sqlx::query("
@@ -912,7 +988,7 @@ pub async fn get_timeline_history_status_internal(
     })
 }
 
-/// Инициализация начального состояния (без добавления в undo-стек)
+/// Инициализация начального состояния проекта в SQLite (без создания шага отката)
 pub async fn init_timeline_history_base_internal(
     pool: &Pool<Sqlite>,
     project_id: &str,
@@ -941,7 +1017,7 @@ pub async fn init_timeline_history_base_internal(
         .await
         .map_err(|e| e.to_string())?;
 
-    log_info(&format!("Timeline history initialized base state for project {}", project_id));
+    log_info(&format!("Timeline history initialized base state in SQLite for project {}", project_id));
     Ok(())
 }
 
@@ -987,7 +1063,7 @@ pub async fn redo_timeline_action(
     redo_timeline_action_internal(pool, &project_id).await
 }
 
-/// Запросить текущий статус Undo/Redo (canUndo, canRedo, descriptions)
+/// Запросить текущий статус Undo/Redo
 #[command]
 pub async fn get_timeline_history_status(
     state: State<'_, AppState>,
@@ -999,7 +1075,7 @@ pub async fn get_timeline_history_status(
     get_timeline_history_status_internal(pool, &project_id).await
 }
 
-/// Инициализация базового состояния (при загрузке или создании проекта)
+/// Инициализация базового состояния (при открытии проекта)
 #[command]
 pub async fn init_timeline_history_base(
     state: State<'_, AppState>,
@@ -1037,7 +1113,7 @@ pub async fn clear_timeline_history(
 }
 
 // ============================================================================
-// 6. МОДУЛЬНЫЕ ТЕСТЫ (RFC 6902, ДЕЛЬТА-ПАТЧИ, ТРАНЗАКЦИОННОСТЬ)
+// 6. МОДУЛЬНЫЕ ТЕСТЫ (RFC 6902, ДЕЛЬТА-ПАТЧИ, КОЛЬЦЕВОЙ БУФЕР)
 // ============================================================================
 
 #[cfg(test)]

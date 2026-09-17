@@ -38,6 +38,7 @@ use crate::vocal_bus::{process_vocal_bus_wav, VocalBusRackConfig};
 /// Фазы конвейера сведения звука
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
+#[allow(non_camel_case_types)]
 pub enum PipelinePhase {
     #[serde(rename = "Phase1_Preprocessing")]
     Phase1_Preprocessing = 1,
@@ -349,7 +350,7 @@ async fn run_native_pipeline(
                     "Шаг 1.1: Нормализация громкости",
                     12.0,
                     100.0,
-                    &format!("Нормализация завершена: {:.1} LUFS (Пик: {:.1} dBFS)", stats.final_lufs, stats.final_peak_db),
+                    &format!("Нормализация завершена: {:.1} LUFS (Пик: {:.1} dBFS)", stats.final_lufs, stats.final_true_peak_db),
                 );
             }
             Err(e) => {
@@ -447,7 +448,7 @@ async fn run_native_pipeline(
                     "Шаг 1.3: Удаление артефактов и кликов (De-Click)",
                     25.0,
                     100.0,
-                    &format!("Устранено {} щелчков в {} блоках Rayon", rep.clicks_detected, rep.blocks_processed),
+                    &format!("Устранено {} щелчков (восстановлено {} сэмплов)", rep.clicks_detected, rep.samples_restored),
                 );
             }
             Err(e) => {
@@ -590,7 +591,7 @@ async fn run_native_pipeline(
                         "Шаг 2.2: Smart Alignment (GCC-PHAT + DTW + WSOLA)",
                         55.0,
                         50.0,
-                        &format!("Коррекция задержки: {:.1} мс, растяжение: {:.2}x", analysis.time_shift_ms, analysis.average_stretch_ratio),
+                        &format!("Коррекция задержки: {:.1} мс, растяжение: {:.2}x", analysis.detected_lag_ms, analysis.average_stretch_ratio),
                     );
 
                     let stretched = wsola_time_stretch(&dub_audio.samples, analysis.average_stretch_ratio, dub_audio.sample_rate);
@@ -750,7 +751,7 @@ async fn run_native_pipeline(
                     "Шаг 4.1: Финальный EBU R128 мастеринг и 4x True-Peak лимитер",
                     98.0,
                     100.0,
-                    &format!("Мастеринг завершен: {:.1} LUFS, True-Peak: {:.2} dBTP (Ограничено пиков: {})", stats.final_integrated_lufs, stats.final_true_peak_db, stats.limiting_events_count),
+                    &format!("Мастеринг завершен: {:.1} LUFS, True-Peak: {:.2} dBTP (Ограничено пиков: {})", stats.final_integrated_lufs, stats.final_true_peak_dbtp, stats.total_limited_events),
                 );
             }
             Err(e) => {
