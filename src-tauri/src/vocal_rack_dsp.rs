@@ -963,7 +963,7 @@ impl ChannelStripRack {
     }
 
     /// Потоковая обработка аудио-буфера сэмплов (in-place)
-    pub fn process_buffer(&mut self, buffer: &mut [f32], _channels: usize, sample_rate: u32) {
+    pub fn process_buffer(&mut self, buffer: &mut [f32], channels: usize, sample_rate: u32) {
         if self.state.bypass_all || buffer.is_empty() {
             return;
         }
@@ -1090,7 +1090,7 @@ impl VocalRackManager {
     }
 
     /// Обработка аудио буфера для конкретной дорожки
-    pub fn process_track_audio(&self, track_id: &str, buffer: &mut [f32], _channels: usize, sample_rate: u32) {
+    pub fn process_track_audio(&self, track_id: &str, buffer: &mut [f32], channels: usize, sample_rate: u32) {
         if let Ok(mut racks) = self.racks.write() {
             if let Some(rack) = racks.get_mut(track_id) {
                 rack.process_buffer(buffer, channels, sample_rate);

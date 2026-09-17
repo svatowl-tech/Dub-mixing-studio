@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use ebur128::{EbuR128, Mode};
 use hound::{SampleFormat, WavReader};
-use rayon::prelude::*;
+
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
