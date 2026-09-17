@@ -499,7 +499,7 @@ pub async fn denoise_audio_task(
         let neural_attempt = (|| -> Result<(Vec<Vec<f32>>, String), String> {
             let (mut session, prov) = init_onnx_session(path)?;
             
-            let input_name = session.inputs.first()
+            let input_name = session.inputs().first()
                 .map(|inp| inp.name.clone())
                 .unwrap_or_else(|| "input".to_string());
 
@@ -510,27 +510,24 @@ pub async fn denoise_audio_task(
             let mut expected_time_steps = 256usize;
             let mut fft_len = FFT_SIZE;
 
-            if let Some(first_input) = session.inputs.first() {
-                if let ort::value::ValueType::Tensor { dimensions, .. } = &first_input.input_type {
-                    if dimensions.len() == 4 {
-                        if let Some(ch) = dimensions[1] {
-                            if ch > 0 { expected_channels = ch as usize; }
-                        }
-                        if let Some(f) = dimensions[2] {
-                            if f > 0 {
-                                expected_bins = f as usize;
-                                if expected_bins == 3072 {
-                                    fft_len = 6144;
-                                } else if expected_bins == 2048 {
-                                    fft_len = 4096;
-                                } else if expected_bins == 1025 {
-                                    fft_len = 2048;
-                                }
+            if let Some(first_input) = session.inputs().first() {
+                if let ort::value::ValueType::Tensor { shape, .. } = &first_input.input_type {
+                    if shape.len() == 4 {
+                        let ch = shape[1];
+                        if ch > 0 { expected_channels = ch as usize; }
+                        let f = shape[2];
+                        if f > 0 {
+                            expected_bins = f as usize;
+                            if expected_bins == 3072 {
+                                fft_len = 6144;
+                            } else if expected_bins == 2048 {
+                                fft_len = 4096;
+                            } else if expected_bins == 1025 {
+                                fft_len = 2048;
                             }
                         }
-                        if let Some(t) = dimensions[3] {
-                            if t > 0 { expected_time_steps = t as usize; }
-                        }
+                        let t = shape[3];
+                        if t > 0 { expected_time_steps = t as usize; }
                     }
                 }
             }

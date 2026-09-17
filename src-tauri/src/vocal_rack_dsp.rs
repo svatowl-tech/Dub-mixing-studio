@@ -11,13 +11,13 @@
 
 use std::collections::HashMap;
 use std::f32::consts::PI;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tauri::{command, AppHandle, State};
 
-use crate::logger::{log_debug, log_error, log_info};
+use crate::logger::log_info;
 use crate::vst_host::{PluginParameter, SharedVstHostState};
 
 // ============================================================================

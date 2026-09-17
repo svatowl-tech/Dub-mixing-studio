@@ -5,7 +5,7 @@
 // ============================================================================
 
 use std::collections::VecDeque;
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;

@@ -93,7 +93,7 @@ pub fn calculate_ebu_loudness(
     let duration_seconds = total_frames as f64 / sample_rate as f64;
 
     // Инициализация детектора EbuR128 со всеми режимами (M, S, I, LRA, True Peak)
-    let mode = Mode::MOMENTARY | Mode::SHORT_TERM | Mode::INTEGRATED | Mode::LOUDNESS_RANGE | Mode::TRUE_PEAK;
+    let mode = Mode::M | Mode::S | Mode::I | Mode::LRA | Mode::TRUE_PEAK;
     let mut ebu = EbuR128::new(channels as u32, sample_rate, mode)
         .map_err(|e| format!("Не удалось инициализировать EbuR128: {:?}", e))?;
 
@@ -234,7 +234,7 @@ impl RealtimeLoudnessMeter {
 
     /// Инициализация или сброс потокового измерителя под параметры аудиоустройства
     pub async fn reset(&self, channels: u16, sample_rate: u32) -> Result<(), String> {
-        let mode = Mode::MOMENTARY | Mode::SHORT_TERM | Mode::INTEGRATED | Mode::TRUE_PEAK;
+        let mode = Mode::M | Mode::S | Mode::I | Mode::TRUE_PEAK;
         let mut ebu = EbuR128::new(channels as u32, sample_rate, mode)
             .map_err(|e| format!("Ошибка сброса потокового EbuR128: {:?}", e))?;
 
@@ -352,7 +352,7 @@ pub async fn analyze_track_loudness(
         let mut reader = WavReader::open(path)
             .map_err(|e| format!("Ошибка открытия WAV файла: {}", e))?;
         let spec = reader.spec();
-        let samples_count = reader.duration() as usize * spec.channels as usize;
+        let _samples_count = reader.duration() as usize * spec.channels as usize;
 
         let samples_f32: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
             (SampleFormat::Float, 32) => reader

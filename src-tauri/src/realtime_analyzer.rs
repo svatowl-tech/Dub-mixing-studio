@@ -339,11 +339,11 @@ pub fn start_spectral_analyzer_worker(
             let start_instant = std::time::Instant::now();
 
             // Вычитываем все накопившиеся сэмплы из кольцевого буфера
-            let mut read_count = 0usize;
+            let mut _read_count = 0usize;
             while let Some(sample) = cons.pop() {
                 recent_samples_window.rotate_left(1);
                 recent_samples_window[FFT_SIZE - 1] = sample;
-                read_count += 1;
+                _read_count += 1;
             }
 
             // Копируем окно для БПФ анализа

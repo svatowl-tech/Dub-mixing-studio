@@ -5,19 +5,19 @@
 // ============================================================================
 
 use std::f32::consts::PI;
-use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use tauri::State;
 
 use crate::audio_buffer_manager::AudioBufferCache;
 use crate::db::AppState;
 use crate::file_io::normalize_windows_path;
-use crate::logger::{log_debug, log_error, log_info};
+use crate::logger::log_info;
 
 // ============================================================================
 // МОДЕЛИ ДАННЫХ И ПАРАМЕТРЫ ДАККИНГА
@@ -357,13 +357,24 @@ pub async fn apply_adaptive_ducking(
     let db_mutex = db_state.db.lock().await;
     let pool = db_mutex.as_ref().ok_or("База данных не инициализирована")?;
 
-    let tracks = sqlx::query!(
-        "SELECT id, name FROM tracks WHERE project_id = ?",
-        project_id
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Ошибка загрузки треков: {}", e))?;
+    struct TrackItem {
+        id: String,
+        name: String,
+    }
+
+    let track_rows = sqlx::query("SELECT id, name FROM tracks WHERE project_id = ?")
+        .bind(&project_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Ошибка загрузки треков: {}", e))?;
+
+    let tracks: Vec<TrackItem> = track_rows
+        .into_iter()
+        .map(|r| TrackItem {
+            id: r.get("id"),
+            name: r.get("name"),
+        })
+        .collect();
 
     // Находим дорожку M&E (Music & Effects / Background) и дорожки дубляжа
     let me_track = tracks
@@ -377,27 +388,59 @@ pub async fn apply_adaptive_ducking(
 
     let me_track_id = me_track.id.clone();
 
+    struct VoiceSegItem {
+        start_time: f64,
+        duration: f64,
+        file_path: Option<String>,
+    }
+
     // 2. Считываем все сегменты актерской речи со всех остальных дорожек проекта
-    let voice_segments = sqlx::query!(
+    let voice_rows = sqlx::query(
         "SELECT s.start_time, s.duration, s.file_path FROM segments s
          JOIN tracks t ON s.track_id = t.id
          WHERE t.project_id = ? AND t.id != ?",
-        project_id,
-        me_track_id
     )
+    .bind(&project_id)
+    .bind(&me_track_id)
     .fetch_all(pool)
     .await
     .map_err(|e| format!("Ошибка загрузки голосовых сегментов: {}", e))?;
 
+    let voice_segments: Vec<VoiceSegItem> = voice_rows
+        .into_iter()
+        .map(|r| VoiceSegItem {
+            start_time: r.get("start_time"),
+            duration: r.get("duration"),
+            file_path: r.get("file_path"),
+        })
+        .collect();
+
+    struct MeSegItem {
+        id: String,
+        start_time: f64,
+        duration: f64,
+        file_path: Option<String>,
+    }
+
     // 3. Считываем сегменты фоновой дорожки M&E
-    let me_segments = sqlx::query!(
+    let me_rows = sqlx::query(
         "SELECT s.id, s.start_time, s.duration, s.file_path FROM segments s
          WHERE s.track_id = ?",
-        me_track_id
     )
+    .bind(&me_track_id)
     .fetch_all(pool)
     .await
     .map_err(|e| format!("Ошибка загрузки M&E сегментов: {}", e))?;
+
+    let me_segments: Vec<MeSegItem> = me_rows
+        .into_iter()
+        .map(|r| MeSegItem {
+            id: r.get("id"),
+            start_time: r.get("start_time"),
+            duration: r.get("duration"),
+            file_path: r.get("file_path"),
+        })
+        .collect();
 
     if me_segments.is_empty() {
         return Err("На целевой дорожке M&E отсутствуют аудио-сегменты".to_string());
@@ -505,14 +548,12 @@ pub async fn apply_adaptive_ducking(
     let ducked_path_str = ducked_output_path.to_string_lossy().to_string();
 
     // Обновляем ссылку на файл в БД для M&E сегмента
-    sqlx::query!(
-        "UPDATE segments SET file_path = ? WHERE id = ?",
-        ducked_path_str,
-        target_me_seg.id
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Ошибка обновления БД: {}", e))?;
+    sqlx::query("UPDATE segments SET file_path = ? WHERE id = ?")
+        .bind(&ducked_path_str)
+        .bind(&target_me_seg.id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Ошибка обновления БД: {}", e))?;
 
     // Очищаем закэшированный старый буфер в памяти
     cache_state.remove(&norm_me_path);
