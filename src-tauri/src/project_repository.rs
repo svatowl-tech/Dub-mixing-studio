@@ -211,6 +211,13 @@ pub async fn run_project_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Err
         );
     ").execute(pool).await?;
 
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN track_type TEXT NOT NULL DEFAULT 'Dub';").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN volume REAL NOT NULL DEFAULT 1.0;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN pan REAL NOT NULL DEFAULT 0.0;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN is_muted BOOLEAN NOT NULL DEFAULT 0;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN is_solo BOOLEAN NOT NULL DEFAULT 0;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN order_index INTEGER NOT NULL DEFAULT 0;").execute(pool).await;
+
     // 3. Таблица аудио-клипов
     sqlx::query("
         CREATE TABLE IF NOT EXISTS audio_clips (
@@ -226,18 +233,29 @@ pub async fn run_project_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Err
         );
     ").execute(pool).await?;
 
+    let _ = sqlx::query("ALTER TABLE audio_clips ADD COLUMN source_offset_ms REAL NOT NULL DEFAULT 0.0;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE audio_clips ADD COLUMN gain_db REAL NOT NULL DEFAULT 0.0;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE audio_clips ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE audio_clips ADD COLUMN backstage_video_path TEXT;").execute(pool).await;
+
     // 4. Таблица субтитров
     sqlx::query("
         CREATE TABLE IF NOT EXISTS subtitles (
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            character_name TEXT NOT NULL,
-            text TEXT NOT NULL,
-            start_time_ms REAL NOT NULL,
-            end_time_ms REAL NOT NULL,
+            character_name TEXT NOT NULL DEFAULT '',
+            text TEXT NOT NULL DEFAULT '',
+            start_time_ms REAL NOT NULL DEFAULT 0.0,
+            end_time_ms REAL NOT NULL DEFAULT 0.0,
             matched_clip_id TEXT
         );
     ").execute(pool).await?;
+
+    let _ = sqlx::query("ALTER TABLE subtitles ADD COLUMN character_name TEXT NOT NULL DEFAULT '';").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE subtitles ADD COLUMN text TEXT NOT NULL DEFAULT '';").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE subtitles ADD COLUMN start_time_ms REAL NOT NULL DEFAULT 0.0;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE subtitles ADD COLUMN end_time_ms REAL NOT NULL DEFAULT 0.0;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE subtitles ADD COLUMN matched_clip_id TEXT;").execute(pool).await;
 
     // 5. Таблица пресетов рэков
     sqlx::query("

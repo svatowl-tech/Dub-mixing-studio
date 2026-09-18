@@ -85,6 +85,7 @@ import { AudioDspService } from '../services/audioDspService';
 import { PipelineExecutionService } from '../services/pipelineExecutionService';
 import { useUIState } from '../contexts/UIContext';
 import { AIModelService } from '../services/aiModelService';
+import { ModelSelector } from './ModelSelector';
 import { MixingStepSettingsModal } from './MixingStepSettingsModal';
 import { ConflictDetectionPanel } from './ConflictDetectionPanel';
 import { MixingAuditLogModal } from './MixingAuditLogModal';
@@ -4024,28 +4025,20 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
                               />
                             </div>
-                            <div className="space-y-1">
-                              <label className="text-[10px] text-zinc-500 uppercase font-black block">Модель шумоподавления</label>
-                              <select 
+                             <div className="space-y-1">
+                              <ModelSelector
+                                category="denoise"
+                                label="Модель шумоподавления"
                                 value={activePreset.phase1.denoise.model}
-                                onChange={(e) => updatePhase1({
-                                  denoise: { ...activePreset.phase1.denoise, model: e.target.value as any }
+                                onChange={(val) => updatePhase1({
+                                  denoise: { ...activePreset.phase1.denoise, model: val as any }
                                 })}
-                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 mb-2 font-mono"
-                              >
-                                <optgroup label="⚡ Встроенные (DSP / Оффлайн без ИИ)">
-                                  <option value="spectral_gate">Спектральный гейт (AFFTDN - DSP)</option>
-                                  <option value="deep_noise">Deep Denoise (RNNoise DSP)</option>
-                                  <option value="intel_ai_denoise">Intel Voice Clean (Экспандер DSP)</option>
-                                </optgroup>
-                                <optgroup label="🧠 VR / AI Архитектура (Требуют загрузки в Настройках)">
-                                  <option value="uvr_denoise_foxjoy">VR-DeNoise FoxJoy (Вокал / Речь)</option>
-                                  <option value="deepfilternet3">DeepFilterNet 3 (Full-band 48kHz HQ)</option>
-                                  <option value="uvr_denoise_lite">VR-DeNoise Lite (Быстрая очистка)</option>
-                                  <option value="uvr_denoise_full">VR-DeNoise Full (Глубокое подавление)</option>
-                                  <option value="cascade_net">Cascade-Net Dual Denoise (Двухкаскадный)</option>
-                                </optgroup>
-                              </select>
+                                builtInOptions={[
+                                  { id: 'spectral_gate', name: 'Спектральный гейт (AFFTDN - DSP)' },
+                                  { id: 'deep_noise', name: 'Deep Denoise (RNNoise DSP)' },
+                                  { id: 'intel_ai_denoise', name: 'Intel Voice Clean (Экспандер DSP)' }
+                                ]}
+                              />
                             </div>
                             {renderProcessingActions('denoise', 'Подавить шум', 'bg-teal-600 hover:bg-teal-500')}
                           </div>
@@ -4078,26 +4071,19 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                             </div>
                             
                             <div className="space-y-1 mb-2">
-                              <label className="text-[10px] text-zinc-500 uppercase font-black block">Алгоритм</label>
-                              <select 
+                              <ModelSelector
+                                category="dereverb"
+                                label="Алгоритм dereverb"
                                 value={activePreset.phase1.dereverb.model}
-                                onChange={(e) => updatePhase1({
-                                  dereverb: { ...activePreset.phase1.dereverb, model: e.target.value as any }
+                                onChange={(val) => updatePhase1({
+                                  dereverb: { ...activePreset.phase1.dereverb, model: val as any }
                                 })}
-                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-mono"
-                              >
-                                <optgroup label="⚡ Встроенные (DSP / Оффлайн без ИИ)">
-                                  <option value="rt_dereverb_v2">RT_Dereverb v2 (DSP спектральное вычитание)</option>
-                                  <option value="room_cleaner_neural">Neural Room Cleaner (Резонансы DSP)</option>
-                                  <option value="adaptive_gate">Адаптивный гейт (Transient Gate DSP)</option>
-                                </optgroup>
-                                <optgroup label="🧠 VR / MDX Архитектура (Требуют загрузки в Настройках)">
-                                  <option value="reverb_foxjoy">UVR Reverb FoxJoy HQ (Де-реверберация)</option>
-                                  <option value="mdx_dereverb_room">MDX-Net Dereverb Room (Акустические комнаты)</option>
-                                  <option value="uvr_deecho_normal">VR-DeEcho Normal (Мягкая очистка)</option>
-                                  <option value="uvr_deecho_aggressive">VR-DeEcho Aggressive (Глубокое подавление)</option>
-                                </optgroup>
-                              </select>
+                                builtInOptions={[
+                                  { id: 'rt_dereverb_v2', name: 'RT_Dereverb v2 (DSP спектральное вычитание)' },
+                                  { id: 'room_cleaner_neural', name: 'Neural Room Cleaner (Резонансы DSP)' },
+                                  { id: 'adaptive_gate', name: 'Адаптивный гейт (Transient Gate DSP)' }
+                                ]}
+                              />
                             </div>
                             {renderProcessingActions('dereverb', 'Убрать эхо', 'bg-purple-600 hover:bg-purple-500')}
                           </div>
@@ -4354,33 +4340,22 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                               </div>
                             )}
 
-                            {/* Model selection */}
+                             {/* Model selection */}
                             <div className="space-y-1">
-                              <label className="text-[10px] text-zinc-500 uppercase font-black block">Модель разделения (UVR5 / Demucs)</label>
-                              <select 
+                              <ModelSelector
+                                category="separation"
+                                label="Модель разделения (UVR5 / Demucs / RoFormer)"
                                 value={activePreset.phase1.sourceSeparation.model}
-                                onChange={(e) => {
-                                  const modelVal = e.target.value;
+                                onChange={(modelVal) => {
                                   updatePhase1({
                                     sourceSeparation: { ...activePreset.phase1.sourceSeparation, model: modelVal as any }
                                   });
                                   setSelectedSeparatorModel(modelVal);
                                 }}
-                                className="w-full bg-zinc-950 border border-white/10 rounded-lg p-2 text-xs text-zinc-300 font-mono"
-                              >
-                                <optgroup label="🧠 Нейросети UVR5 / Demucs / RoFormer (Требуют загрузки)">
-                                  <option value="UVR-MDX-NET-Voc_FT.onnx">UVR MDX-Net Vocals (FT ONNX - Чистый голос)</option>
-                                  <option value="mel_band_roformer_vocals">Mel-Band RoFormer Vocals (SOTA вокал)</option>
-                                  <option value="htdemucs_ft">HTDemucs FT (Demucs v4 Fine-Tuned)</option>
-                                  <option value="htdemucs">htdemucs (Demucs v4 - Вокал / Музыка)</option>
-                                  <option value="htdemucs_vocals_bgm">htdemucs_vocals_bgm (Вокал + BGM)</option>
-                                  <option value="MDX23C-8Step-VocFT.onnx">MDX23C 8-Step Vocal FT (Премиум вокал)</option>
-                                  <option value="5_HP-Karaoke-UVR.onnx">5_HP Karaoke UVR (Караоке / Шумы)</option>
-                                </optgroup>
-                                <optgroup label="⚡ Быстрые DSP алгоритмы без ИИ (Фоллбэк)">
-                                  <option value="fast_dsp_splitter">Быстрый стерео/фазовый сплиттер (DSP)</option>
-                                </optgroup>
-                              </select>
+                                builtInOptions={[
+                                  { id: 'fast_dsp_splitter', name: 'Быстрый стерео/фазовый сплиттер (DSP)' }
+                                ]}
+                              />
                             </div>
 
                             {/* Audio File Source Selection */}
@@ -5300,20 +5275,14 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                             </p>
                             <div className="grid grid-cols-2 gap-2">
                               <div className="space-y-1">
-                                <label className="text-[10px] text-zinc-500 uppercase font-black block">Модель GGML</label>
-                                <select
-                                  value={activePreset.phase2.whisper?.model || 'whisper-base'}
-                                  onChange={(e) => updatePhase2({
-                                    whisper: { ...activePreset.phase2.whisper, model: e.target.value as any }
+                                <ModelSelector
+                                  category="whisper"
+                                  label="Модель GGML"
+                                  value={activePreset.phase2.whisper?.model || 'whisper_base'}
+                                  onChange={(val) => updatePhase2({
+                                    whisper: { ...activePreset.phase2.whisper, model: val as any }
                                   })}
-                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
-                                >
-                                  <option value="whisper-tiny">Tiny (GGML ~75 MB)</option>
-                                  <option value="whisper-base">Base (GGML ~140 MB)</option>
-                                  <option value="whisper-small">Small (GGML ~460 MB)</option>
-                                  <option value="whisper-medium">Medium (GGML ~1.5 GB)</option>
-                                  <option value="whisper-large-v3">Large-v3 (GGML ~3 GB)</option>
-                                </select>
+                                />
                               </div>
                               <div className="space-y-1">
                                 <label className="text-[10px] text-zinc-500 uppercase font-black block">Язык</label>

@@ -852,15 +852,11 @@ export class PlaybackEngine {
       this.videoGain.gain.setTargetAtTime(targetVolume, now, 0.03);
     }
 
-    if (this.boundVideoElement && !this.videoSource) {
-      const isOriginalActive = anySolo 
-        ? (originalTrack?.isSolo || false) 
-        : !(originalTrack?.isMuted || false);
-      const targetVolume = isOriginalActive ? (originalTrack?.volume ?? 1) : 0;
-      const isMutedByMaster = originalTrack?.isMuted || false;
-      
-      this.boundVideoElement.volume = targetVolume;
-      this.boundVideoElement.muted = targetVolume === 0 || isMutedByMaster;
+    if (this.boundVideoElement) {
+      // Prevent double audio playback by keeping the HTML video element muted.
+      // Audio for the original track is routed and controlled via timeline track segments.
+      this.boundVideoElement.volume = 0;
+      this.boundVideoElement.muted = true;
     }
 
     if (this.referenceGain) {
@@ -871,15 +867,10 @@ export class PlaybackEngine {
       this.referenceGain.gain.setTargetAtTime(targetVolume, now, 0.03);
     }
 
-    if (this.boundReferenceElement && !this.referenceSource) {
-      const isRefActive = anySolo
-        ? (referenceTrack?.isSolo || false)
-        : !(referenceTrack?.isMuted || false);
-      const targetVolume = isRefActive ? (referenceTrack?.volume ?? 1) : 0;
-      const isMutedByMaster = referenceTrack?.isMuted || false;
-      
-      this.boundReferenceElement.volume = targetVolume;
-      this.boundReferenceElement.muted = targetVolume === 0 || isMutedByMaster;
+    if (this.boundReferenceElement) {
+      // Prevent double audio playback by keeping the HTML reference audio element muted.
+      this.boundReferenceElement.volume = 0;
+      this.boundReferenceElement.muted = true;
     }
 
     const activeTracks = anySolo 

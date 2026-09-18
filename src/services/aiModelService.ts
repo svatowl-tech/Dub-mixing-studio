@@ -97,6 +97,58 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     is_installed: false
   },
   {
+    id: 'htdemucs',
+    name: 'HTDemucs v4 Standard',
+    filename: 'htdemucs.yaml',
+    category: 'separation',
+    description: 'Стандартная универсальная модель Demucs для быстрого разделения трека.',
+    size_mb: 79.8,
+    recommended_for: 'Универсальное разделение мультфильмов и сериалов',
+    urls: [
+      'https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs.yaml'
+    ],
+    is_installed: false
+  },
+  {
+    id: 'htdemucs_vocals_bgm',
+    name: 'HTDemucs Vocals + BGM',
+    filename: 'htdemucs_vocals_bgm.yaml',
+    category: 'separation',
+    description: 'Оптимизированная версия Demucs для быстрой изоляции вокала от фона.',
+    size_mb: 79.8,
+    recommended_for: 'Экспресс-разделение дубляжа и фоновой музыки',
+    urls: [
+      'https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs_ft.yaml'
+    ],
+    is_installed: false
+  },
+  {
+    id: 'mdx23c_8step',
+    name: 'MDX23C 8-Step Vocal FT',
+    filename: 'MDX23C-8Step-VocFT.onnx',
+    category: 'separation',
+    description: 'Высокоточная модель MDX23C для удаления инструментала и бэк-вокала.',
+    size_mb: 115.0,
+    recommended_for: 'Вокальные треки с плотным инструментальным сопровождением',
+    urls: [
+      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDX23C/MDX23C-8Step-VocFT.onnx'
+    ],
+    is_installed: false
+  },
+  {
+    id: 'hp_karaoke_uvr',
+    name: '5_HP Karaoke UVR',
+    filename: '5_HP-Karaoke-UVR.onnx',
+    category: 'separation',
+    description: 'Специализированный алгоритм извлечения чистого минуса и караоке.',
+    size_mb: 60.5,
+    recommended_for: 'Создание качественной фонограммы без остатков бэк-вокала',
+    urls: [
+      'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/5_HP-Karaoke-UVR.onnx'
+    ],
+    is_installed: false
+  },
+  {
     id: 'mel_band_roformer_vocals',
     name: 'Mel-Band Roformer Vocals',
     filename: 'mel_band_roformer_vocals_fv2.ckpt',
@@ -185,15 +237,16 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
 
   // 3. Denoise
   {
-    id: 'uvr_denoise',
-    name: 'UVR DeNoise HQ',
-    filename: 'UVR-DeNoise.pth',
+    id: 'uvr_denoise_foxjoy',
+    name: 'VR-DeNoise FoxJoy (Вокал / Речь)',
+    filename: 'VR-DeNoise-FoxJoy.onnx',
     category: 'denoise',
-    description: 'Глубокое нейросетевое шумоподавление фонового гула, шума вентиляторов и шипения.',
+    description: 'Флагманская модель FoxJoy для глубокой очистки речевого вокала от фонового шума.',
     size_mb: 44.8,
-    recommended_for: 'Основное шумоподавление при подготовке вокала к сведению',
+    recommended_for: 'Основной выбор для профессиональной очистки дикторских дорожек',
     urls: [
-      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth'
+      'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/VR-DeNoise-FoxJoy.onnx',
+      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/VR-DeNoise-FoxJoy.onnx'
     ],
     is_installed: false
   },
@@ -207,6 +260,58 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     recommended_for: 'Быстрая высококачественная очистка речи без металлического призвука',
     urls: [
       'https://huggingface.co/niobures/DeepFilterNet/resolve/main/models/onnx/Audio-Cleaner/df_dec.onnx'
+    ],
+    is_installed: false
+  },
+  {
+    id: 'uvr_denoise_full',
+    name: 'UVR-DeNoise Full (Глубокое подавление)',
+    filename: 'UVR-DeNoise-Full.onnx',
+    category: 'denoise',
+    description: 'Бескомпромиссная глубокая очистка сложного шипящего и гудящего шума.',
+    size_mb: 52.0,
+    recommended_for: 'Сильно зашумленные репортажные и архивные аудиозаписи',
+    urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise-Full.onnx'
+    ],
+    is_installed: false
+  },
+  {
+    id: 'uvr_denoise_lite',
+    name: 'VR-DeNoise Lite (Быстрая очистка)',
+    filename: 'UVR-DeNoise-Lite.onnx',
+    category: 'denoise',
+    description: 'Легкая модель для оперативного подавления постоянного шума с низким расходом ресурсов.',
+    size_mb: 28.5,
+    recommended_for: 'Быстрый рендеринг на слабых видеокартах и процессорах',
+    urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise-Lite.onnx'
+    ],
+    is_installed: false
+  },
+  {
+    id: 'cascade_net',
+    name: 'Cascade-Net Dual Denoise',
+    filename: 'cascade_net.onnx',
+    category: 'denoise',
+    description: 'Двухкаскадный нейрофильтр шума для тяжелых промышленных и уличных шумов.',
+    size_mb: 64.0,
+    recommended_for: 'Уличный шум, кондиционеры и толпа на заднем плане',
+    urls: [
+      'https://huggingface.co/niobures/DeepFilterNet/resolve/main/models/onnx/Audio-Cleaner/cascade_net.onnx'
+    ],
+    is_installed: false
+  },
+  {
+    id: 'uvr_denoise',
+    name: 'UVR DeNoise HQ',
+    filename: 'UVR-DeNoise.pth',
+    category: 'denoise',
+    description: 'Глубокое нейросетевое шумоподавление фонового гула, шума вентиляторов и шипения.',
+    size_mb: 44.8,
+    recommended_for: 'Основное шумоподавление при подготовке вокала к сведению',
+    urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth'
     ],
     is_installed: false
   },
@@ -275,6 +380,19 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     recommended_for: 'Точная укладка текста при дубляже документальных фильмов и диалогов',
     urls: [
       'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin'
+    ],
+    is_installed: false
+  },
+  {
+    id: 'whisper_medium',
+    name: 'Whisper Medium GGML',
+    filename: 'ggml-medium.bin',
+    category: 'whisper',
+    description: 'Высокоточная многоязычная модель для профессиональной расшифровки диалогов.',
+    size_mb: 1530.0,
+    recommended_for: 'Сложные звуковые дорожки со специфической лексикой',
+    urls: [
+      'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin'
     ],
     is_installed: false
   },
@@ -421,8 +539,29 @@ export class AIModelService {
     return this.cachedModels.filter((m) => m.category === category);
   }
 
+  public getModelInfo(idOrFilename: string): ModelCatalogItem | undefined {
+    if (!idOrFilename) return undefined;
+    const clean = idOrFilename.trim().toLowerCase().replace(/\.(onnx|pth|bin|ckpt|yaml)$/i, '').replace(/[-_]/g, '');
+    return this.cachedModels.find((m) => {
+      const mId = m.id.toLowerCase().replace(/[-_]/g, '');
+      const mFile = m.filename.toLowerCase().replace(/\.(onnx|pth|bin|ckpt|yaml)$/i, '').replace(/[-_]/g, '');
+      const mName = m.name.toLowerCase().replace(/[-_\s]/g, '');
+      return mId === clean || mFile === clean || clean === mId || clean === mFile || mName.includes(clean);
+    });
+  }
+
   public isModelInstalled(idOrFilename: string): boolean {
     if (!idOrFilename) return false;
+    const builtInDSP = [
+      'spectral_gate', 'deep_noise', 'intel_ai_denoise',
+      'rt_dereverb_v2', 'room_cleaner_neural', 'adaptive_gate',
+      'fast_dsp_splitter', 'vocal_spectral_matcher', 'vocal_timbre_transfer',
+      'web-stt', 'auto'
+    ];
+    if (builtInDSP.includes(idOrFilename.trim().toLowerCase())) {
+      return true;
+    }
+
     const clean = idOrFilename.trim().toLowerCase().replace(/\.(onnx|pth|bin|ckpt|yaml)$/i, '').replace(/[-_]/g, '');
     const item = this.cachedModels.find((m) => {
       const mId = m.id.toLowerCase().replace(/[-_]/g, '');

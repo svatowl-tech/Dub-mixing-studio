@@ -117,7 +117,8 @@ pub async fn export_all_stems(
             continue;
         }
         
-        let mut cmd = Command::new("ffmpeg");
+        let ffmpeg_bin = crate::file_io::find_ffmpeg_path();
+        let mut cmd = Command::new(&ffmpeg_bin);
         cmd.arg("-y");
         for seg in &valid_segments {
             let resolved_path = resolve_path(
@@ -356,7 +357,8 @@ pub async fn export_stems(
 
                 // --- FFmpeg Logic for Stem ---
                 // We use filter_complex to place each segment at its correct timeline position
-                let mut cmd = Command::new("ffmpeg");
+                let ffmpeg_bin = crate::file_io::find_ffmpeg_path();
+                let mut cmd = Command::new(&ffmpeg_bin);
                 cmd.arg("-y");
 
                 for seg in &valid_segments {
@@ -542,7 +544,7 @@ pub async fn export_audio(
             if trim_dur <= 0.0 {
                 // If trimmed duration is less than or equal to zero, segment is outside the timeline
                 // We generate a tiny silence file just to satisfy the next steps without crashing
-                Command::new("ffmpeg")
+                Command::new(crate::file_io::find_ffmpeg_path())
                     .arg("-y")
                     .arg("-f").arg("lavfi")
                     .arg("-i").arg("anullsrc=r=48000:cl=stereo:d=0.1")
@@ -587,7 +589,7 @@ pub async fn export_audio(
                 &out_path,
             );
             
-            let status = Command::new("ffmpeg")
+            let status = Command::new(crate::file_io::find_ffmpeg_path())
                 .arg("-y")
                 .arg("-i").arg(&resolved_path)
                 .arg("-af").arg(&filter)
@@ -676,7 +678,7 @@ pub async fn export_audio(
             chunk_args.push("48000".to_string());
             chunk_args.push(out_file.to_str().unwrap().to_string());
 
-            let status = Command::new("ffmpeg")
+            let status = Command::new(crate::file_io::find_ffmpeg_path())
                 .args(&chunk_args)
                 .output()
                 .await
@@ -871,7 +873,8 @@ pub async fn batch_export(
             }
 
             // 2. Build and run FFmpeg command for this replica
-            let mut cmd = Command::new("ffmpeg");
+            let ffmpeg_bin = crate::file_io::find_ffmpeg_path();
+            let mut cmd = Command::new(&ffmpeg_bin);
             cmd.arg("-y");
 
             // Base silence input
@@ -1083,7 +1086,8 @@ pub async fn export_backstage_video(
     final_audio_path: String,
     output_path: String,
 ) -> Result<String, String> {
-    let mut cmd = Command::new("ffmpeg");
+    let ffmpeg_bin = crate::file_io::find_ffmpeg_path();
+    let mut cmd = Command::new(&ffmpeg_bin);
     cmd.args(&[
         "-y",
         "-i", &main_video_path,

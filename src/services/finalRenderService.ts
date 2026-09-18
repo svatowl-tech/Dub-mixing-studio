@@ -29,6 +29,16 @@ export class FinalRenderService {
     if (isTauri && project.id) {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
+        
+        // Ensure the current project is saved to SQLite DB prior to native QA audit
+        try {
+          const { projectRepositoryService, convertProjectToFullPayload } = await import('./projectRepositoryService');
+          const payload = convertProjectToFullPayload(project);
+          await projectRepositoryService.saveProjectAtomic(payload, 'QA Audit Pre-Sync');
+        } catch (syncErr) {
+          console.warn('[QA Audit] Pre-sync project save warning:', syncErr);
+        }
+
         const report = await invoke<QaAuditReport>('run_project_qa_audit', { projectId: project.id });
         
         if (report) {

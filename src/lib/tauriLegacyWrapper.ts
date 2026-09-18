@@ -3,7 +3,7 @@ import { invoke, isTauri, convertFileSrc } from '@tauri-apps/api/core';
 import { open, save, message } from '@tauri-apps/plugin-dialog';
 import { listen, emit, UnlistenFn } from '@tauri-apps/api/event';
 
-import { safeConfirm } from './utils';
+import { safeConfirm, getSafeFileUrl } from './utils';
 import { IOLogger } from './ioLogger';
 import { UniversalParserService } from '../services/UniversalParserService';
 import { SubtitleLine } from '../types';
@@ -187,7 +187,139 @@ function bufferToFloat32Array(buffer: unknown): Float32Array {
     return new Float32Array(0);
 }
 
+function audioBufferToWavBlob(buffer: AudioBuffer): Blob {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const format = 1; // PCM
+  const bitDepth = 16;
+  
+  const bytesPerSample = bitDepth / 8;
+  const blockAlign = numChannels * bytesPerSample;
+  
+  const left = buffer.getChannelData(0);
+  const right = numChannels > 1 ? buffer.getChannelData(1) : left;
+  const numSamples = left.length;
+  
+  const dataSize = numSamples * blockAlign;
+  const bufferHeaderSize = 44;
+  const arrayBuffer = new ArrayBuffer(bufferHeaderSize + dataSize);
+  const view = new DataView(arrayBuffer);
+  
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+  
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, format, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitDepth, true);
+  writeString(36, 'data');
+  view.setUint32(40, dataSize, true);
+  
+  let offset = 44;
+  for (let i = 0; i < numSamples; i++) {
+    for (let channel = 0; channel < numChannels; channel++) {
+      const sample = channel === 0 ? left[i] : right[i];
+      const clamped = Math.max(-1, Math.min(1, sample));
+      const intSample = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
+      view.setInt16(offset, intSample, true);
+      offset += 2;
+    }
+  }
+  
+  return new Blob([arrayBuffer], { type: 'audio/wav' });
+}
+
+async function renderAndDownloadWebAudioMix(projectData: any, defaultFilename: string, _format: string) {
+  const sampleRate = 48000;
+  let maxEndTimeSec = 5.0;
+
+  const tracks = projectData.tracks || [];
+  const anySolo = tracks.some((t: any) => t.isSolo);
+
+  const activeSegments: { seg: any; trackVolume: number }[] = [];
+
+  for (const track of tracks) {
+    if (anySolo ? !track.isSolo : track.isMuted) continue;
+    const trackVolume = track.volume ?? 1.0;
+    for (const seg of track.segments || []) {
+      if (seg.filePath) {
+        activeSegments.push({ seg, trackVolume });
+        const endSec = seg.startTime + seg.duration;
+        if (endSec > maxEndTimeSec) maxEndTimeSec = endSec;
+      }
+    }
+  }
+
+  if (activeSegments.length === 0) {
+    throw new Error('Нет сегментов аудио для экспорта.');
+  }
+
+  const audioOffsetSec = (projectData.audioOffsetMs || 0) / 1000;
+  const totalLengthSec = Math.max(1, maxEndTimeSec + audioOffsetSec + 0.5);
+  const totalFrames = Math.ceil(totalLengthSec * sampleRate);
+
+  const offlineCtx = new OfflineAudioContext(2, totalFrames, sampleRate);
+
+  for (const { seg, trackVolume } of activeSegments) {
+    try {
+      const fileUrl = getSafeFileUrl(seg.filePath);
+      const resp = await fetch(fileUrl);
+      const arrayBuffer = await resp.arrayBuffer();
+      const audioBuffer = await offlineCtx.decodeAudioData(arrayBuffer);
+
+      const source = offlineCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.playbackRate.value = seg.playbackRate || 1.0;
+
+      const gainNode = offlineCtx.createGain();
+      gainNode.gain.value = (seg.gain ?? 1.0) * trackVolume;
+
+      const pannerNode = offlineCtx.createStereoPanner();
+      pannerNode.pan.value = seg.panning || 0.0;
+
+      source.connect(gainNode);
+      gainNode.connect(pannerNode);
+      pannerNode.connect(offlineCtx.destination);
+
+      const startTime = Math.max(0, seg.startTime + audioOffsetSec);
+      const offset = Math.max(0, seg.fileOffset || 0);
+      const duration = seg.duration || audioBuffer.duration;
+
+      source.start(startTime, offset, duration);
+    } catch (e) {
+      console.warn('Failed decoding segment for web export:', seg.filePath, e);
+    }
+  }
+
+  const renderedBuffer = await offlineCtx.startRendering();
+  const wavBlob = audioBufferToWavBlob(renderedBuffer);
+
+  const cleanName = (defaultFilename || 'project_mix.wav').split(/[/\\]/).pop() || 'project_mix.wav';
+  const finalFilename = cleanName.toLowerCase().endsWith('.wav') ? cleanName : `${cleanName}.wav`;
+
+  const url = URL.createObjectURL(wavBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = finalFilename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
 export const tauriAPI = {
+  // ... rest of tauriAPI ...
+
   // --- PROJECT MANAGEMENT ---
   openFolder: async (): Promise<BridgeResponse<string>> => {
     if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
@@ -720,8 +852,18 @@ export const tauriAPI = {
   },
   
   exportAudio: async (options: any): Promise<BridgeResponse<{ success: boolean }>> => {
-    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
     IOLogger.log('EXPORT', 'exportAudio', 'START', { outputPath: options.outputPath, format: options.format });
+    if (!IS_TAURI) {
+      try {
+        const projectData = typeof options.projectJson === 'string' ? JSON.parse(options.projectJson) : options.projectJson;
+        await renderAndDownloadWebAudioMix(projectData, options.outputPath, options.format || 'wav');
+        IOLogger.log('EXPORT', 'exportAudio', 'SUCCESS', { outputPath: options.outputPath, mode: 'web' });
+        return { success: true, data: { success: true } };
+      } catch (webErr) {
+        console.error("Web Export Error:", webErr);
+        return { success: false, error: String(webErr) };
+      }
+    }
     try {
         await invokeWithWatchdog('export_audio', {
             projectJson: options.projectJson,
@@ -1115,7 +1257,9 @@ export const tauriAPI = {
   },
 
   saveFile: async (options: { title: string, defaultPath: string, filters: { name: string, extensions: string[] }[] }): Promise<BridgeResponse<string>> => {
-    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    if (!IS_TAURI) {
+      return { success: true, data: options.defaultPath || 'export.wav' };
+    }
     try {
         const path = await save({
             title: options.title,

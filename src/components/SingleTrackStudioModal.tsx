@@ -11,6 +11,7 @@ import { computeSpectrogramFromFile, computeSpectrogramFromPcm, SpectrogramData 
 import { getSafeFileUrl, createPrefixedAudioPath, invalidateFileUrl } from '../lib/utils';
 import { open as rawOpen, save as rawSave } from '@tauri-apps/plugin-dialog';
 import SynchronizedAudioVisualizer from './SynchronizedAudioVisualizer';
+import { ModelSelector } from './ModelSelector';
 
 const safeOpen = async (options?: any): Promise<any> => {
   if (typeof window === 'undefined' || !(window as any).__TAURI_INTERNALS__) return null;
@@ -906,16 +907,16 @@ export const SingleTrackStudioModal: React.FC = () => {
                     </div>
 
                     <div className="space-y-2">
-                      <label className="text-[11px] text-zinc-400 block font-medium">Модель ИИ:</label>
-                      <select
+                      <ModelSelector
+                        category="denoise"
+                        label="Модель ИИ:"
                         value={denoiseModel}
-                        onChange={(e) => setDenoiseModel(e.target.value)}
-                        className="w-full bg-zinc-950 border border-white/10 rounded-lg p-2 text-xs text-white font-medium"
-                      >
-                        <option value="uvr_denoise_foxjoy">VR-DeNoise FoxJoy (Универсальная чистка речи)</option>
-                        <option value="uvr_denoise_full">UVR-DeNoise Full (Глубокое подавление фонового шума)</option>
-                        <option value="uvr_denoise_lite">UVR-DeNoise Lite (Быстрая легкая очистка)</option>
-                      </select>
+                        onChange={(val) => setDenoiseModel(val)}
+                        builtInOptions={[
+                          { id: 'spectral_gate', name: 'Спектральный гейт (AFFTDN - DSP)' },
+                          { id: 'deep_noise', name: 'Deep Denoise (RNNoise DSP)' }
+                        ]}
+                      />
                     </div>
 
                     <div className="space-y-1">
@@ -954,16 +955,16 @@ export const SingleTrackStudioModal: React.FC = () => {
                     </div>
 
                     <div className="space-y-2">
-                      <label className="text-[11px] text-zinc-400 block font-medium">Модель ИИ:</label>
-                      <select
+                      <ModelSelector
+                        category="dereverb"
+                        label="Модель ИИ:"
                         value={dereverbModel}
-                        onChange={(e) => setDereverbModel(e.target.value)}
-                        className="w-full bg-zinc-950 border border-white/10 rounded-lg p-2 text-xs text-white font-medium"
-                      >
-                        <option value="reverb_foxjoy">Reverb_HQ FoxJoy (Удаление реверберации помещения)</option>
-                        <option value="uvr_deecho_normal">UVR De-Echo Normal (Подавление сухого эха)</option>
-                        <option value="uvr_deecho_aggressive">MDX23C De-Reverb (Агрессивная чистка Гула)</option>
-                      </select>
+                        onChange={(val) => setDereverbModel(val)}
+                        builtInOptions={[
+                          { id: 'rt_dereverb_v2', name: 'RT_Dereverb v2 (DSP спектральное вычитание)' },
+                          { id: 'room_cleaner_neural', name: 'Neural Room Cleaner (Резонансы DSP)' }
+                        ]}
+                      />
                     </div>
 
                     <div className="space-y-1">
