@@ -46,7 +46,17 @@ mod pipeline_orchestrator;
 mod subtitle_compiler;
 mod timeline_history_engine;
 mod model_manager;
+mod silence_vad_engine;
+mod timing_compliance_engine;
+mod waveform_bucket_engine;
+mod subtitle_fuzzy_engine;
+mod speech_cue_classifier;
 
+use speech_cue_classifier::classify_project_cues;
+use timing_compliance_engine::audit_project_timing;
+use waveform_bucket_engine::{compute_waveform_render_buckets, compute_waveform_buckets_from_peaks};
+use subtitle_fuzzy_engine::{parse_subtitle_file_native, match_transcription_with_script};
+use silence_vad_engine::detect_speech_regions;
 use subtitle_compiler::{compile_and_validate_subtitles, parse_subtitles_native};
 use model_manager::{
     cancel_model_download, check_model_installed, delete_ai_model, download_ai_model,
@@ -546,7 +556,14 @@ fn main() {
             cancel_model_download,
             delete_ai_model,
             open_models_directory,
-            check_model_installed
+            check_model_installed,
+            detect_speech_regions,
+            audit_project_timing,
+            compute_waveform_render_buckets,
+            compute_waveform_buckets_from_peaks,
+            parse_subtitle_file_native,
+            match_transcription_with_script,
+            classify_project_cues
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

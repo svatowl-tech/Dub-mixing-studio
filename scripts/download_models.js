@@ -27,9 +27,8 @@ const REQUIRED_MODELS = [
         aliases: ['VR-DeReverb-FoxJoy.onnx', 'UVR-DeReverb.onnx', 'Reverb_HQ_By_FoxJoy.onnx', 'VR-DeReverb.onnx'],
         urls: [
             'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Reverb_HQ_By_FoxJoy.onnx',
-            'https://huggingface.co/seanghay/uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx',
-            'https://huggingface.co/Derur/UVR-models/resolve/main/Reverb_HQ_By_FoxJoy.onnx',
-            'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx'
+            'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx',
+            'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx'
         ],
         description: 'Neural Room Acoustics & Reverb Removal Model (FoxJoy HQ)'
     },
@@ -38,7 +37,6 @@ const REQUIRED_MODELS = [
         aliases: ['VR-DeEcho-Normal.pth', 'VR-DeEchoNormal.pth', 'VR-DeEcho-Normal.onnx', 'UVR-DeEcho-Normal.onnx'],
         urls: [
             'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Normal.pth',
-            'https://huggingface.co/seanghay/uvr_models/resolve/main/UVR-De-Echo-Normal.pth',
             'https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoNormal.pth'
         ],
         description: 'VR Architecture De-Echo Normal Model'
@@ -48,7 +46,6 @@ const REQUIRED_MODELS = [
         aliases: ['VR-DeEcho-Aggressive.pth', 'VR-DeEchoAggressive.pth', 'VR-DeEcho-Aggressive.onnx', 'UVR-DeEcho-Aggressive.onnx'],
         urls: [
             'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Aggressive.pth',
-            'https://huggingface.co/seanghay/uvr_models/resolve/main/UVR-De-Echo-Aggressive.pth',
             'https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoAggressive.pth'
         ],
         description: 'VR Architecture De-Echo Aggressive Model'

@@ -12,6 +12,9 @@ import {
 import { 
   applySmartGainMatchingNative, 
   AnnotatedSegment,
+  classifyProjectCuesNative,
+  ProjectCueInput,
+  ClassifiedCueOutput,
   renderSidechainDuckingNative,
   VoiceActivityMask,
   SidechainDuckingConfig as DspSidechainConfig,
@@ -137,21 +140,48 @@ export class MixingService {
       }
     }
 
-    // Попытка нативной обработки через Rust Tauri команду apply_smart_gain_matching
+    // Подготовка и пакетная классификация сегментов через нативный Rust Speech Cue Classifier
+    const cueInputs: ProjectCueInput[] = eligibleSegments.map(item => ({
+      id: item.segment.id,
+      filePath: item.segment.filePath,
+      text: item.text,
+      startTime: item.segment.startTime,
+      duration: item.segment.duration,
+      waveformPeaks: item.segment.waveform,
+      sampleRate: 48000,
+    }));
+
+    // 1. Вызов нативного гибридного классификатора (Rust Rayon + Regex/NLP + FFT Spectral Flatness)
+    let cueClassificationMap = new Map<string, ClassifiedCueOutput>();
+    try {
+      const classifiedList = await classifyProjectCuesNative(cueInputs);
+      for (const item of classifiedList) {
+        cueClassificationMap.set(item.id, item);
+      }
+    } catch (classErr) {
+      console.warn('[mixingService] Ошибка вызова classifyProjectCuesNative, продолжение:', classErr);
+    }
+
+    // 2. Попытка нативной обработки через Rust Tauri команду apply_smart_gain_matching
     let nativeResultsMap = new Map<string, any>();
     if (isTauriRuntime) {
       const annotated: AnnotatedSegment[] = eligibleSegments
         .filter(item => Boolean(item.segment.filePath))
-        .map(item => ({
-          id: item.segment.id,
-          filePath: item.segment.filePath!,
-          text: item.text,
-          startTime: item.segment.startTime,
-          duration: item.segment.duration,
-          targetDialogueLufs: targetDialogueDb,
-          foleyOffsetDb: physicsOffsetDb,
-          fadeMs: 10.0,
-        }));
+        .map(item => {
+          const classified = cueClassificationMap.get(item.segment.id);
+          const isFoley = classified?.classification === 'foleyEffort';
+          return {
+            id: item.segment.id,
+            filePath: item.segment.filePath!,
+            text: item.text,
+            startTime: item.segment.startTime,
+            duration: item.segment.duration,
+            category: isFoley ? 'foleySfx' : 'dialogue',
+            targetDialogueLufs: targetDialogueDb,
+            foleyOffsetDb: physicsOffsetDb,
+            fadeMs: 10.0,
+          };
+        });
 
       if (annotated.length > 0) {
         try {
@@ -167,11 +197,6 @@ export class MixingService {
       }
     }
 
-    // Регулярные выражения и эвристики Whisper для классификации
-    const foleyRegex = /\[(вздох|вдох|выдох|кряхтит|кряхтение|кашель|рычание|рык|всхлип|плач|смех|хихикает|стон|зевок|чмок|цок|шум|шорох|крик|визг|охает|ахает|сопение|мычание|хмыканье|храп|sigh|gasp|groan|grunt|cough|growl|sob|cry|laugh|yawn|pant|sniff|scream|shriek|moan)\]/i;
-    const asterisksRegex = /\*(вздох|вдох|выдох|кряхтит|кряхтение|кашель|рычание|рык|всхлип|плач|смех|хихикает|стон|зевок|чмок|цок|шум|шорох|крик|визг|охает|ахает|сопение|мычание|хмыканье|храп|sigh|gasp|groan|grunt|cough|growl|sob|cry|laugh|yawn|pant|sniff|scream|shriek|moan)\*/i;
-    const nonLexicalTokens = new Set(['мм', 'ммм', 'гм', 'гмм', 'эх', 'эхх', 'ох', 'оох', 'ах', 'ух', 'пф', 'тсс', 'тс', 'кхм', 'кхе', 'ха', 'хе', 'угу', 'ага', 'hm', 'hmm', 'uh', 'um', 'ah', 'oh', 'tsk', 'ugh', 'huh']);
-
     const updatedTracks = tracks.map((track) => {
       if (track.name.toLowerCase().includes('оригинал') || 
           track.name.toLowerCase().includes('original') || 
@@ -181,6 +206,7 @@ export class MixingService {
 
       const updatedSegments = track.segments.map((seg) => {
         const nativeRes = nativeResultsMap.get(seg.id);
+        const classified = cueClassificationMap.get(seg.id);
 
         if (nativeRes && nativeRes.success) {
           const category = nativeRes.category === 'dialogue' ? 'dialogue' : 'physics';
@@ -199,7 +225,7 @@ export class MixingService {
             stepId: 'gainMatching',
             status: 'success',
             title: category === 'dialogue' ? 'Диалог (-16 LUFS, Rust)' : 'FoleySFX (-10 дБ от реплик, Rust)',
-            message: `[Rust EBU R128] Сегмент "${seg.id}" -> ${category.toUpperCase()}. Исходный: ${nativeRes.initialLufs.toFixed(1)} LUFS, целевой: ${nativeRes.targetLufs.toFixed(1)} LUFS (поправка ${nativeRes.appliedGainDb >= 0 ? '+' : ''}${nativeRes.appliedGainDb.toFixed(1)} dB). Применены 10 мс anti-click фейды. Причина: ${nativeRes.classificationReason}.`,
+            message: `[Rust EBU R128] Сегмент "${seg.id}" -> ${category.toUpperCase()}. Исходный: ${nativeRes.initialLufs.toFixed(1)} LUFS, целевой: ${nativeRes.targetLufs.toFixed(1)} LUFS (поправка ${nativeRes.appliedGainDb >= 0 ? '+' : ''}${nativeRes.appliedGainDb.toFixed(1)} dB). Применены 10 мс anti-click фейды. Причина: ${classified?.reason || nativeRes.classificationReason}.`,
             details: {
               trackName: track.name,
               segmentId: seg.id,
@@ -208,7 +234,7 @@ export class MixingService {
               targetDb: nativeRes.targetLufs,
               adjustedGainDb: nativeRes.appliedGainDb,
               measuredValue: `${nativeRes.initialLufs.toFixed(1)} LUFS`,
-              fixSuggestion: `Rust DSP: ${nativeRes.classificationReason} (fade ${nativeRes.fadeSamples} samples)`
+              fixSuggestion: `Rust DSP: ${classified?.reason || nativeRes.classificationReason} (fade ${nativeRes.fadeSamples} samples)`
             }
           });
 
@@ -227,21 +253,6 @@ export class MixingService {
         const segStart = seg.startTime;
         const segEnd = seg.startTime + seg.duration;
 
-        let matchedSubText = seg.text || '';
-        let hasMatchingSub = Boolean(seg.matchedSubId || (seg.text && seg.text.trim().length > 0 && !seg.text.startsWith('[') && !seg.text.startsWith('*')));
-
-        if (!hasMatchingSub && subtitles && subtitles.length > 0) {
-          const matched = subtitles.find(sub => {
-            const overlapStart = Math.max(segStart, sub.start - 0.3);
-            const overlapEnd = Math.min(segEnd, sub.end + 0.3);
-            return overlapEnd > overlapStart;
-          });
-          if (matched) {
-            hasMatchingSub = true;
-            matchedSubText = matched.text;
-          }
-        }
-
         // Оценка текущей громкости RMS / LUFS
         let estimatedCurrentLufs = -20.0;
         if (seg.waveform && seg.waveform.length > 0) {
@@ -252,37 +263,41 @@ export class MixingService {
           estimatedCurrentLufs = -22.0;
         }
 
-        const trimmedText = matchedSubText.trim();
-        const lowerText = trimmedText.toLowerCase();
-        const isBracketed = (trimmedText.startsWith('[') && trimmedText.endsWith(']')) ||
-                            (trimmedText.startsWith('(') && trimmedText.endsWith(')')) ||
-                            (trimmedText.startsWith('*') && trimmedText.endsWith('*'));
-        const hasFoleyTag = foleyRegex.test(trimmedText) || asterisksRegex.test(trimmedText);
-        const strippedWord = lowerText.replace(/[^a-zа-яё0-9]/gi, '');
-        const isNonLexical = nonLexicalTokens.has(strippedWord);
-        const isShortAcousticFoley = seg.duration < 0.400 && (!trimmedText || isNonLexical || strippedWord.length <= 3);
-
+        // Классификация на основе нативного Speech Cue Classifier
         let category: 'dialogue' | 'physics' = 'dialogue';
-        let reason = 'Диалог сценария';
+        let targetDb = targetDialogueDb;
+        let reason = 'Реплика сценария по субтитрам -> Dialogue';
 
-        if (hasFoleyTag || (isBracketed && trimmedText.length < 35)) {
-          category = 'physics';
-          reason = `Тег субтитров (${trimmedText}) -> FoleySFX`;
-        } else if (isNonLexical) {
-          category = 'physics';
-          reason = `Междометие '${trimmedText}' -> FoleySFX`;
-        } else if (isShortAcousticFoley) {
-          category = 'physics';
-          reason = `Эвристика Whisper (<400 мс без гласных) -> FoleySFX`;
-        } else if (hasMatchingSub) {
-          category = 'dialogue';
-          reason = 'Реплика сценария по субтитрам -> Dialogue';
+        if (classified) {
+          switch (classified.classification) {
+            case 'foleyEffort':
+              category = 'physics';
+              targetDb = targetPhysicsDb;
+              reason = classified.reason;
+              break;
+            case 'shoutScream':
+              category = 'dialogue';
+              targetDb = targetDialogueDb - 6.0; // Поправка на пики крика
+              reason = classified.reason;
+              break;
+            case 'whisper':
+              category = 'dialogue';
+              targetDb = targetDialogueDb + 2.0; // Upward подъем шепота
+              reason = classified.reason;
+              break;
+            case 'standardDialogue':
+            default:
+              category = 'dialogue';
+              targetDb = targetDialogueDb;
+              reason = classified.reason;
+              break;
+          }
         } else {
-          category = seg.duration < 0.45 ? 'physics' : 'dialogue';
-          reason = seg.duration < 0.45 ? 'Короткий фрагмент без субтитров -> FoleySFX' : 'Длинный голосовой фрагмент -> Dialogue';
+          category = seg.duration < 0.35 ? 'physics' : 'dialogue';
+          targetDb = category === 'dialogue' ? targetDialogueDb : targetPhysicsDb;
+          reason = category === 'physics' ? 'Короткий фрагмент (<350 мс) -> FoleySFX' : 'Диалог сценария -> Dialogue';
         }
 
-        const targetDb = category === 'dialogue' ? targetDialogueDb : targetPhysicsDb;
         const requiredGainAdjustmentDb = targetDb - estimatedCurrentLufs;
         const linearMultiplier = Math.pow(10, requiredGainAdjustmentDb / 20);
         const newGain = Math.max(0.05, Math.min(4.0, (seg.gain || 1.0) * linearMultiplier));
@@ -299,7 +314,7 @@ export class MixingService {
           stageName: '3. Сведение',
           stepId: 'gainMatching',
           status: 'success',
-          title: category === 'dialogue' ? 'Диалог (-16 LUFS)' : 'FoleySFX (-10 дБ от реплик)',
+          title: category === 'dialogue' ? `Диалог (${targetDb.toFixed(1)} LUFS)` : `FoleySFX (${targetDb.toFixed(1)} LUFS)`,
           message: `Сегмент [${segStart.toFixed(2)}s - ${segEnd.toFixed(2)}s] (${category === 'dialogue' ? 'Речь' : 'Вздох/Кашель/Физика'}) приведен к ${targetDb.toFixed(1)} dB (поправка ${requiredGainAdjustmentDb >= 0 ? '+' : ''}${requiredGainAdjustmentDb.toFixed(1)} dB). Применены 10 мс anti-click фейды. Причина: ${reason}.`,
           details: {
             trackName: track.name,

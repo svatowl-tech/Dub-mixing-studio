@@ -1,5 +1,7 @@
 import { AudioTrack, AudioSegment, SubtitleLine, MixingType, TimingAlignmentConfig, TimingIssue, SilenceSplitReport, AudioCueSegment, WhisperTranscriptionResult, WhisperTranscribeConfig, TranscriptItem } from '../types';
 import { SmartAlignService } from './smartAlignService';
+import { silenceVadService, SpeechRegion, VadConfig } from './silenceVadService';
+import { timingComplianceService } from './timingComplianceService';
 
 const isTauriAvailable = (): boolean => {
   return typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
@@ -16,14 +18,7 @@ export interface SilenceSplitOptions {
   exportClips?: boolean; // Экспортировать нарезанные фрагменты в отдельные WAV файлы
 }
 
-export interface SpeechRegion {
-  start: number; // in seconds
-  end: number;   // in seconds
-  duration: number; // in seconds
-  averageDb?: number;
-  peakDb?: number;
-  filePath?: string;
-}
+export type { SpeechRegion, VadConfig };
 
 export class TimingAlignmentService {
   static isDubTrack(track: AudioTrack): boolean {
@@ -59,6 +54,17 @@ export class TimingAlignmentService {
       return (t.type === 'original' || isOriginalName) && !this.isDubTrack(t);
     });
     return generalVocal;
+  }
+
+  /**
+   * Сверхбыстрый нативный расчет Voice Activity Detection (Rust + Rayon)
+   * Делегирует обработку нативному движку silence_vad_engine без нагрузки на Event Loop
+   */
+  static async detectSpeechRegionsNative(
+    bufferIdOrPath: string,
+    config: Partial<VadConfig> = {}
+  ): Promise<SpeechRegion[]> {
+    return silenceVadService.detectSpeechRegions(bufferIdOrPath, config);
   }
 
   /**
@@ -830,7 +836,23 @@ export class TimingAlignmentService {
   }
 
   /**
+   * Нативный аудит всех дорожек проекта через Rust Sweep-Line Engine (< 2 мс)
+   * Без квадратичного перебора O(N*M), с параллелизмом Rayon
+   */
+  static async validateAllTracksTimingAsync(
+    tracks: AudioTrack[],
+    originalVoiceTrack: AudioTrack | undefined,
+    subtitles: SubtitleLine[],
+    mixingType: MixingType,
+    config: TimingAlignmentConfig
+  ): Promise<TimingIssue[]> {
+    const toleranceMs = config.subtitleCompliance?.toleranceMs || 200;
+    return timingComplianceService.auditProjectTiming(tracks, subtitles, toleranceMs);
+  }
+
+  /**
    * Сканирование всех дорожек проекта на предмет наездов, пропусков и расхождений
+   * Оптимизировано по алгоритму Sweep-Line O((N+M) log(N+M))
    */
   static validateAllTracksTiming(
     tracks: AudioTrack[],
@@ -839,20 +861,21 @@ export class TimingAlignmentService {
     mixingType: MixingType,
     config: TimingAlignmentConfig
   ): TimingIssue[] {
-    const issues: TimingIssue[] = [];
+    const toleranceMs = config.subtitleCompliance?.toleranceMs || 200;
     const isRecast = mixingType === MixingType.RECAST || mixingType === MixingType.REDUB;
 
-    // Сканируем каждую активную дорожку дубляжа
     const dubTracks = tracks.filter(t => 
       t.name !== 'Оригинал' && 
       t.name !== 'Звуки (Музыка)' && 
       t.name !== 'Голоса (Вокал)'
     );
 
+    const issues: TimingIssue[] = [];
+
+    // 1. Проверка наездов на каждой дорожке через Sweep-Line O(K log K)
     for (const track of dubTracks) {
       const sortedSegs = [...(track.segments || [])].sort((a, b) => a.startTime - b.startTime);
 
-      // Проверка наездов
       for (let i = 1; i < sortedSegs.length; i++) {
         const prev = sortedSegs[i - 1];
         const curr = sortedSegs[i];
@@ -876,15 +899,40 @@ export class TimingAlignmentService {
           });
         }
       }
+    }
 
-      // Проверка правила "фраза не меньше саба" для Рекаста/Редаба
-      if (isRecast && config.projectTypeRules.enforceMinSubDuration) {
-        for (const seg of sortedSegs) {
-          const matchedSub = subtitles.find(s => s.id === seg.matchedSubId) || 
-                            this.findClosestSubtitle(seg.startTime, seg.duration, subtitles, track.name);
-          if (matchedSub) {
+    // 2. Индексация субтитров сценария и бинарный поиск для сопоставления O(N log M)
+    if (subtitles.length > 0) {
+      const sortedSubs = [...subtitles].sort((a, b) => a.start - b.start);
+      const subsById = new Map<string, SubtitleLine>();
+      for (const s of sortedSubs) {
+        subsById.set(s.id, s);
+      }
+
+      for (const track of dubTracks) {
+        for (const seg of track.segments || []) {
+          let matchedSub = seg.matchedSubId ? subsById.get(seg.matchedSubId) : undefined;
+          if (!matchedSub) {
+            // Бинарный поиск первого пересечения
+            let low = 0;
+            let high = sortedSubs.length - 1;
+            while (low <= high) {
+              const mid = (low + high) >> 1;
+              const sub = sortedSubs[mid];
+              if (sub.end + 0.75 < seg.startTime) {
+                low = mid + 1;
+              } else if (sub.start - 0.75 > seg.startTime + seg.duration) {
+                high = mid - 1;
+              } else {
+                matchedSub = sub;
+                break;
+              }
+            }
+          }
+
+          if (matchedSub && isRecast && config.projectTypeRules.enforceMinSubDuration) {
             const subDur = matchedSub.end - matchedSub.start;
-            if (seg.duration < subDur - 0.2) {
+            if (seg.duration < subDur - (toleranceMs / 1000.0)) {
               const diff = (subDur - seg.duration).toFixed(2);
               issues.push({
                 id: `val_short_${seg.id}`,
@@ -906,30 +954,68 @@ export class TimingAlignmentService {
           }
         }
       }
-    }
 
-    // Проверка пропусков субтитров (неозвученные реплики)
-    if (config.conflictDetection.detectGaps && subtitles.length > 0) {
-      for (const sub of subtitles) {
-        // Проверяем, есть ли на любой из дорожек даберов сегмент около этой фразы
-        const hasSegment = dubTracks.some(t => 
-          (t.segments || []).some(s => Math.abs(s.startTime - sub.start) < 2.0)
-        );
+      // 3. Sweep-Line слияние речевых зон для мгновенной проверки пропусков за O((N+M) log(N+M))
+      if (config.conflictDetection.detectGaps) {
+        const events: { time: number; type: 1 | -1 }[] = [];
+        for (const track of dubTracks) {
+          for (const seg of track.segments || []) {
+            events.push({ time: seg.startTime, type: 1 });
+            events.push({ time: seg.startTime + seg.duration, type: -1 });
+          }
+        }
 
-        if (!hasSegment) {
-          issues.push({
-            id: `val_miss_${sub.id}`,
-            type: 'missing',
-            trackId: dubTracks[0]?.id || 'unknown',
-            trackName: sub.role || 'Общая',
-            timestamp: sub.start,
-            duration: sub.end - sub.start,
-            title: `Пропущенная фраза: "${sub.role}"`,
-            description: `Субтитр не имеет озвученного дубля на таймкоде ${Math.floor(sub.start / 60)}:${(sub.start % 60).toFixed(1)}: "${sub.text.slice(0, 45)}..."`,
-            severity: 'info',
-            matchedSubText: sub.text,
-            canAutoFix: false
-          });
+        events.sort((a, b) => a.time - b.time || b.type - a.type);
+        const mergedSpans: { start: number; end: number }[] = [];
+        let active = 0;
+        let curStart = 0;
+
+        for (const ev of events) {
+          if (ev.type === 1) {
+            if (active === 0) curStart = ev.time;
+            active++;
+          } else {
+            active--;
+            if (active === 0) {
+              mergedSpans.push({ start: curStart, end: ev.time });
+            }
+          }
+        }
+
+        for (const sub of subtitles) {
+          // Быстрый бинарный поиск по mergedSpans
+          let low = 0;
+          let high = mergedSpans.length - 1;
+          let hasSegment = false;
+
+          while (low <= high) {
+            const mid = (low + high) >> 1;
+            const span = mergedSpans[mid];
+            if (span.end < sub.start - 2.0) {
+              low = mid + 1;
+            } else if (span.start > sub.end + 2.0) {
+              high = mid - 1;
+            } else {
+              hasSegment = true;
+              break;
+            }
+          }
+
+          if (!hasSegment) {
+            issues.push({
+              id: `val_miss_${sub.id}`,
+              type: 'missing',
+              trackId: dubTracks[0]?.id || 'unknown',
+              trackName: sub.role || 'Общая',
+              timestamp: sub.start,
+              duration: sub.end - sub.start,
+              title: `Пропущенная фраза: "${sub.role}"`,
+              description: `Субтитр не имеет озвученного дубля на таймкоде ${Math.floor(sub.start / 60)}:${(sub.start % 60).toFixed(1)}: "${sub.text.slice(0, 45)}..."`,
+              severity: 'info',
+              matchedSubText: sub.text,
+              canAutoFix: false
+            });
+          }
         }
       }
     }

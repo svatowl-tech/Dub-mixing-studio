@@ -109,6 +109,43 @@ export const getSafeFileUrl = (path: string | undefined): string | undefined => 
   }
 };
 
+/**
+ * Converts asset.localhost/convertFileSrc URLs back to local file system paths
+ */
+export const toNativeLocalPath = (pathOrUrl: string | undefined | null): string => {
+  if (!pathOrUrl) return '';
+  let s = String(pathOrUrl).trim();
+  
+  if (s.startsWith('http://asset.localhost/')) {
+    s = s.substring('http://asset.localhost/'.length);
+  } else if (s.startsWith('https://asset.localhost/')) {
+    s = s.substring('https://asset.localhost/'.length);
+  } else if (s.startsWith('asset://localhost/')) {
+    s = s.substring('asset://localhost/'.length);
+  } else if (s.startsWith('asset://')) {
+    s = s.substring('asset://'.length);
+  } else if (s.startsWith('tauri://localhost/')) {
+    s = s.substring('tauri://localhost/'.length);
+  } else if (s.startsWith('file:///')) {
+    s = s.substring('file:///'.length);
+  } else if (s.startsWith('file://')) {
+    s = s.substring('file://'.length);
+  }
+
+  try {
+    s = decodeURIComponent(s);
+  } catch (_) {}
+
+  // Remove leading slash before Windows drive: "/C:/" -> "C:/"
+  if ((s.startsWith('/') || s.startsWith('\\')) && s.length > 3) {
+    if (s[2] === ':' || s[2] === '|') {
+      s = s.substring(1);
+    }
+  }
+
+  return s;
+};
+
 export const getGlobalAudioSettings = (): AudioSettings => {
   const defaults: AudioSettings = {
     echoCancellation: false,

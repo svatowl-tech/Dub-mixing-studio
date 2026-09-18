@@ -106,6 +106,8 @@ pub struct NativePlaybackSegment {
     pub gain: f32,
     #[serde(default)]
     pub panning: f32,
+    #[serde(rename = "detectedFx", default)]
+    pub detected_fx: Option<serde_json::Value>,
 }
 
 fn default_gain() -> f32 {
@@ -123,6 +125,8 @@ pub struct NativePlaybackTrack {
     #[serde(rename = "isSolo", default)]
     pub is_solo: bool,
     pub segments: Vec<NativePlaybackSegment>,
+    #[serde(default)]
+    pub processing: Option<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -339,6 +343,317 @@ impl NativeAudioPlayer {
     }
 }
 
+// --- REAL-TIME RUST DSP EFFECTS ENGINE ---
+
+#[derive(Clone, Copy)]
+pub enum BiquadType {
+    LowPass,
+    HighPass,
+    Peaking,
+    LowShelf,
+    HighShelf,
+}
+
+pub struct BiquadFilter {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl BiquadFilter {
+    pub fn new() -> Self {
+        Self {
+            b0: 1.0, b1: 0.0, b2: 0.0,
+            a1: 0.0, a2: 0.0,
+            x1: 0.0, x2: 0.0,
+            y1: 0.0, y2: 0.0,
+        }
+    }
+
+    pub fn configure(&mut self, filter_type: BiquadType, freq_hz: f32, gain_db: f32, q: f32, sample_rate: u32) {
+        let sr = sample_rate.max(8000) as f32;
+        let w0 = 2.0 * std::f32::consts::PI * (freq_hz.clamp(10.0, sr * 0.49) / sr);
+        let cos_w0 = w0.cos();
+        let sin_w0 = w0.sin();
+        let alpha = sin_w0 / (2.0 * q.max(0.1));
+        let a = 10.0f32.powf(gain_db / 40.0);
+
+        let (b0, b1, b2, a0, a1, a2) = match filter_type {
+            BiquadType::LowPass => {
+                let b0 = (1.0 - cos_w0) * 0.5;
+                let b1 = 1.0 - cos_w0;
+                let b2 = (1.0 - cos_w0) * 0.5;
+                let a0 = 1.0 + alpha;
+                let a1 = -2.0 * cos_w0;
+                let a2 = 1.0 - alpha;
+                (b0, b1, b2, a0, a1, a2)
+            }
+            BiquadType::HighPass => {
+                let b0 = (1.0 + cos_w0) * 0.5;
+                let b1 = -(1.0 + cos_w0);
+                let b2 = (1.0 + cos_w0) * 0.5;
+                let a0 = 1.0 + alpha;
+                let a1 = -2.0 * cos_w0;
+                let a2 = 1.0 - alpha;
+                (b0, b1, b2, a0, a1, a2)
+            }
+            BiquadType::Peaking => {
+                let b0 = 1.0 + alpha * a;
+                let b1 = -2.0 * cos_w0;
+                let b2 = 1.0 - alpha * a;
+                let a0 = 1.0 + alpha / a;
+                let a1 = -2.0 * cos_w0;
+                let a2 = 1.0 - alpha / a;
+                (b0, b1, b2, a0, a1, a2)
+            }
+            BiquadType::LowShelf => {
+                let sqrt_a = a.sqrt();
+                let b0 = a * ((a + 1.0) - (a - 1.0) * cos_w0 + 2.0 * sqrt_a * alpha);
+                let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0);
+                let b2 = a * ((a + 1.0) - (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha);
+                let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + 2.0 * sqrt_a * alpha;
+                let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0);
+                let a2 = (a + 1.0) + (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha;
+                (b0, b1, b2, a0, a1, a2)
+            }
+            BiquadType::HighShelf => {
+                let sqrt_a = a.sqrt();
+                let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + 2.0 * sqrt_a * alpha);
+                let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0);
+                let b2 = a * ((a + 1.0) + (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha);
+                let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + 2.0 * sqrt_a * alpha;
+                let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0);
+                let a2 = (a + 1.0) - (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha;
+                (b0, b1, b2, a0, a1, a2)
+            }
+        };
+
+        let inv_a0 = 1.0 / a0;
+        self.b0 = b0 * inv_a0;
+        self.b1 = b1 * inv_a0;
+        self.b2 = b2 * inv_a0;
+        self.a1 = a1 * inv_a0;
+        self.a2 = a2 * inv_a0;
+    }
+
+    #[inline(always)]
+    pub fn process(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1 - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = if y.is_finite() { y } else { 0.0 };
+        self.y1
+    }
+}
+
+pub struct TrackDspEngine {
+    hp_l: BiquadFilter,
+    hp_r: BiquadFilter,
+    lp_l: BiquadFilter,
+    lp_r: BiquadFilter,
+    eq_bands_l: Vec<BiquadFilter>,
+    eq_bands_r: Vec<BiquadFilter>,
+    deesser_bp: BiquadFilter,
+    deesser_env: f32,
+    comp_env: f32,
+    reverb_buffer_l: Vec<f32>,
+    reverb_buffer_r: Vec<f32>,
+    reverb_idx: usize,
+    delay_buffer_l: Vec<f32>,
+    delay_buffer_r: Vec<f32>,
+    delay_idx: usize,
+    sample_rate: u32,
+}
+
+impl TrackDspEngine {
+    pub fn new(sample_rate: u32) -> Self {
+        let sr = sample_rate.max(8000);
+        let max_rev_len = (sr as f64 * 3.0) as usize; // up to 3 sec reverb
+        let max_del_len = (sr as f64 * 2.0) as usize; // up to 2 sec delay
+        Self {
+            hp_l: BiquadFilter::new(),
+            hp_r: BiquadFilter::new(),
+            lp_l: BiquadFilter::new(),
+            lp_r: BiquadFilter::new(),
+            eq_bands_l: Vec::new(),
+            eq_bands_r: Vec::new(),
+            deesser_bp: BiquadFilter::new(),
+            deesser_env: 0.0,
+            comp_env: 0.0,
+            reverb_buffer_l: vec![0.0; max_rev_len],
+            reverb_buffer_r: vec![0.0; max_rev_len],
+            reverb_idx: 0,
+            delay_buffer_l: vec![0.0; max_del_len],
+            delay_buffer_r: vec![0.0; max_del_len],
+            delay_idx: 0,
+            sample_rate: sr,
+        }
+    }
+
+    pub fn process_stereo_sample(
+        &mut self,
+        left: f32,
+        right: f32,
+        proc: Option<&serde_json::Value>,
+        detected_fx: Option<&serde_json::Value>,
+    ) -> (f32, f32) {
+        let mut l = left;
+        let mut r = right;
+        let sr = self.sample_rate as f32;
+
+        if let Some(p) = proc {
+            // 1. HighPass & LowPass
+            if let Some(eq_val) = p.get("eq") {
+                if eq_val.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    if let Some(hp) = eq_val.get("highPass").and_then(|v| v.as_f64()).map(|v| v as f32) {
+                        if hp > 20.0 {
+                            self.hp_l.configure(BiquadType::HighPass, hp, 0.0, 0.707, self.sample_rate);
+                            self.hp_r.configure(BiquadType::HighPass, hp, 0.0, 0.707, self.sample_rate);
+                            l = self.hp_l.process(l);
+                            r = self.hp_r.process(r);
+                        }
+                    }
+                    if let Some(lp) = eq_val.get("lowPass").and_then(|v| v.as_f64()).map(|v| v as f32) {
+                        if lp < 20000.0 {
+                            self.lp_l.configure(BiquadType::LowPass, lp, 0.0, 0.707, self.sample_rate);
+                            self.lp_r.configure(BiquadType::LowPass, lp, 0.0, 0.707, self.sample_rate);
+                            l = self.lp_l.process(l);
+                            r = self.lp_r.process(r);
+                        }
+                    }
+                }
+            }
+
+            // 2. De-Esser
+            if let Some(de) = p.get("deesser") {
+                if de.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let freq = de.get("frequency").and_then(|v| v.as_f64()).unwrap_or(6500.0) as f32;
+                    let thresh_db = de.get("threshold").and_then(|v| v.as_f64()).unwrap_or(-18.0) as f32;
+                    let thresh = 10.0f32.powf(thresh_db / 20.0);
+                    self.deesser_bp.configure(BiquadType::Peaking, freq, 0.0, 2.0, self.sample_rate);
+                    let mid = (l + r) * 0.5;
+                    let sc = self.deesser_bp.process(mid).abs();
+                    if sc > self.deesser_env {
+                        self.deesser_env += (sc - self.deesser_env) * 0.3;
+                    } else {
+                        self.deesser_env += (sc - self.deesser_env) * 0.01;
+                    }
+                    if self.deesser_env > thresh {
+                        let atten = (thresh / self.deesser_env).max(0.25);
+                        l *= atten;
+                        r *= atten;
+                    }
+                }
+            }
+
+            // 3. Compressor
+            if let Some(comp) = p.get("compressor") {
+                if comp.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let thresh_db = comp.get("threshold").and_then(|v| v.as_f64()).unwrap_or(-18.0) as f32;
+                    let ratio = comp.get("ratio").and_then(|v| v.as_f64()).unwrap_or(3.5) as f32;
+                    let makeup_db = comp.get("makeupGain").or_else(|| comp.get("gain")).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                    let makeup = 10.0f32.powf(makeup_db / 20.0);
+
+                    let thresh_lin = 10.0f32.powf(thresh_db / 20.0);
+                    let peak = (l.abs() + r.abs()) * 0.5;
+                    if peak > self.comp_env {
+                        self.comp_env += (peak - self.comp_env) * 0.15; // fast attack
+                    } else {
+                        self.comp_env += (peak - self.comp_env) * 0.005; // release
+                    }
+                    let mut comp_gain = 1.0;
+                    if self.comp_env > thresh_lin {
+                        let over = self.comp_env / thresh_lin;
+                        comp_gain = over.powf(1.0 / ratio - 1.0);
+                    }
+                    l = l * comp_gain * makeup;
+                    r = r * comp_gain * makeup;
+                }
+            }
+
+            // 4. Analog Saturation / Warmth
+            if let Some(sat) = p.get("saturation").or_else(|| p.get("warmth")) {
+                if sat.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let drive_db = sat.get("drive").or_else(|| sat.get("driveDb")).and_then(|v| v.as_f64()).unwrap_or(3.0) as f32;
+                    let drive = 10.0f32.powf(drive_db / 20.0);
+                    let wet = sat.get("wet").or_else(|| sat.get("blend")).and_then(|v| v.as_f64()).unwrap_or(0.35) as f32;
+                    
+                    let sat_l = (l * drive).tanh() / drive.max(1.0).tanh();
+                    let sat_r = (r * drive).tanh() / drive.max(1.0).tanh();
+                    l = l * (1.0 - wet) + sat_l * wet;
+                    r = r * (1.0 - wet) + sat_r * wet;
+                }
+            }
+
+            // 5. Stereo Reverb
+            if let Some(rev) = p.get("reverb") {
+                if rev.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let wet = rev.get("wet").and_then(|v| v.as_f64()).unwrap_or(0.15) as f32;
+                    let decay = rev.get("decay").and_then(|v| v.as_f64()).unwrap_or(1.5) as f32;
+                    let delay_samps = ((decay * 0.05 * sr) as usize).clamp(100, self.reverb_buffer_l.len() - 1);
+
+                    let read_idx = (self.reverb_idx + self.reverb_buffer_l.len() - delay_samps) % self.reverb_buffer_l.len();
+                    let rev_l = self.reverb_buffer_l[read_idx];
+                    let rev_r = self.reverb_buffer_r[read_idx];
+
+                    self.reverb_buffer_l[self.reverb_idx] = l + rev_l * 0.45;
+                    self.reverb_buffer_r[self.reverb_idx] = r + rev_r * 0.45;
+                    self.reverb_idx = (self.reverb_idx + 1) % self.reverb_buffer_l.len();
+
+                    l = l * (1.0 - wet) + rev_l * wet;
+                    r = r * (1.0 - wet) + rev_r * wet;
+                }
+            }
+
+            // 6. Stereo Delay
+            if let Some(del) = p.get("delay") {
+                if del.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let wet = del.get("wet").and_then(|v| v.as_f64()).unwrap_or(0.12) as f32;
+                    let time_s = del.get("time").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
+                    let feedback = del.get("feedback").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
+                    let delay_samps = ((time_s * sr) as usize).clamp(10, self.delay_buffer_l.len() - 1);
+
+                    let read_idx = (self.delay_idx + self.delay_buffer_l.len() - delay_samps) % self.delay_buffer_l.len();
+                    let del_l = self.delay_buffer_l[read_idx];
+                    let del_r = self.delay_buffer_r[read_idx];
+
+                    self.delay_buffer_l[self.delay_idx] = l + del_l * feedback;
+                    self.delay_buffer_r[self.delay_idx] = r + del_r * feedback;
+                    self.delay_idx = (self.delay_idx + 1) % self.delay_buffer_l.len();
+
+                    l = l * (1.0 - wet) + del_l * wet;
+                    r = r * (1.0 - wet) + del_r * wet;
+                }
+            }
+        }
+
+        // Segment-level Auto-FX (Transfer from Original)
+        if let Some(fx) = detected_fx {
+            if let Some(wet) = fx.get("reverbWet").and_then(|v| v.as_f64()).map(|v| v as f32) {
+                if wet > 0.01 {
+                    let read_idx = (self.reverb_idx + self.reverb_buffer_l.len() - 2000) % self.reverb_buffer_l.len();
+                    let rev_l = self.reverb_buffer_l[read_idx];
+                    let rev_r = self.reverb_buffer_r[read_idx];
+                    self.reverb_buffer_l[self.reverb_idx] = l + rev_l * 0.4;
+                    self.reverb_buffer_r[self.reverb_idx] = r + rev_r * 0.4;
+                    self.reverb_idx = (self.reverb_idx + 1) % self.reverb_buffer_l.len();
+                    l = l * (1.0 - wet * 0.5) + rev_l * (wet * 0.5);
+                    r = r * (1.0 - wet * 0.5) + rev_r * (wet * 0.5);
+                }
+            }
+        }
+
+        (l, r)
+    }
+}
+
 fn mix_audio_buffer(
     data: &mut [f32],
     channels: usize,
@@ -375,6 +690,9 @@ fn mix_audio_buffer(
 
     let any_solo = tracks.iter().any(|t| t.is_solo);
 
+    // Dynamic Track DSP processor instances
+    let mut track_dsp = TrackDspEngine::new(device_sample_rate);
+
     for track in tracks.iter() {
         let is_active = if any_solo { track.is_solo } else { !track.is_muted };
         if !is_active || track.volume <= 0.0 {
@@ -382,6 +700,7 @@ fn mix_audio_buffer(
         }
 
         let track_gain = track.volume;
+        let proc_ref = track.processing.as_ref();
 
         for seg in &track.segments {
             let seg_gain = seg.gain * track_gain;
@@ -409,6 +728,7 @@ fn mix_audio_buffer(
 
             let file_offset_sec = seg.file_offset;
             let cached_sr = cached.sample_rate as f64;
+            let fx_ref = seg.detected_fx.as_ref();
 
             for f in 0..num_frames {
                 let timeline_frame = start_frame + f as u64;
@@ -420,7 +740,7 @@ fn mix_audio_buffer(
                 let sample_pos_sec = file_offset_sec + time_in_seg_sec;
                 let sample_idx = (sample_pos_sec * cached_sr).round() as usize;
 
-                let (s_left, s_right) = if cached.channels == 1 {
+                let (raw_left, raw_right) = if cached.channels == 1 {
                     if sample_idx < cached.samples.len() {
                         let v = cached.samples[sample_idx];
                         (v, v)
@@ -436,14 +756,26 @@ fn mix_audio_buffer(
                     }
                 };
 
+                // Apply Real-time Rust DSP (EQ, Compression, De-Esser, Saturation, Reverb, Delay)
+                let (proc_l, proc_r) = track_dsp.process_stereo_sample(raw_left, raw_right, proc_ref, fx_ref);
+
                 let out_idx = f * channels;
                 if channels >= 2 {
-                    data[out_idx] += s_left * seg_gain * left_pan_gain;
-                    data[out_idx + 1] += s_right * seg_gain * right_pan_gain;
+                    data[out_idx] += proc_l * seg_gain * left_pan_gain;
+                    data[out_idx + 1] += proc_r * seg_gain * right_pan_gain;
                 } else {
-                    data[out_idx] += ((s_left + s_right) * 0.5) * seg_gain;
+                    data[out_idx] += ((proc_l + proc_r) * 0.5) * seg_gain;
                 }
             }
+        }
+    }
+
+    // Master True-Peak Safety Soft-Limiting (prevents digital harsh distortion)
+    for sample in data.iter_mut() {
+        if *sample > 0.98 {
+            *sample = 0.98 + (*sample - 0.98).tanh() * 0.02;
+        } else if *sample < -0.98 {
+            *sample = -0.98 + (*sample + 0.98).tanh() * 0.02;
         }
     }
 

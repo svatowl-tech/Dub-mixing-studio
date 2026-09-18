@@ -47,7 +47,8 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     recommended_for: 'Основная модель для отделения голоса дубляжа от оригинальной дорожки',
     urls: [
       'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx',
-      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Voc_FT.onnx'
+      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Voc_FT.onnx',
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx'
     ],
     is_installed: false
   },
@@ -61,7 +62,8 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     recommended_for: 'Подготовка фоновой музыки и шумов (M&E) для подмешивания дубляжа',
     urls: [
       'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Inst_HQ_3.onnx',
-      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Inst_HQ_3.onnx'
+      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Inst_HQ_3.onnx',
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Inst_HQ_3.onnx'
     ],
     is_installed: false
   },
@@ -75,7 +77,8 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     recommended_for: 'Сложные саундтреки с хором, дабстепом и плотным фоном',
     urls: [
       'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx',
-      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Kim_Vocal_2.onnx'
+      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Kim_Vocal_2.onnx',
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Kim_Vocal_2.onnx'
     ],
     is_installed: false
   },
@@ -88,7 +91,8 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     size_mb: 79.8,
     recommended_for: 'Глубокая многодорожечная реставрация фильма и видеоряда',
     urls: [
-      'https://github.com/adefossez/demucs/releases/download/v4.0/htdemucs_ft.yaml'
+      'https://huggingface.co/dokodesuka/htdemucs_ft/resolve/main/htdemucs_ft.yaml',
+      'https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs_ft.yaml'
     ],
     is_installed: false
   },
@@ -101,8 +105,8 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     size_mb: 182.0,
     recommended_for: 'Профессиональный студийный мастеринг и бескомпромиссная чистота голоса',
     urls: [
-      'https://huggingface.co/becrux/mel-band-roformer-vocals/resolve/main/mel_band_roformer_vocals_fv2.ckpt',
-      'https://huggingface.co/TRvlvr/MelBandRoformer/resolve/main/MelBandRoformer.ckpt'
+      'https://huggingface.co/KimberleyJSN/melbandroformer/resolve/main/MelBandRoformer.ckpt',
+      'https://huggingface.co/anvuew/MelBandRoformer/resolve/main/MelBandRoformer.ckpt'
     ],
     is_installed: false
   },
@@ -115,6 +119,7 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     size_mb: 171.5,
     recommended_for: 'Кинематографические миксы с объемной звуковой сценой',
     urls: [
+      'https://huggingface.co/anvuew/BS-RoFormer/resolve/main/bs_roformer_anvuew_sdr_12.45.ckpt',
       'https://huggingface.co/jarredou/aufr33-jarredou_BS-Roformer_Viperx_1297/resolve/main/model.ckpt'
     ],
     is_installed: false
@@ -131,7 +136,8 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     recommended_for: 'Дикторские записи, сделанные в обычных не заглушенных комнатах',
     urls: [
       'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Reverb_HQ_By_FoxJoy.onnx',
-      'https://huggingface.co/seanghay/uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx'
+      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx',
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx'
     ],
     is_installed: false
   },
@@ -145,7 +151,7 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     recommended_for: 'Легкое эхо в помещениях со шторами и коврами',
     urls: [
       'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Normal.pth',
-      'https://huggingface.co/seanghay/uvr_models/resolve/main/UVR-De-Echo-Normal.pth'
+      'https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoNormal.pth'
     ],
     is_installed: false
   },
@@ -159,20 +165,20 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     recommended_for: 'Записи в пустых помещениях и сложных акустических условиях',
     urls: [
       'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Aggressive.pth',
-      'https://huggingface.co/seanghay/uvr_models/resolve/main/UVR-De-Echo-Aggressive.pth'
+      'https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoAggressive.pth'
     ],
     is_installed: false
   },
   {
     id: 'mdx_dereverb_room',
     name: 'MDX Room DeReverb',
-    filename: 'MDX-DeReverb-Room.onnx',
+    filename: 'UVR-DeEcho-DeReverb.pth',
     category: 'dereverb',
     description: 'Устранение специфического «коробочного» резонанса комнат малого объема.',
     size_mb: 55.2,
     recommended_for: 'Очистка записей с накамерных и петличных микрофонов',
     urls: [
-      'https://huggingface.co/seanghay/uvr_models/resolve/main/MDX-DeReverb-Room.onnx'
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeEcho-DeReverb.pth'
     ],
     is_installed: false
   },
@@ -181,27 +187,26 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
   {
     id: 'uvr_denoise',
     name: 'UVR DeNoise HQ',
-    filename: 'UVR-DeNoise.onnx',
+    filename: 'UVR-DeNoise.pth',
     category: 'denoise',
     description: 'Глубокое нейросетевое шумоподавление фонового гула, шума вентиляторов и шипения.',
     size_mb: 44.8,
     recommended_for: 'Основное шумоподавление при подготовке вокала к сведению',
     urls: [
-      'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-DeNoise.onnx',
-      'https://huggingface.co/seanghay/uvr_models/resolve/main/UVR-DeNoise.onnx'
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth'
     ],
     is_installed: false
   },
   {
     id: 'deepfilternet3',
     name: 'DeepFilterNet 3 ONNX',
-    filename: 'DeepFilterNet3_model.onnx',
+    filename: 'df_dec.onnx',
     category: 'denoise',
     description: 'Инновационный перцептивный шумоподавитель на базе глубоких сверточных сетей.',
     size_mb: 25.4,
     recommended_for: 'Быстрая высококачественная очистка речи без металлического призвука',
     urls: [
-      'https://huggingface.co/Rikorose/DeepFilterNet3/resolve/main/DeepFilterNet3_model.onnx'
+      'https://huggingface.co/niobures/DeepFilterNet/resolve/main/models/onnx/Audio-Cleaner/df_dec.onnx'
     ],
     is_installed: false
   },
@@ -222,13 +227,13 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
   {
     id: 'rnnoise_neural',
     name: 'RNNoise Neural Gate',
-    filename: 'rnnoise_marathon.onnx',
+    filename: 'rnn_model.onnx',
     category: 'denoise',
     description: 'Сверхлегкий рекуррентный фильтр шума в реальном времени с нулевой задержкой.',
     size_mb: 1.5,
     recommended_for: 'Мониторинг при записи и быстрый гейтинг на слабых ПК',
     urls: [
-      'https://raw.githubusercontent.com/jpiraux/rnnoise-models/master/confs/marathon.onnx'
+      'https://huggingface.co/niobures/RNNoise/resolve/main/models/ailia-models/rnn_model.onnx'
     ],
     is_installed: false
   },
@@ -293,25 +298,24 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     name: 'Matchering Vocal Curve Matcher',
     filename: 'vocal_spectral_matcher.onnx',
     category: 'vocal_match',
-    description: 'Анализирует спектр оригинального голоса персонажа и автоматически строит компенсирующую кривую EQ для дублера.',
-    size_mb: 15.2,
-    recommended_for: 'Подгонка тембра голоса дублера под оригинального актера фильма',
-    urls: [
-      'https://huggingface.co/datasets/vocal-dsp/models/resolve/main/vocal_spectral_matcher.onnx',
-      'https://raw.githubusercontent.com/sergree/matchering/master/models/matchering_vocal_curve.json'
-    ],
-    is_installed: false
+    description: 'Встроенный нативный 4096-точечный FFT алгоритм сопоставления спектральных кривых (vocal_presence / warm_analog / reference). Встроен в движок программы.',
+    size_mb: 0.0,
+    recommended_for: 'Подгонка тембра голоса дублера под оригинального актера фильма (не требует внешней загрузки)',
+    urls: [],
+    is_installed: true,
+    installed_bytes: 1024,
+    local_path: 'built-in-dsp'
   },
   {
     id: 'voicefixer_fe',
     name: 'VoiceFixer Harmonic Restorer',
-    filename: 'voicefixer_fe.onnx',
+    filename: 'vf.ckpt',
     category: 'vocal_match',
     description: 'Восстановление потерянных высоких частот (air-band), выравнивание формант и динамическая сатурация вокала.',
     size_mb: 112.0,
     recommended_for: 'Придание вокалу дорогого студийного «лампового» блеска перед сведением',
     urls: [
-      'https://huggingface.co/haoheliu/voicefixer_models/resolve/main/voicefixer_fe.onnx'
+      'https://huggingface.co/cqchangm/voicefixer/resolve/main/vf.ckpt'
     ],
     is_installed: false
   },
@@ -320,13 +324,13 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     name: 'Neural Timbre & Dynamic Transfer',
     filename: 'vocal_timbre_transfer.onnx',
     category: 'vocal_match',
-    description: 'Сравнение двух аудиофайлов: подгоняет кривую плотности, компрессию и тембральный баланс дубляжа к референсу.',
-    size_mb: 35.8,
-    recommended_for: 'Бесшовное вклеивание переозвученных реплик в исходный микс',
-    urls: [
-      'https://huggingface.co/datasets/vocal-dsp/models/resolve/main/vocal_timbre_transfer.onnx'
-    ],
-    is_installed: false
+    description: 'Сравнение спектра и перенос тембрального баланса дубляжа к референсу оригинальной дорожки через нативное DSP-ядро.',
+    size_mb: 0.0,
+    recommended_for: 'Бесшовное вклеивание переозвученных реплик в исходный микс (встроено в DSP)',
+    urls: [],
+    is_installed: true,
+    installed_bytes: 1024,
+    local_path: 'built-in-dsp'
   }
 ];
 
@@ -457,21 +461,45 @@ export class AIModelService {
       throw new Error(`Модель с идентификатором '${modelId}' не найдена`);
     }
 
-    try {
-      const result = await safeInvoke<string>('download_ai_model', {
-        modelId: model.id,
-        customUrl: customUrl || null
-      });
-
-      if (result) {
-        await this.refreshModels();
-        return result;
-      }
-    } catch (e: any) {
-      console.warn('[AIModelService] Native download error, falling back to simulated web download:', e);
+    // Встроенные DSP-алгоритмы не требуют сетевой загрузки
+    if (model.local_path === 'built-in-dsp' || model.id === 'vocal_spectral_matcher' || model.id === 'vocal_timbre_transfer') {
+      model.is_installed = true;
+      model.local_path = 'built-in-dsp';
+      this.notifyListeners();
+      return 'built-in-dsp';
     }
 
-    // Fallback: симуляция скачивания в веб-режиме (для превью)
+    const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
+
+    if (isTauri) {
+      try {
+        const result = await safeInvoke<string>('download_ai_model', {
+          modelId: model.id,
+          customUrl: customUrl || null
+        });
+
+        if (result) {
+          await this.refreshModels();
+          return result;
+        }
+      } catch (e: any) {
+        console.error('[AIModelService] Native download error:', e);
+        const errMsg = typeof e === 'string' ? e : (e?.message || 'Ошибка загрузки модели через нативный движок');
+        this.activeProgress.set(model.id, {
+          id: model.id,
+          filename: model.filename,
+          downloaded_bytes: 0,
+          total_bytes: Math.floor(model.size_mb * 1024 * 1024),
+          percent: 0,
+          status: 'error',
+          error_message: errMsg
+        });
+        this.notifyListeners();
+        throw new Error(errMsg);
+      }
+    }
+
+    // Fallback: симуляция скачивания в веб-режиме (только для браузерного превью без Tauri)
     return new Promise((resolve) => {
       let progress = 0;
       const interval = setInterval(() => {

@@ -7,7 +7,10 @@
 ![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows%20(ASIO)%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![Architecture](https://img.shields.io/badge/stack-Tauri%202.x%20%7C%20Rust%20%7C%20React%2019-green.svg)
-![Status](https://img.shields.io/badge/status-active%20release-brightgreen.svg)
+![Status](https://img.shields.io/badge/status-active%20development%20%2F%20alpha-orange.svg)
+
+> ⚠️ **ВНИМАНИЕ: Программа находится в режиме активной разработки!**  
+> Приложение **пока не готово к активной рабочей эксплуатации** и может содержать ошибки, сбои и незавершённые компоненты. Используйте на свой страх и риск, обязательно делайте резервные копии проектов и исходных аудиофайлов.
 
 ---
 

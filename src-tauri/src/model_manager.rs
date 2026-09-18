@@ -54,7 +54,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             urls: vec![
                 "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx".to_string(),
                 "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Voc_FT.onnx".to_string(),
-                "https://huggingface.co/seanghay/uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -71,7 +71,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             urls: vec![
                 "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Inst_HQ_3.onnx".to_string(),
                 "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Inst_HQ_3.onnx".to_string(),
-                "https://huggingface.co/seanghay/uvr_models/resolve/main/UVR-MDX-NET-Inst_HQ_3.onnx".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Inst_HQ_3.onnx".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -88,6 +88,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             urls: vec![
                 "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx".to_string(),
                 "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Kim_Vocal_2.onnx".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Kim_Vocal_2.onnx".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -102,7 +103,8 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             size_mb: 79.8,
             recommended_for: "Глубокая многодорожечная реставрация фильма и видеоряда".to_string(),
             urls: vec![
-                "https://github.com/adefossez/demucs/releases/download/v4.0/htdemucs_ft.yaml".to_string(),
+                "https://huggingface.co/dokodesuka/htdemucs_ft/resolve/main/htdemucs_ft.yaml".to_string(),
+                "https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs_ft.yaml".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -117,8 +119,8 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             size_mb: 182.0,
             recommended_for: "Профессиональный студийный мастеринг и бескомпромиссная чистота голоса".to_string(),
             urls: vec![
-                "https://huggingface.co/becrux/mel-band-roformer-vocals/resolve/main/mel_band_roformer_vocals_fv2.ckpt".to_string(),
-                "https://huggingface.co/TRvlvr/MelBandRoformer/resolve/main/MelBandRoformer.ckpt".to_string(),
+                "https://huggingface.co/KimberleyJSN/melbandroformer/resolve/main/MelBandRoformer.ckpt".to_string(),
+                "https://huggingface.co/anvuew/MelBandRoformer/resolve/main/MelBandRoformer.ckpt".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -133,6 +135,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             size_mb: 171.5,
             recommended_for: "Кинематографические миксы с объемной звуковой сценой".to_string(),
             urls: vec![
+                "https://huggingface.co/anvuew/BS-RoFormer/resolve/main/bs_roformer_anvuew_sdr_12.45.ckpt".to_string(),
                 "https://huggingface.co/jarredou/aufr33-jarredou_BS-Roformer_Viperx_1297/resolve/main/model.ckpt".to_string(),
             ],
             is_installed: false,
@@ -153,8 +156,8 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             recommended_for: "Дикторские записи, сделанные в обычных не заглушенных комнатах".to_string(),
             urls: vec![
                 "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Reverb_HQ_By_FoxJoy.onnx".to_string(),
-                "https://huggingface.co/seanghay/uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx".to_string(),
                 "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -170,7 +173,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             recommended_for: "Легкое эхо в помещениях со шторами и коврами".to_string(),
             urls: vec![
                 "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Normal.pth".to_string(),
-                "https://huggingface.co/seanghay/uvr_models/resolve/main/UVR-De-Echo-Normal.pth".to_string(),
+                "https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoNormal.pth".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -186,7 +189,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             recommended_for: "Записи в пустых помещениях и сложных акустических условиях".to_string(),
             urls: vec![
                 "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Aggressive.pth".to_string(),
-                "https://huggingface.co/seanghay/uvr_models/resolve/main/UVR-De-Echo-Aggressive.pth".to_string(),
+                "https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoAggressive.pth".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -195,13 +198,13 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
         ModelCatalogItem {
             id: "mdx_dereverb_room".to_string(),
             name: "MDX Room DeReverb".to_string(),
-            filename: "MDX-DeReverb-Room.onnx".to_string(),
+            filename: "UVR-DeEcho-DeReverb.pth".to_string(),
             category: "dereverb".to_string(),
             description: "Устранение специфического «коробочного» резонанса комнат малого объема.".to_string(),
             size_mb: 55.2,
             recommended_for: "Очистка записей с накамерных и петличных микрофонов".to_string(),
             urls: vec![
-                "https://huggingface.co/seanghay/uvr_models/resolve/main/MDX-DeReverb-Room.onnx".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeEcho-DeReverb.pth".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -214,14 +217,13 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
         ModelCatalogItem {
             id: "uvr_denoise".to_string(),
             name: "UVR DeNoise HQ".to_string(),
-            filename: "UVR-DeNoise.onnx".to_string(),
+            filename: "UVR-DeNoise.pth".to_string(),
             category: "denoise".to_string(),
             description: "Глубокое нейросетевое шумоподавление фонового гула, шума вентиляторов и шипения.".to_string(),
             size_mb: 44.8,
             recommended_for: "Основное шумоподавление при подготовке вокала к сведению".to_string(),
             urls: vec![
-                "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-DeNoise.onnx".to_string(),
-                "https://huggingface.co/seanghay/uvr_models/resolve/main/UVR-DeNoise.onnx".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -230,13 +232,13 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
         ModelCatalogItem {
             id: "deepfilternet3".to_string(),
             name: "DeepFilterNet 3 ONNX".to_string(),
-            filename: "DeepFilterNet3_model.onnx".to_string(),
+            filename: "df_dec.onnx".to_string(),
             category: "denoise".to_string(),
             description: "Инновационный перцептивный шумоподавитель на базе глубоких сверточных сетей.".to_string(),
             size_mb: 25.4,
             recommended_for: "Быстрая высококачественная очистка речи без металлического призвука".to_string(),
             urls: vec![
-                "https://huggingface.co/Rikorose/DeepFilterNet3/resolve/main/DeepFilterNet3_model.onnx".to_string(),
+                "https://huggingface.co/niobures/DeepFilterNet/resolve/main/models/onnx/Audio-Cleaner/df_dec.onnx".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -261,13 +263,13 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
         ModelCatalogItem {
             id: "rnnoise_neural".to_string(),
             name: "RNNoise Neural Gate".to_string(),
-            filename: "rnnoise_marathon.onnx".to_string(),
+            filename: "rnn_model.onnx".to_string(),
             category: "denoise".to_string(),
             description: "Сверхлегкий рекуррентный фильтр шума в реальном времени с нулевой задержкой.".to_string(),
             size_mb: 1.5,
             recommended_for: "Мониторинг при записи и быстрый гейтинг на слабых ПК".to_string(),
             urls: vec![
-                "https://raw.githubusercontent.com/jpiraux/rnnoise-models/master/confs/marathon.onnx".to_string(),
+                "https://huggingface.co/niobures/RNNoise/resolve/main/models/ailia-models/rnn_model.onnx".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -346,27 +348,24 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             name: "Matchering Vocal Curve Matcher".to_string(),
             filename: "vocal_spectral_matcher.onnx".to_string(),
             category: "vocal_match".to_string(),
-            description: "Анализирует спектр оригинального голоса персонажа и автоматически строит компенсирующую кривую EQ для дублера.".to_string(),
-            size_mb: 15.2,
-            recommended_for: "Подгонка тембра голоса дублера под оригинального актера фильма".to_string(),
-            urls: vec![
-                "https://huggingface.co/datasets/vocal-dsp/models/resolve/main/vocal_spectral_matcher.onnx".to_string(),
-                "https://raw.githubusercontent.com/sergree/matchering/master/models/matchering_vocal_curve.json".to_string(),
-            ],
-            is_installed: false,
-            installed_bytes: None,
-            local_path: None,
+            description: "Встроенный нативный 4096-точечный FFT алгоритм сопоставления спектральных кривых (vocal_presence / warm_analog / reference). Встроен в движок программы.".to_string(),
+            size_mb: 0.0,
+            recommended_for: "Подгонка тембра голоса дублера под оригинального актера фильма (не требует внешней загрузки)".to_string(),
+            urls: vec![],
+            is_installed: true,
+            installed_bytes: Some(1024),
+            local_path: Some("built-in-dsp".to_string()),
         },
         ModelCatalogItem {
             id: "voicefixer_fe".to_string(),
             name: "VoiceFixer Harmonic Restorer".to_string(),
-            filename: "voicefixer_fe.onnx".to_string(),
+            filename: "vf.ckpt".to_string(),
             category: "vocal_match".to_string(),
             description: "Восстановление потерянных высоких частот (air-band), выравнивание формант и динамическая сатурация вокала.".to_string(),
             size_mb: 112.0,
             recommended_for: "Придание вокалу дорогого студийного «лампового» блеска перед сведением".to_string(),
             urls: vec![
-                "https://huggingface.co/haoheliu/voicefixer_models/resolve/main/voicefixer_fe.onnx".to_string(),
+                "https://huggingface.co/cqchangm/voicefixer/resolve/main/vf.ckpt".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -377,15 +376,13 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             name: "Neural Timbre & Dynamic Transfer".to_string(),
             filename: "vocal_timbre_transfer.onnx".to_string(),
             category: "vocal_match".to_string(),
-            description: "Сравнение двух аудиофайлов: подгоняет кривую плотности, компрессию и тембральный баланс дубляжа к референсу.".to_string(),
-            size_mb: 35.8,
-            recommended_for: "Бесшовное вклеивание переозвученных реплик в исходный микс".to_string(),
-            urls: vec![
-                "https://huggingface.co/datasets/vocal-dsp/models/resolve/main/vocal_timbre_transfer.onnx".to_string(),
-            ],
-            is_installed: false,
-            installed_bytes: None,
-            local_path: None,
+            description: "Сравнение спектра и перенос тембрального баланса дубляжа к референсу оригинальной дорожки через нативное DSP-ядро.".to_string(),
+            size_mb: 0.0,
+            recommended_for: "Бесшовное вклеивание переозвученных реплик в исходный микс (встроено в DSP)".to_string(),
+            urls: vec![],
+            is_installed: true,
+            installed_bytes: Some(1024),
+            local_path: Some("built-in-dsp".to_string()),
         },
     ]
 }
@@ -407,45 +404,93 @@ pub fn get_models_dir(app_handle: &AppHandle) -> PathBuf {
 
 /// Проверка наличия файла модели на диске в известных путях
 pub fn locate_model_file(app_handle: &AppHandle, filename: &str) -> Option<(PathBuf, u64)> {
-    let mut search_paths: Vec<PathBuf> = Vec::new();
+    // Встроенные DSP-алгоритмы не требуют отдельного файла на диске
+    if filename == "vocal_spectral_matcher.onnx"
+        || filename == "vocal_timbre_transfer.onnx"
+        || filename == "vocal_spectral_matcher"
+        || filename == "vocal_timbre_transfer"
+    {
+        return Some((PathBuf::from("built-in-dsp"), 1024));
+    }
+
+    let mut candidate_filenames: Vec<String> = vec![filename.to_string()];
+    match filename {
+        "UVR-DeNoise.onnx" | "UVR-DeNoise.pth" => {
+            candidate_filenames.push("UVR-DeNoise.pth".to_string());
+            candidate_filenames.push("UVR-DeNoise.onnx".to_string());
+        }
+        "DeepFilterNet3_model.onnx" | "df_dec.onnx" => {
+            candidate_filenames.push("df_dec.onnx".to_string());
+            candidate_filenames.push("DeepFilterNet3_model.onnx".to_string());
+        }
+        "MDX-DeReverb-Room.onnx" | "UVR-DeEcho-DeReverb.pth" => {
+            candidate_filenames.push("UVR-DeEcho-DeReverb.pth".to_string());
+            candidate_filenames.push("MDX-DeReverb-Room.onnx".to_string());
+        }
+        "rnnoise_marathon.onnx" | "rnn_model.onnx" => {
+            candidate_filenames.push("rnn_model.onnx".to_string());
+            candidate_filenames.push("rnnoise_marathon.onnx".to_string());
+        }
+        "aufr33_jarredou_BS_Roformer.ckpt" | "bs_roformer_anvuew_sdr_12.45.ckpt" => {
+            candidate_filenames.push("bs_roformer_anvuew_sdr_12.45.ckpt".to_string());
+            candidate_filenames.push("aufr33_jarredou_BS_Roformer.ckpt".to_string());
+            candidate_filenames.push("model.ckpt".to_string());
+        }
+        "mel_band_roformer_vocals_fv2.ckpt" | "MelBandRoformer.ckpt" => {
+            candidate_filenames.push("MelBandRoformer.ckpt".to_string());
+            candidate_filenames.push("mel_band_roformer_vocals_fv2.ckpt".to_string());
+        }
+        "voicefixer_fe.onnx" | "vf.ckpt" => {
+            candidate_filenames.push("vf.ckpt".to_string());
+            candidate_filenames.push("voicefixer_fe.onnx".to_string());
+        }
+        _ => {}
+    }
+
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
 
     // 1. Папка данных приложения (куда скачиваются модели)
     if let Ok(data_dir) = app_handle.path().app_data_dir() {
-        search_paths.push(data_dir.join("models").join(filename));
-        search_paths.push(data_dir.join(filename));
+        search_dirs.push(data_dir.join("models"));
+        search_dirs.push(data_dir);
     }
 
     // 2. Вшитые ресурсы (если что-то оставлено)
     if let Ok(res_dir) = app_handle.path().resource_dir() {
-        search_paths.push(res_dir.join("models").join(filename));
-        search_paths.push(res_dir.join("resources").join("models").join(filename));
-        search_paths.push(res_dir.join("ai_env").join("models").join(filename));
-        search_paths.push(res_dir.join(filename));
+        search_dirs.push(res_dir.join("models"));
+        search_dirs.push(res_dir.join("resources").join("models"));
+        search_dirs.push(res_dir.join("ai_env").join("models"));
+        search_dirs.push(res_dir);
     }
 
     // 3. Каталог исполняемого файла
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            search_paths.push(exe_dir.join("models").join(filename));
-            search_paths.push(exe_dir.join("resources").join("models").join(filename));
+            search_dirs.push(exe_dir.join("models"));
+            search_dirs.push(exe_dir.join("resources").join("models"));
+            search_dirs.push(exe_dir.to_path_buf());
         }
     }
 
     // 4. Текущая рабочая директория (dev-режим)
     if let Ok(cwd) = std::env::current_dir() {
-        search_paths.push(cwd.join("models").join(filename));
-        search_paths.push(cwd.join("resources").join("models").join(filename));
-        search_paths.push(cwd.join("src-tauri").join("models").join(filename));
-        search_paths.push(cwd.join("src-tauri").join("resources").join("models").join(filename));
+        search_dirs.push(cwd.join("models"));
+        search_dirs.push(cwd.join("resources").join("models"));
+        search_dirs.push(cwd.join("src-tauri").join("models"));
+        search_dirs.push(cwd.join("src-tauri").join("resources").join("models"));
+        search_dirs.push(cwd);
     }
 
-    for path in search_paths {
-        if path.exists() && path.is_file() {
-            if let Ok(meta) = path.metadata() {
-                let size = meta.len();
-                // Проверяем, что файл не нулевой
-                if size > 1024 {
-                    return Some((path, size));
+    for dir in &search_dirs {
+        for cand in &candidate_filenames {
+            let path = dir.join(cand);
+            if path.exists() && path.is_file() {
+                if let Ok(meta) = path.metadata() {
+                    let size = meta.len();
+                    // Проверяем, что файл не нулевой
+                    if size > 1024 {
+                        return Some((path, size));
+                    }
                 }
             }
         }
@@ -568,6 +613,23 @@ pub async fn download_ai_model(
         .find(|m| m.id == model_id || m.filename == model_id)
         .ok_or_else(|| format!("Модель с идентификатором '{}' не найдена в каталоге", model_id))?;
 
+    // Встроенные алгоритмы DSP завершаются мгновенно без обращения к сети
+    if model.id == "vocal_spectral_matcher" || model.id == "vocal_timbre_transfer" {
+        let _ = app_handle.emit(
+            "model_download_progress",
+            ModelDownloadProgress {
+                id: model.id.clone(),
+                filename: model.filename.clone(),
+                downloaded_bytes: 1024,
+                total_bytes: 1024,
+                percent: 100.0,
+                status: "completed".to_string(),
+                error_message: None,
+            },
+        );
+        return Ok("built-in-dsp".to_string());
+    }
+
     let download_urls: Vec<String> = if let Some(url) = custom_url {
         if !url.trim().is_empty() {
             vec![url]
@@ -630,11 +692,16 @@ pub async fn download_ai_model(
             },
         );
 
-        // Используем curl с поддержкой редиректов (-L), докачки (-C -) и тайм-аутов
+        // Очищаем предыдущую неудачную попытку
+        let _ = std::fs::remove_file(&temp_dest);
+
+        // Используем curl с поддержкой редиректов (-L), User-Agent и тайм-аутов
         let mut curl_cmd = tokio::process::Command::new("curl");
         curl_cmd
             .arg("-L") // Follow redirects (HuggingFace / GitHub)
             .arg("-f") // Fail silently on server errors (404, 500)
+            .arg("-A") // Provide browser User-Agent
+            .arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
             .arg("--retry")
             .arg("3")
             .arg("--retry-delay")
@@ -702,9 +769,24 @@ pub async fn download_ai_model(
                     match child.try_wait() {
                         Ok(Some(status)) => {
                             if status.success() {
-                                success = true;
+                                if let Ok(meta) = std::fs::metadata(&temp_dest) {
+                                    if meta.len() > 1024 {
+                                        success = true;
+                                    } else {
+                                        last_error = format!("Скачанный файл пустой или поврежден (размер {} байт)", meta.len());
+                                    }
+                                } else {
+                                    last_error = "Файл не был сохранен на диск".to_string();
+                                }
                             } else {
-                                last_error = format!("Curl завершился с кодом ошибки: {:?}", status.code());
+                                let code_desc = match status.code() {
+                                    Some(22) => "HTTP 404/403 (файл не найден на сервере)",
+                                    Some(6) => "Не удалось разрешить хост (DNS ошибка)",
+                                    Some(7) => "Не удалось подключиться к серверу",
+                                    Some(28) => "Превышен тайм-аут соединения",
+                                    _ => "Ошибка сети/сервера",
+                                };
+                                last_error = format!("Curl завершился с кодом ошибки: {:?} ({})", status.code(), code_desc);
                             }
                             break;
                         }

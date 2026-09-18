@@ -253,3 +253,164 @@ export function renderTrackPeaksToCanvas(
     }
   }
 }
+
+// ============================================================================
+// NATIVE WAVEFORM BUCKET & COORDINATE RENDERER (ZERO-GC SINGLE STROKE)
+// ============================================================================
+
+export interface WaveformBucketQuery {
+  bufferId: string;
+  startSample: number;
+  endSample: number;
+  targetPixelWidth: number;
+  powerCurve?: number;
+  canvasHeight: number;
+  rawPeaks?: number[];
+}
+
+/**
+ * Вычисляет плоский массив экранных координат Y [y0_top, y0_bot, y1_top, y1_bot, ...] в Rust за O(N) с Rayon SIMD
+ */
+export async function computeWaveformRenderBuckets(query: WaveformBucketQuery): Promise<Float32Array> {
+  if (typeof window !== 'undefined' && ((window as any).__TAURI__ || (window as any).__TAURI_INTERNALS__)) {
+    try {
+      const res = await invoke<number[]>('compute_waveform_render_buckets', {
+        query: {
+          bufferId: query.bufferId,
+          startSample: Math.floor(query.startSample),
+          endSample: Math.floor(query.endSample),
+          targetPixelWidth: Math.floor(query.targetPixelWidth),
+          powerCurve: query.powerCurve ?? 0.6,
+          canvasHeight: query.canvasHeight,
+          rawPeaks: query.rawPeaks,
+        }
+      });
+      return new Float32Array(res);
+    } catch (e) {
+      console.warn('[WaveformBridge] Ошибка нативной бакетизации в Rust, fallback на JS:', e);
+    }
+  }
+
+  // Fallback на JS бакетизацию
+  const targetWidth = Math.max(1, Math.floor(query.targetPixelWidth));
+  const samples = query.rawPeaks || [];
+  const total = samples.length;
+  const out = new Float32Array(targetWidth * 2);
+  const centerY = query.canvasHeight * 0.5;
+  const halfH = query.canvasHeight * 0.48;
+  const p = query.powerCurve ?? 0.6;
+
+  if (total === 0) {
+    for (let i = 0; i < targetWidth; i++) {
+      out[i * 2] = centerY - 0.5;
+      out[i * 2 + 1] = centerY + 0.5;
+    }
+    return out;
+  }
+
+  const start = Math.min(total, Math.max(0, query.startSample));
+  const end = Math.min(total, Math.max(start, query.endSample));
+  const range = end - start;
+  const bucketSize = range / targetWidth;
+
+  for (let px = 0; px < targetWidth; px++) {
+    const bStart = Math.floor(start + px * bucketSize);
+    let bEnd = Math.ceil(start + (px + 1) * bucketSize);
+    if (bEnd <= bStart) bEnd = bStart + 1;
+    bEnd = Math.min(end, bEnd);
+
+    let minVal = 0;
+    let maxVal = 0;
+    for (let j = bStart; j < bEnd; j++) {
+      const val = samples[j] || 0;
+      if (val < minVal) minVal = val;
+      if (val > maxVal) maxVal = val;
+    }
+
+    const signMax = maxVal >= 0 ? 1 : -1;
+    const signMin = minVal >= 0 ? 1 : -1;
+    const scaledMax = Math.pow(Math.min(1.0, Math.abs(maxVal)), p) * signMax;
+    const scaledMin = Math.pow(Math.min(1.0, Math.abs(minVal)), p) * signMin;
+
+    let yTop = Math.min(query.canvasHeight, Math.max(0, centerY - scaledMax * halfH));
+    let yBottom = Math.min(query.canvasHeight, Math.max(0, centerY - scaledMin * halfH));
+    if (yBottom < yTop) {
+      const tmp = yTop;
+      yTop = yBottom;
+      yBottom = tmp;
+    }
+    if (yBottom - yTop < 1.0) {
+      yTop = Math.max(0, centerY - 0.5);
+      yBottom = Math.min(query.canvasHeight, centerY + 0.5);
+    }
+
+    out[px * 2] = yTop;
+    out[px * 2 + 1] = yBottom;
+  }
+
+  return out;
+}
+
+/**
+ * Вычисляет координаты для готового массива пиков через Rust
+ */
+export async function computeWaveformBucketsFromPeaks(
+  peaks: number[] | Float32Array,
+  targetPixelWidth: number,
+  canvasHeight: number,
+  powerCurve: number = 0.6
+): Promise<Float32Array> {
+  const peakArr = peaks instanceof Float32Array ? Array.from(peaks) : peaks;
+  if (typeof window !== 'undefined' && ((window as any).__TAURI__ || (window as any).__TAURI_INTERNALS__)) {
+    try {
+      const res = await invoke<number[]>('compute_waveform_buckets_from_peaks', {
+        peaks: peakArr,
+        targetPixelWidth: Math.floor(targetPixelWidth),
+        canvasHeight,
+        powerCurve,
+      });
+      return new Float32Array(res);
+    } catch (err) {
+      console.warn('[WaveformBridge] Fallback computeWaveformBucketsFromPeaks to JS:', err);
+    }
+  }
+
+  return computeWaveformRenderBuckets({
+    bufferId: 'raw_peaks',
+    startSample: 0,
+    endSample: peakArr.length,
+    targetPixelWidth,
+    canvasHeight,
+    powerCurve,
+    rawPeaks: peakArr,
+  });
+}
+
+/**
+ * Отрисовывает плоский буфер готовых экранных координат Y за ОДИН проход ctx.stroke()
+ * Не производит никаких аллокаций памяти, поисков максимумов или Math.pow в цикле отрисовки.
+ */
+export function renderNativeWaveformCoordsToCanvas(
+  ctx: CanvasRenderingContext2D,
+  coords: Float32Array | number[],
+  color: string = '#3b82f6',
+  lineWidth: number = 1.5
+): void {
+  const numPixels = (coords.length / 2) | 0;
+  if (numPixels === 0) return;
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+
+  for (let x = 0; x < numPixels; x++) {
+    const yTop = coords[x * 2];
+    const yBottom = coords[x * 2 + 1];
+    ctx.moveTo(x + 0.5, yTop);
+    ctx.lineTo(x + 0.5, yBottom);
+  }
+
+  ctx.stroke();
+}
+

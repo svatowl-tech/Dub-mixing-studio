@@ -1,4 +1,4 @@
-import { getSafeFileUrl } from '../lib/utils';
+import { getSafeFileUrl, toNativeLocalPath } from '../lib/utils';
 import { VSTAudioWorkletNode } from '../lib/vstHost';
 import { IOLogger } from '../lib/ioLogger';
 
@@ -16,23 +16,29 @@ async function callTauri(cmd: string, args?: Record<string, any>): Promise<any> 
 }
 
 function formatNativeTracks(tracks: any[]) {
-  return tracks.map(t => ({
+  return (tracks || []).map(t => ({
     id: String(t.id),
     name: String(t.name || ''),
     volume: typeof t.volume === 'number' ? t.volume : 1.0,
     isMuted: Boolean(t.isMuted),
     isSolo: Boolean(t.isSolo),
+    processing: t.processing || null,
     segments: (t.segments || [])
+      .map((s: any) => {
+        const rawPath = s.filePath || s.blobUrl || '';
+        const nativePath = toNativeLocalPath(rawPath);
+        return {
+          id: String(s.id),
+          filePath: nativePath,
+          startTime: Number(s.startTime || 0),
+          duration: Number(s.duration || 0),
+          fileOffset: Number(s.fileOffset || 0),
+          gain: typeof s.gain === 'number' ? s.gain : 1.0,
+          panning: typeof s.panning === 'number' ? s.panning : 0.0,
+          detectedFx: s.detectedFx || null,
+        };
+      })
       .filter((s: any) => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:'))
-      .map((s: any) => ({
-        id: String(s.id),
-        filePath: String(s.filePath),
-        startTime: Number(s.startTime || 0),
-        duration: Number(s.duration || 0),
-        fileOffset: Number(s.fileOffset || 0),
-        gain: typeof s.gain === 'number' ? s.gain : 1.0,
-        panning: typeof s.panning === 'number' ? s.panning : 0.0,
-      }))
   }));
 }
 
@@ -880,6 +886,12 @@ export class PlaybackEngine {
       ? tracks.filter(t => t.isSolo) 
       : tracks.filter(t => !t.isMuted);
 
+    if (this.isNativePlaying) {
+      // Audio playback and real-time DSP effects are completely handled natively by the Rust audio engine.
+      // Web Audio buffer scheduling is bypassed to eliminate duplicate audio and reduce CPU overhead.
+      return;
+    }
+
     for (const track of activeTracks) {
       const lowerName = track.name?.toLowerCase() || '';
       const isOriginalOrRef = lowerName.includes('оригинал') || lowerName.includes('original') || track.id === 'reference-track' || lowerName.includes('reference');
@@ -1282,6 +1294,21 @@ export class PlaybackEngine {
    * Useful for real-time adjustments in the Mixer or Processing Modal.
    */
   public updateTrackProcessingLive(trackId: string, proc: any) {
+    // Update local state copy
+    if (this.currentTracks) {
+      this.currentTracks = this.currentTracks.map(t => {
+        if (t.id === trackId) {
+          return { ...t, processing: proc };
+        }
+        return t;
+      });
+    }
+
+    // Sync directly to Rust audio engine in real time
+    if (this.isNativePlaying) {
+      callTauri('update_native_playback_tracks', { tracks: formatNativeTracks(this.currentTracks) }).catch(() => {});
+    }
+
     if (!this.audioContext) return;
     const now = this.audioContext.currentTime;
     

@@ -6,11 +6,64 @@ use hound;
 use tauri::AppHandle;
 use tauri_plugin_shell::ShellExt;
 
+fn url_decode(input: &str) -> String {
+    let mut bytes = Vec::new();
+    let chars: Vec<u8> = input.bytes().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == b'%' && i + 2 < chars.len() {
+            if let Ok(b) = u8::from_str_radix(std::str::from_utf8(&chars[i+1..=i+2]).unwrap_or(""), 16) {
+                bytes.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        bytes.push(chars[i]);
+        i += 1;
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| input.to_string())
+}
+
 pub fn normalize_windows_path(path_str: &str) -> String {
+    let mut s = path_str.trim().to_string();
+    if s.is_empty() {
+        return s;
+    }
+
+    // Strip asset/tauri/file URL schemes and hosts
+    if s.starts_with("http://asset.localhost/") {
+        s = s["http://asset.localhost/".len()..].to_string();
+    } else if s.starts_with("https://asset.localhost/") {
+        s = s["https://asset.localhost/".len()..].to_string();
+    } else if s.starts_with("asset://localhost/") {
+        s = s["asset://localhost/".len()..].to_string();
+    } else if s.starts_with("asset://") {
+        s = s["asset://".len()..].to_string();
+    } else if s.starts_with("tauri://localhost/") {
+        s = s["tauri://localhost/".len()..].to_string();
+    } else if s.starts_with("file:///") {
+        s = s["file:///".len()..].to_string();
+    } else if s.starts_with("file://") {
+        s = s["file://".len()..].to_string();
+    }
+
+    // URL decode if needed (e.g. %3A -> :, %2F -> /, %D0%9E... -> Cyrillic)
+    if s.contains('%') {
+        s = url_decode(&s);
+    }
+
+    // If path starts with leading slash before Windows drive letter: "/C:/..." -> "C:/..."
+    if (s.starts_with('/') || s.starts_with('\\')) && s.len() > 3 {
+        let bytes = s.as_bytes();
+        if bytes[1].is_ascii_alphabetic() && (bytes[2] == b':' || bytes[2] == b'|') {
+            s = s[1..].to_string();
+        }
+    }
+
     #[cfg(target_os = "windows")]
     {
-        if (path_str.starts_with('/') || path_str.starts_with('\\')) && !path_str.contains(":\\") && !path_str.contains(":/") {
-            let path = Path::new(path_str);
+        if (s.starts_with('/') || s.starts_with('\\')) && !s.contains(":\\") && !s.contains(":/") {
+            let path = Path::new(&s);
             let mut ancestor = path;
             let mut components = Vec::new();
             
@@ -40,7 +93,7 @@ pub fn normalize_windows_path(path_str: &str) -> String {
             }
         }
     }
-    path_str.to_string()
+    s
 }
 
 #[derive(Serialize)]

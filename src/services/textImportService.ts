@@ -1,7 +1,26 @@
 import { SubtitleLine } from '../types';
 import { IOLogger } from '../lib/ioLogger';
+import { parseSubtitleFileNative, isTauriEnvironment } from '../lib/subtitleFuzzyBridge';
 
 export class TextImportService {
+  /**
+   * Асинхронный парсинг сырого текста сценария с автоматическим ускорением через Rust в Tauri
+   */
+  static async parseRawTextAsync(text: string, defaultDurationMs: number = 5000): Promise<SubtitleLine[]> {
+    if (isTauriEnvironment()) {
+      try {
+        const nativeLines = await parseSubtitleFileNative(text, 'txt');
+        if (nativeLines && nativeLines.length > 0) {
+          IOLogger.log('SUBTITLES', 'TextImport:parseRawTextNative', 'SUCCESS', { count: nativeLines.length });
+          return nativeLines;
+        }
+      } catch (err) {
+        console.warn('[TextImportService] Ошибка нативного парсинга TXT, fallback на JS:', err);
+      }
+    }
+    return this.parseRawText(text, defaultDurationMs);
+  }
+
   static parseRawText(text: string, defaultDurationMs: number = 5000): SubtitleLine[] {
     IOLogger.log('SUBTITLES', 'TextImport:parseRawText', 'START', { length: text.length });
     text = text.replace(/^\uFEFF/, ''); // Strip BOM

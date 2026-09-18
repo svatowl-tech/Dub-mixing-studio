@@ -287,7 +287,8 @@ export async function transformWaveformLevelerNative(
   });
 }
 
-// 9. Smart Gain Matching by Subtitles
+// 9. Smart Gain Matching by Subtitles & Speech Cue Classifier
+export * from './speechClassifierBridge';
 export type SpeechCategory = 'dialogue' | 'foleySfx';
 
 export interface AnnotatedSegment {

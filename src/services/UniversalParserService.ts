@@ -4,6 +4,7 @@ import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import { SubtitleLine } from '../types';
 import { IOLogger } from '../lib/ioLogger';
+import { parseSubtitleFileNative, isTauriEnvironment } from '../lib/subtitleFuzzyBridge';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
 
@@ -21,6 +22,15 @@ export class UniversalParserService {
       // Otherwise, normalize CRLF to LF universally for text modes
       const isText = typeof content === 'string';
       const normalizedContent = isText ? (content as string).replace(/\r\n/g, '\n') : '';
+
+      // High-performance Native Rust parser for ASS, SRT, VTT, TXT in Tauri
+      if (isText && isTauriEnvironment() && ['ass', 'ssa', 'srt', 'vtt'].includes(extension || '')) {
+        const nativeResult = await parseSubtitleFileNative(normalizedContent, extension || 'ass');
+        if (nativeResult && nativeResult.length > 0) {
+          IOLogger.log('SUBTITLES', 'UniversalParser.parseNative', 'SUCCESS', { count: nativeResult.length, format: extension });
+          return nativeResult;
+        }
+      }
 
       let result: SubtitleLine[] = [];
       switch (extension) {

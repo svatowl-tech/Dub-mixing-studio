@@ -3,6 +3,7 @@ import {
   QualityControlIssue, FinalRenderResult, MixingAuditEntry,
   QaAuditReport, QaIncident, MasteringStats
 } from '../types';
+import { toNativeLocalPath } from '../lib/utils';
 
 /**
  * Service for Stage 4: Final Mix & Render (Финальный рендер и экспорт)
@@ -949,8 +950,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
         }> = [];
 
         // Main track: Russian Dubbing Full Mix
+        const mainTrackFile = stems[0]?.fileName 
+          ? toNativeLocalPath(stems[0]?.fileName) 
+          : toNativeLocalPath(`${defaultDestFolder}/${projectNameSafe}_Full_Mix_Master.wav`);
+
         audioTracksPayload.push({
-          filePath: stems[0]?.fileName || `${defaultDestFolder}/${projectNameSafe}_Full_Mix_Master.wav`,
+          filePath: mainTrackFile,
           title: 'Дубляж [Студия]',
           language: 'rus',
           codec: config.renderSettings?.audioCodec === 'pcm' ? 'flac' : 'aac',
@@ -960,15 +965,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
 
         // Track 2 (Optional): Original audio if multiAudioTracks is enabled
         if (config.renderSettings?.multiAudioTracks) {
-          audioTracksPayload.push({
-            filePath: project.videoUrl,
-            title: 'Оригинал (Original Audio)',
-            language: 'eng',
-            codec: 'aac',
-            bitrateKbps: 320,
-            isDefault: false
-          });
+          const rawOrigPath = toNativeLocalPath(project.referenceAudioPath || project.videoPath || project.videoUrl);
+          if (rawOrigPath) {
+            audioTracksPayload.push({
+              filePath: rawOrigPath,
+              title: 'Оригинал (Original Audio)',
+              language: 'eng',
+              codec: 'aac',
+              bitrateKbps: 320,
+              isDefault: false
+            });
+          }
         }
+
+        const sourceVideoDiskPath = toNativeLocalPath(project.videoPath || project.videoUrl);
 
         const renderRes = await invoke<{
           success: boolean;
@@ -979,12 +989,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
         }>('execute_final_video_render', {
           request: {
             projectId: project.id,
-            sourceVideoPath: project.videoUrl,
-            outputFilePath: finalOutFile,
+            sourceVideoPath: sourceVideoDiskPath,
+            outputFilePath: toNativeLocalPath(finalOutFile),
             audioTracks: audioTracksPayload,
             subtitleTracks: [
               {
-                filePath: `${defaultDestFolder}/${projectNameSafe}_subtitles.ass`,
+                filePath: toNativeLocalPath(`${defaultDestFolder}/${projectNameSafe}_subtitles.ass`),
                 title: 'Надписи и песни (Dub Studio)',
                 language: 'rus',
                 isDefault: true,

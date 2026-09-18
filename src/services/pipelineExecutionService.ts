@@ -1290,6 +1290,17 @@ export class PipelineExecutionService {
         if (stepId === 'silenceSplit') {
           const cfg = activePreset.phase2.silenceSplit;
           const origTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
+          console.group(`[Pipeline] ▶ Phase 2: Silence Split (VAD Speech Segmentation)`);
+          console.log(`[SilenceSplit] Configuration:`, {
+            thresholdDb: cfg.thresholdDb,
+            offsetThresholdDb: cfg.offsetThresholdDb ?? -45,
+            minSilenceDurationMs: cfg.minSilenceDurationMs,
+            minSegmentDurationMs: cfg.minSegmentDurationMs,
+            paddingPreMs: cfg.paddingPreMs ?? 80,
+            paddingPostMs: cfg.paddingPostMs ?? 150,
+            exportClips: cfg.exportClips
+          });
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
@@ -1302,11 +1313,13 @@ export class PipelineExecutionService {
           const splitTracks: AudioTrack[] = [];
           let totalSegments = 0;
           let processedTracksCount = 0;
+          const stepAuditLogs: any[] = [];
 
           for (const track of project.tracks) {
             const isOrigStem = (track.type === 'original' || (origTrack && track.id === origTrack.id)) && !TimingAlignmentService.isDubTrack(track);
             if (!isOrigStem) {
               processedTracksCount++;
+              console.log(`[SilenceSplit] Processing track "${track.name}" (${track.segments?.length || 0} initial segments)...`);
               const resTrack = await TimingAlignmentService.splitTrackBySilence(track, {
                 thresholdDb: cfg.thresholdDb,
                 offsetThresholdDb: cfg.offsetThresholdDb,
@@ -1319,6 +1332,27 @@ export class PipelineExecutionService {
               });
               totalSegments += resTrack.segments.length;
               splitTracks.push(resTrack);
+
+              console.log(`[SilenceSplit] Track "${track.name}" split into ${resTrack.segments.length} speech segments:`, 
+                resTrack.segments.map((s, idx) => ({
+                  idx: idx + 1,
+                  start: `${s.startTime.toFixed(2)}s`,
+                  end: `${(s.startTime + s.duration).toFixed(2)}s`,
+                  duration: `${s.duration.toFixed(2)}s`,
+                  fileOffset: `${(s.fileOffset || 0).toFixed(2)}s`,
+                  lufs: s.measuredLufs !== undefined ? `${s.measuredLufs.toFixed(1)} LUFS` : 'N/A'
+                }))
+              );
+
+              stepAuditLogs.push({
+                id: `audit-split-track-${track.id}-${Date.now()}`,
+                timestamp: Date.now(),
+                stageName: '2. Тайминг',
+                stepId: 'silenceSplit',
+                status: 'info',
+                title: `VAD нарезка: ${track.name}`,
+                message: `Дорожка "${track.name}" разделена на ${resTrack.segments.length} реплик. Паузы удалены (порог Onset: ${cfg.thresholdDb} dB, Offset: ${cfg.offsetThresholdDb ?? -45} dB, мин. пауза: ${cfg.minSilenceDurationMs} мс).`
+              });
             } else {
               splitTracks.push(track);
             }
@@ -1328,20 +1362,26 @@ export class PipelineExecutionService {
           await playbackEngine.updateTracks(splitTracks);
 
           const logMsg = `Нарезка VAD завершена: обработано дорожек: ${processedTracksCount}, сформировано ${totalSegments} реплик (Onset: ${cfg.thresholdDb} dB, Offset: ${cfg.offsetThresholdDb ?? -45} dB, пауза ${cfg.minSilenceDurationMs} мс).`;
+          console.log(`[SilenceSplit] Summary: ${logMsg}`);
+          console.groupEnd();
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
           }));
 
-          addAuditLogs([{
-            id: `audit-split-${Date.now()}`,
-            timestamp: Date.now(),
-            stageName: '2. Тайминг',
-            stepId: 'silenceSplit',
-            status: 'success',
-            title: 'Разрезка по тишине',
-            message: logMsg
-          }]);
+          addAuditLogs([
+            {
+              id: `audit-split-${Date.now()}`,
+              timestamp: Date.now(),
+              stageName: '2. Тайминг',
+              stepId: 'silenceSplit',
+              status: 'success',
+              title: 'Разрезка по тишине (VAD)',
+              message: logMsg
+            },
+            ...stepAuditLogs
+          ]);
 
           showToast(logMsg);
           return;
@@ -1351,11 +1391,14 @@ export class PipelineExecutionService {
           const whisperModel = activePreset.phase2.whisper?.model || 'whisper_base';
           const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
           const isInstalled = await AIModelService.getInstance().checkModelInstalled(whisperModel);
+          console.group(`[Pipeline] ▶ Phase 2: Whisper Speech-to-Text & Subtitle Alignment`);
+          console.log(`[Whisper] Model: ${whisperModel}, Installed: ${isInstalled}, MissingBehavior: ${missingBehavior}`);
 
           if (!isInstalled) {
             if (missingBehavior === 'skip') {
               const skipMsg = `⏭️ Шаг распознавания Whisper пропущен: модель "${whisperModel}" не скачана в Настройках.`;
               console.log(`[Pipeline] ${skipMsg}`);
+              console.groupEnd();
               setStepExecution(prev => ({
                 ...prev,
                 [stepId]: { status: 'success', progress: 100, log: skipMsg, hasRollback: false }
@@ -1380,6 +1423,7 @@ export class PipelineExecutionService {
           const updatedTracks: AudioTrack[] = [];
           let totalTranscribed = 0;
           let matchedScriptCount = 0;
+          const whisperAuditLogs: any[] = [];
 
           const dubTracks = project.tracks.filter(t => !((t.type === 'original' || (origTrack && t.id === origTrack.id)) && !TimingAlignmentService.isDubTrack(t)));
           const totalSegmentsCount = dubTracks.reduce((acc, t) => acc + (t.segments?.length || 0), 0);
@@ -1391,6 +1435,7 @@ export class PipelineExecutionService {
               continue;
             }
 
+            console.log(`[Whisper] Transcribing track "${track.name}" (${track.segments.length} segments)...`);
             const newSegs: AudioSegment[] = [];
             for (let sIdx = 0; sIdx < track.segments.length; sIdx++) {
               const seg = track.segments[sIdx];
@@ -1419,6 +1464,23 @@ export class PipelineExecutionService {
               }
               totalTranscribed++;
 
+              console.log(`[Whisper] Segment #${sIdx + 1} [${seg.startTime.toFixed(2)}s - ${(seg.startTime + seg.duration).toFixed(2)}s]:`, {
+                text: res.text,
+                confidence: `${(res.confidence * 100).toFixed(1)}%`,
+                matchedSubId: res.matchedSub?.id || 'none',
+                matchedSubText: res.matchedSub?.text || 'none'
+              });
+
+              whisperAuditLogs.push({
+                id: `audit-whisper-seg-${seg.id}-${Date.now()}`,
+                timestamp: Date.now(),
+                stageName: '2. Тайминг',
+                stepId: 'whisper',
+                status: 'info',
+                title: `Whisper: "${track.name}" [${seg.startTime.toFixed(1)}s]`,
+                message: `Распознано: "${res.text}" (достоверность ${(res.confidence * 100).toFixed(0)}%). ${res.matchedSub ? `Сопоставлено со строкой сценария #${res.matchedSub.id} ("${res.matchedSub.text}")` : 'Прямое совпадение со сценарием не найдено'}.`
+              });
+
               newSegs.push({
                 ...seg,
                 whisperText: res.text,
@@ -1438,20 +1500,26 @@ export class PipelineExecutionService {
           await playbackEngine.updateTracks(updatedTracks);
 
           const logMsg = `Whisper распознавание завершено: обработано ${totalTranscribed} фраз, сопоставлено со сценарием: ${matchedScriptCount}.`;
+          console.log(`[Whisper] Summary: ${logMsg}`);
+          console.groupEnd();
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
           }));
 
-          addAuditLogs([{
-            id: `audit-whisper-${Date.now()}`,
-            timestamp: Date.now(),
-            stageName: '2. Тайминг',
-            stepId: 'whisper',
-            status: 'success',
-            title: 'Whisper Распознавание речи',
-            message: logMsg
-          }]);
+          addAuditLogs([
+            {
+              id: `audit-whisper-${Date.now()}`,
+              timestamp: Date.now(),
+              stageName: '2. Тайминг',
+              stepId: 'whisper',
+              status: 'success',
+              title: 'Whisper Распознавание речи',
+              message: logMsg
+            },
+            ...whisperAuditLogs
+          ]);
 
           showToast(logMsg);
           return;
@@ -1459,6 +1527,10 @@ export class PipelineExecutionService {
 
         if (stepId === 'smartAlign') {
           const origTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
+          console.group(`[Pipeline] ▶ Phase 2: Smart Align (Acoustic Timing & Lip-Sync Alignment)`);
+          console.log(`[SmartAlign] Reference Voice Track:`, origTrack ? `"${origTrack.name}" (ID: ${origTrack.id})` : 'NOT FOUND (Using Subtitle Timecodes as Reference)');
+          console.log(`[SmartAlign] Preset Config:`, activePreset.phase2);
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
@@ -1474,10 +1546,12 @@ export class PipelineExecutionService {
           const dubTracks = project.tracks.filter(t => !((t.type === 'original' || (origTrack && t.id === origTrack.id)) && !TimingAlignmentService.isDubTrack(t)));
           const totalTrackCount = Math.max(1, dubTracks.length);
           let processedTracks = 0;
+          const alignAuditLogs: any[] = [];
 
           for (const track of project.tracks) {
             const isOrigStem = (track.type === 'original' || (origTrack && track.id === origTrack.id)) && !TimingAlignmentService.isDubTrack(track);
             if (!isOrigStem) {
+              console.log(`[SmartAlign] Aligning dub track "${track.name}" (${track.segments?.length || 0} segments)...`);
               setStepExecution(prev => ({
                 ...prev,
                 [stepId]: {
@@ -1508,6 +1582,18 @@ export class PipelineExecutionService {
               allIssues.push(...res.issues);
               alignedTracks.push(res.updatedTrack);
               processedTracks++;
+
+              console.log(`[SmartAlign] Track "${track.name}" aligned ${res.alignedCount} phrases. Average shift: ${res.avgShiftMs?.toFixed(1) || 0} ms. Detected issues: ${res.issues.length}`);
+
+              alignAuditLogs.push({
+                id: `audit-align-track-${track.id}-${Date.now()}`,
+                timestamp: Date.now(),
+                stageName: '2. Тайминг',
+                stepId: 'smartAlign',
+                status: res.issues.length > 0 ? 'warning' : 'success',
+                title: `Smart Align: ${track.name}`,
+                message: `Синхронизировано ${res.alignedCount} фраз с оригиналом (средний сдвиг: ${res.avgShiftMs?.toFixed(1) || 0} мс). Замечаний тайминга: ${res.issues.length}.`
+              });
             } else {
               alignedTracks.push(track);
             }
@@ -1517,21 +1603,27 @@ export class PipelineExecutionService {
           await playbackEngine.updateTracks(alignedTracks);
           setTimingIssues(allIssues);
 
-          const logMsg = `Smart Align: синхронизировано ${totalAligned} фраз дубляжа с оригинальным голосом и субтитрами.`;
+          const logMsg = `Smart Align: синхронизировано ${totalAligned} фраз дубляжа с оригинальным голосом и субтитрами. Обнаружено замечаний: ${allIssues.length}.`;
+          console.log(`[SmartAlign] Summary: ${logMsg}`);
+          console.groupEnd();
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
           }));
 
-          addAuditLogs([{
-            id: `audit-align-${Date.now()}`,
-            timestamp: Date.now(),
-            stageName: '2. Тайминг',
-            stepId: 'smartAlign',
-            status: 'success',
-            title: 'Smart Align',
-            message: logMsg
-          }]);
+          addAuditLogs([
+            {
+              id: `audit-align-${Date.now()}`,
+              timestamp: Date.now(),
+              stageName: '2. Тайминг',
+              stepId: 'smartAlign',
+              status: allIssues.length > 0 ? 'warning' : 'success',
+              title: 'Smart Align',
+              message: logMsg
+            },
+            ...alignAuditLogs
+          ]);
 
           showToast(logMsg);
           return;
@@ -1539,6 +1631,9 @@ export class PipelineExecutionService {
 
         if (stepId === 'subtitleCompliance') {
           const origTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
+          console.group(`[Pipeline] ▶ Phase 2: Subtitle Timing & Reading Speed Compliance`);
+          console.log(`[SubtitleCompliance] Tolerance: ±${activePreset.phase2.subtitleCompliance.toleranceMs} ms, Check Missing Phrases: ${activePreset.phase2.subtitleCompliance.checkMissingPhrases}`);
+
           const issues = TimingAlignmentService.validateAllTracksTiming(
             project.tracks,
             origTrack,
@@ -1547,6 +1642,14 @@ export class PipelineExecutionService {
             activePreset.phase2
           );
           setTimingIssues(issues);
+
+          console.log(`[SubtitleCompliance] Checked ${project.subtitles?.length || 0} subtitle lines against audio segments.`);
+          if (issues.length > 0) {
+            console.warn(`[SubtitleCompliance] Detected ${issues.length} compliance warnings:`, issues);
+          } else {
+            console.log(`[SubtitleCompliance] 100% compliance achieved! All voice segments match script cues within ±${activePreset.phase2.subtitleCompliance.toleranceMs}ms.`);
+          }
+          console.groupEnd();
 
           const logMsg = issues.length > 0 
             ? `Контроль субтитров: обнаружено ${issues.length} нестыковок тайминга (допуск ±${activePreset.phase2.subtitleCompliance.toleranceMs} мс).`
@@ -1557,15 +1660,26 @@ export class PipelineExecutionService {
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
           }));
 
-          addAuditLogs([{
-            id: `audit-subcomp-${Date.now()}`,
-            timestamp: Date.now(),
-            stageName: '2. Тайминг',
-            stepId: 'subtitleCompliance',
-            status: issues.length > 0 ? 'warning' : 'success',
-            title: 'Контроль попадания в субтитры',
-            message: logMsg
-          }]);
+          addAuditLogs([
+            {
+              id: `audit-subcomp-${Date.now()}`,
+              timestamp: Date.now(),
+              stageName: '2. Тайминг',
+              stepId: 'subtitleCompliance',
+              status: issues.length > 0 ? 'warning' as const : 'success' as const,
+              title: 'Контроль попадания в субтитры',
+              message: logMsg
+            },
+            ...issues.map(iss => ({
+              id: `audit-subcomp-issue-${iss.id}-${Date.now()}`,
+              timestamp: Date.now(),
+              stageName: '2. Тайминг',
+              stepId: 'subtitleCompliance',
+              status: iss.severity === 'error' ? 'error' as const : (iss.severity === 'warning' ? 'warning' as const : 'info' as const),
+              title: `Тайминг: ${iss.title}`,
+              message: `${iss.description} [Таймкод: ${iss.timestamp.toFixed(2)}s${iss.targetDuration ? `, целевая: ${iss.targetDuration.toFixed(2)}s` : ''}]`
+            }))
+          ]);
 
           showToast(logMsg);
           return;
@@ -1577,6 +1691,9 @@ export class PipelineExecutionService {
       // =========================================================================
       if (phaseNum === 3) {
         if (stepId === 'gainMatching') {
+          console.group(`[Pipeline] ▶ Phase 3: Gain Staging & Loudness Normalization`);
+          console.log(`[GainMatching] Target Dialogue: ${activePreset.phase3.gainMatching.targetDialogueLufs} LUFS, Physics Offset: ${activePreset.phase3.gainMatching.physicsOffsetDb} dB, Anti-click Fade: 10ms`);
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
@@ -1596,7 +1713,10 @@ export class PipelineExecutionService {
           await playbackEngine.updateTracks(gmRes.updatedTracks);
           addAuditLogs(gmRes.logs);
 
-          const logMsg = `Gain Matching: обработано ${gmRes.dialogueCount} реплик диалога и ${gmRes.physicsCount} звуков физики.`;
+          const logMsg = `Gain Matching: обработано ${gmRes.dialogueCount} реплик диалога и ${gmRes.physicsCount} звуков физики. Применены антиклик-фейды 10 мс.`;
+          console.log(`[GainMatching] Summary: ${logMsg}`, gmRes);
+          console.groupEnd();
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
@@ -1607,6 +1727,9 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'ducking') {
+          console.group(`[Pipeline] ▶ Phase 3: Sidechain Auto-Ducking Background Music & SFX`);
+          console.log(`[AutoDucking] Depth: ${activePreset.phase3.ducking.duckingDb} dB, Attack: ${activePreset.phase3.ducking.attackMs} ms, Hold: ${activePreset.phase3.ducking.holdMs} ms, Release: ${activePreset.phase3.ducking.releaseMs} ms`);
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
@@ -1627,8 +1750,11 @@ export class PipelineExecutionService {
           addAuditLogs(duckRes.logs);
 
           const logMsg = duckRes.duckedIntervalsCount > 0 
-            ? `Auto-Ducking: приглушено ${duckRes.duckedIntervalsCount} сегментов фоновой музыки на ${Math.abs(duckRes.appliedDuckingDb)} dB.`
-            : `Auto-Ducking: проверено, уровни фоновой музыки в норме.`;
+            ? `Auto-Ducking: приглушено ${duckRes.duckedIntervalsCount} сегментов фоновой музыки на ${Math.abs(duckRes.appliedDuckingDb)} dB (Attack: ${activePreset.phase3.ducking.attackMs}ms, Release: ${activePreset.phase3.ducking.releaseMs}ms).`
+            : `Auto-Ducking: огибающая проверена, уровни фоновой музыки сбалансированы.`;
+
+          console.log(`[AutoDucking] Summary: ${logMsg}`, duckRes);
+          console.groupEnd();
 
           setStepExecution(prev => ({
             ...prev,
@@ -1640,6 +1766,9 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'autoFxAnalysis') {
+          console.group(`[Pipeline] ▶ Phase 3: Auto-FX Acoustic Environment Analysis & Transfer`);
+          console.log(`[AutoFX] Detect Panning: ${activePreset.phase3.autoFxAnalysis.detectPanning}, Detect Reverb: ${activePreset.phase3.autoFxAnalysis.detectReverb}, Detect Delay: ${activePreset.phase3.autoFxAnalysis.detectDelay}`);
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
@@ -1658,7 +1787,10 @@ export class PipelineExecutionService {
           await playbackEngine.updateTracks(fxRes.updatedTracks);
           addAuditLogs(fxRes.logs);
 
-          const logMsg = `Auto-FX: проанализировано ${fxRes.analyzedSegmentsCount} фраз оригинала. Эффекты перенесены на дорожки дубляжа.`;
+          const logMsg = `Auto-FX: проанализировано ${fxRes.analyzedSegmentsCount} фраз оригинала. Акустическое окружение (RT60, панорама, спектральный наклон) перенесено на дорожки дубляжа.`;
+          console.log(`[AutoFX] Summary: ${logMsg}`, fxRes);
+          console.groupEnd();
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
@@ -1672,8 +1804,11 @@ export class PipelineExecutionService {
           const busConfig = activePreset.phase3.vocalBusProcessing;
           const isRustDsp = busConfig.mode === 'rustDsp';
           const busTitle = isRustDsp
-            ? 'Студийный Rust DSP рэк (6 ступеней)'
+            ? 'Студийный Rust DSP рэк (6 ступеней: HPF, EQ, Compressor, De-Esser, Saturation, Reverb)'
             : (busConfig.vstRack?.presetName || 'Пользовательский VST-рэк');
+
+          console.group(`[Pipeline] ▶ Phase 3: Master Vocal Bus Chain Processing`);
+          console.log(`[VocalBus] Active Mode: ${busConfig.mode}, Config Title: ${busTitle}`);
 
           setStepExecution(prev => ({
             ...prev,
@@ -1694,6 +1829,9 @@ export class PipelineExecutionService {
           addAuditLogs(busRes.logs);
 
           const logMsg = `Мастер-шина вокала: активировано ${busRes.activePluginsCount} звеньев обработки (${busTitle}).`;
+          console.log(`[VocalBus] Summary: ${logMsg}`, busRes);
+          console.groupEnd();
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
@@ -1709,6 +1847,9 @@ export class PipelineExecutionService {
       // =========================================================================
       if (phaseNum === 4) {
         if (stepId === 'qualityControl') {
+          console.group(`[Pipeline] ▶ Phase 4: Pre-Release Quality Control QA Audit`);
+          console.log(`[QualityControl] Log Clipped: ${activePreset.phase4.qualityControl.logClippedSegments}, Detect Long Silences: ${activePreset.phase4.qualityControl.detectLongSilences}, Detect Overlaps: ${activePreset.phase4.qualityControl.detectOverlappingAudios}`);
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
@@ -1725,6 +1866,8 @@ export class PipelineExecutionService {
 
           setQaIssues(qcRes.issues);
           const logMsg = `QC Контроль качества: проверено ${project.tracks.length} дорожек. Замечаний: ${qcRes.issues.length} (LUFS: ${qcRes.integratedLufs.toFixed(1)}, Max True-Peak: ${qcRes.maxTruePeakDb.toFixed(2)} dBTP).`;
+          console.log(`[QualityControl] Summary: ${logMsg}`, qcRes);
+          console.groupEnd();
 
           setStepExecution(prev => ({
             ...prev,
@@ -1737,6 +1880,9 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'masteringLimiter') {
+          console.group(`[Pipeline] ▶ Phase 4: True-Peak 4x Mastering Limiter`);
+          console.log(`[MasteringLimiter] Ceiling: ${activePreset.phase4.masteringLimiter.truePeakCeilingDb} dBTP, Target LUFS: ${activePreset.phase4.masteringLimiter.targetIntegratedLufs}, Standard: ${activePreset.phase4.masteringLimiter.loudnessStandard}`);
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
@@ -1760,6 +1906,9 @@ export class PipelineExecutionService {
             ? `Мастеринг выполнен: ${mastRes.masteringStats.finalIntegratedLufs} LUFS, TP: ${mastRes.masteringStats.finalTruePeakDbtp} dBTP, компрессия: -${mastRes.masteringStats.maxGainReductionDb} dB (${mastRes.masteringStats.isCompliant ? 'Соответствует стандарту' : 'Внимание'}).`
             : `Мастеринг-лимитер: выходной потолок ${mastRes.ceilingDb.toFixed(1)} dBTP, стандарт ${activePreset.phase4.masteringLimiter.loudnessStandard} (${activePreset.phase4.masteringLimiter.targetIntegratedLufs} LUFS).`;
           
+          console.log(`[MasteringLimiter] Summary: ${logMsg}`, mastRes);
+          console.groupEnd();
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
@@ -1770,9 +1919,14 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'stemExport' || stepId === 'renderSettings') {
+          console.group(`[Pipeline] ▶ Phase 4: Native FFmpeg Muxing & Audio Stems Export`);
+          console.log(`[FinalRender] Starting native export...`);
           if (handleStartFinalRender) {
             await handleStartFinalRender();
           }
+          console.log(`[FinalRender] Native export initiated.`);
+          console.groupEnd();
+
           setStepExecution(prev => ({
             ...prev,
             [stepId]: {
@@ -1786,6 +1940,7 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'subtitleBurn') {
+          console.group(`[Pipeline] ▶ Phase 4: Subtitle Formatting & .ASS Script Generation`);
           const subs = project.subtitles || [];
           const subConfig = activePreset.phase4.subtitleBurn;
           const { assContent } = FinalRenderService.generateSubtitlesFiles(subs, subConfig);
@@ -1805,11 +1960,24 @@ export class PipelineExecutionService {
           });
 
           const logMsg = `Субтитры готовы: ${subs.length} реплик (Диалоги: ${actorCount}, Закадр: ${voCount}, Надписи/Вывески: ${signsCount}). Шрифт: ${subConfig.fontName} ${subConfig.fontSize}px, цвет: ${subConfig.fontColor}, режим: ${subConfig.burnMode || 'hardsub_all'}. Сгенерирован скрипт .ASS (${Math.round(assContent.length / 1024 * 10) / 10} KB).`;
+          console.log(`[SubtitleBurn] Summary: ${logMsg}`);
+          console.groupEnd();
           
           setStepExecution(prev => ({
             ...prev,
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
           }));
+
+          addAuditLogs([{
+            id: `audit-subburn-${Date.now()}`,
+            timestamp: Date.now(),
+            stageName: '4. Мастеринг',
+            stepId: 'subtitleBurn',
+            status: 'success',
+            title: 'Форматирование и рендер субтитров',
+            message: logMsg
+          }]);
+
           showToast(`Субтитры подготовлены (${subs.length} реплик)`);
           return;
         }

@@ -177,10 +177,11 @@ pub async fn run_project_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Err
             sample_rate INTEGER NOT NULL DEFAULT 48000,
             frame_rate REAL NOT NULL DEFAULT 24.0,
             target_lufs REAL NOT NULL DEFAULT -14.0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
             audio_offset_ms REAL NOT NULL DEFAULT 0.0,
-            metadata_json TEXT NOT NULL DEFAULT '{}'
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            config_json TEXT NOT NULL DEFAULT '{}'
         );
     ").execute(pool).await?;
 
@@ -192,6 +193,8 @@ pub async fn run_project_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Err
     let _ = sqlx::query("ALTER TABLE projects ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';").execute(pool).await;
     let _ = sqlx::query("ALTER TABLE projects ADD COLUMN audio_offset_ms REAL NOT NULL DEFAULT 0.0;").execute(pool).await;
     let _ = sqlx::query("ALTER TABLE projects ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}';").execute(pool).await;
+    let _ = sqlx::query("UPDATE projects SET config_json = '{}' WHERE config_json IS NULL;").execute(pool).await;
 
     // 2. Таблица дорожек
     sqlx::query("
@@ -291,9 +294,9 @@ async fn execute_save_project_in_tx(
     // 1. UPSERT Project
     sqlx::query("
         INSERT INTO projects (
-            id, name, sample_rate, frame_rate, target_lufs, created_at, updated_at, audio_offset_ms, metadata_json
+            id, name, sample_rate, frame_rate, target_lufs, created_at, updated_at, audio_offset_ms, metadata_json, config_json
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             sample_rate = excluded.sample_rate,
@@ -301,7 +304,8 @@ async fn execute_save_project_in_tx(
             target_lufs = excluded.target_lufs,
             updated_at = excluded.updated_at,
             audio_offset_ms = excluded.audio_offset_ms,
-            metadata_json = excluded.metadata_json
+            metadata_json = excluded.metadata_json,
+            config_json = excluded.config_json
     ")
     .bind(&project.id)
     .bind(&project.name)
@@ -311,6 +315,7 @@ async fn execute_save_project_in_tx(
     .bind(&created_at)
     .bind(&updated_at)
     .bind(project.audio_offset_ms)
+    .bind(&meta_str)
     .bind(&meta_str)
     .execute(&mut **tx)
     .await?;
@@ -545,7 +550,7 @@ pub async fn execute_load_project(
     project_id: &str,
 ) -> Result<FullProjectPayload, sqlx::Error> {
     let proj_row = sqlx::query("
-        SELECT id, name, sample_rate, frame_rate, target_lufs, created_at, updated_at, audio_offset_ms, metadata_json
+        SELECT id, name, sample_rate, frame_rate, target_lufs, created_at, updated_at, audio_offset_ms, metadata_json, config_json
         FROM projects WHERE id = ?
     ")
     .bind(project_id)
@@ -554,8 +559,14 @@ pub async fn execute_load_project(
 
     let proj_row = proj_row.ok_or_else(|| sqlx::Error::RowNotFound)?;
 
-    let meta_json_str: String = proj_row.get("metadata_json");
-    let metadata: serde_json::Value = serde_json::from_str(&meta_json_str).unwrap_or_else(|_| serde_json::json!({}));
+    let meta_json_str: String = proj_row.try_get("metadata_json").unwrap_or_else(|_| "{}".to_string());
+    let config_json_str: String = proj_row.try_get("config_json").unwrap_or_else(|_| "{}".to_string());
+
+    let metadata: serde_json::Value = if meta_json_str.trim().is_empty() || meta_json_str == "{}" {
+        serde_json::from_str(&config_json_str).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::from_str(&meta_json_str).unwrap_or_else(|_| serde_json::json!({}))
+    };
 
     // Загрузка дорожек
     let track_rows = sqlx::query("

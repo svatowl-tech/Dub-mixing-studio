@@ -201,16 +201,24 @@ pub async fn save_project_to_db(state: State<'_, AppState>, payload: ProjectData
 
     log_debug(&format!("Saving {} tracks...", payload.tracks.len()));
 
+    let sample_rate = payload.config.get("audioSettings")
+        .and_then(|a| a.get("sampleRate"))
+        .and_then(|s| s.as_i64())
+        .unwrap_or(48000);
+
     // UPSERT Project
     sqlx::query("
-        INSERT INTO projects (id, name, config_json, audio_offset_ms) 
-        VALUES (?1, ?2, ?3, ?4)
+        INSERT INTO projects (id, name, config_json, metadata_json, sample_rate, audio_offset_ms) 
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
         ON CONFLICT(id) DO UPDATE SET 
-        name=excluded.name, config_json=excluded.config_json, audio_offset_ms=excluded.audio_offset_ms
+        name=excluded.name, config_json=excluded.config_json, metadata_json=excluded.metadata_json,
+        sample_rate=excluded.sample_rate, audio_offset_ms=excluded.audio_offset_ms
     ")
     .bind(&payload.id)
     .bind(&payload.name)
     .bind(&config_str)
+    .bind(&config_str)
+    .bind(sample_rate)
     .bind(payload.audio_offset_ms.unwrap_or(0.0))
     .execute(pool)
     .await.map_err(|e| e.to_string())?;
@@ -289,7 +297,7 @@ pub async fn load_project_from_db(state: State<'_, AppState>, project_id: String
     let mutex = state.db.lock().await;
     let pool = mutex.as_ref().ok_or("Database not initialized")?;
 
-    let proj_row = sqlx::query("SELECT id, name, config_json, audio_offset_ms FROM projects WHERE id = ?")
+    let proj_row = sqlx::query("SELECT id, name, COALESCE(NULLIF(config_json, ''), NULLIF(metadata_json, ''), '{}') as config_json, audio_offset_ms FROM projects WHERE id = ?")
         .bind(&project_id)
         .fetch_optional(pool)
         .await.map_err(|e| e.to_string())?;
