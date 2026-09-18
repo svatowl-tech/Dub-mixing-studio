@@ -8,10 +8,10 @@
 use std::time::Instant;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use tauri::{command, State};
+use tauri::State;
 
 use crate::audio_buffer_manager::AudioBufferCache;
-use crate::logger::{log_debug, log_info};
+use crate::logger::log_debug;
 use crate::smart_align::resolve_audio_samples;
 
 /// Параметры запроса бакетизации для канваса

@@ -11,7 +11,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::logger::{log_debug, log_info};
+use crate::logger::log_info;
 
 /// Типы фиксируемых проблем тайминга
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,7 +133,7 @@ impl TimingSweepLineProcessor {
 
         // 1. Быстрая сортировка сегментов по таймкоду начала
         let mut sorted_segs: Vec<&SegmentAuditInput> = track.segments.iter().collect();
-        sorted_segs.sort_unwind_safe(|a, b| a.start_time_ms.cmp(&b.start_time_ms));
+        sorted_segs.sort_by(|a, b| a.start_time_ms.cmp(&b.start_time_ms));
 
         // 2. Однопроходный скан Sweep-Line по соседним интервалам
         for i in 1..sorted_segs.len() {
@@ -377,8 +377,7 @@ impl TimingSweepLineProcessor {
                     }
 
                     // Пересечение временных рамок с допуском 750 мс
-                    let sub_len = sub.end_time_ms.saturating_sub(sub.start_time_ms);
-                    let overlaps = (seg_start <= sub.end_time_ms + 750 && seg_end + 750 >= sub.start_time_ms);
+                    let overlaps = seg_start <= sub.end_time_ms + 750 && seg_end + 750 >= sub.start_time_ms;
 
                     if overlaps {
                         // Если роль совпадает с именем дорожки — идеальное совпадение

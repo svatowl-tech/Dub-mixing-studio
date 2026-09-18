@@ -6,13 +6,12 @@
 // ============================================================================
 
 use std::cmp::min;
-use std::collections::HashMap;
 use std::time::Instant;
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::logger::{log_debug, log_info};
+use crate::logger::log_info;
 
 // ============================================================================
 // 1. DATA MODELS & STRUCTS
@@ -412,7 +411,7 @@ impl NativeSubtitleParser {
                         let mut end_ms = 0u64;
                         let mut style = "Default".to_string();
                         let mut actor = "".to_string();
-                        let mut raw_text = "";
+                        let mut raw_text = String::new();
                         let mut effect = "".to_string();
 
                         if !format_cols.is_empty() {
@@ -427,7 +426,7 @@ impl NativeSubtitleParser {
                                     "style" => style = val.to_string(),
                                     "name" | "actor" => actor = val.to_string(),
                                     "effect" => effect = val.to_string(),
-                                    "text" => raw_text = val,
+                                    "text" => raw_text = val.to_string(),
                                     _ => {}
                                 }
                             }
@@ -439,7 +438,7 @@ impl NativeSubtitleParser {
                             raw_text = parts[9..].join(",");
                         }
 
-                        let clean_text = Self::clean_subtitle_text(raw_text);
+                        let clean_text = Self::clean_subtitle_text(&raw_text);
                         let duration_ms = end_ms.saturating_sub(start_ms);
 
                         let role = if !actor.is_empty() {
@@ -458,7 +457,7 @@ impl NativeSubtitleParser {
                             end_ms,
                             duration_ms,
                             role,
-                            raw_text: raw_text.to_string(),
+                            raw_text,
                             clean_text,
                             style: Some(style),
                             actor: if actor.is_empty() { None } else { Some(actor) },

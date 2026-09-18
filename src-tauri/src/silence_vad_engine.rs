@@ -14,7 +14,7 @@ use tauri::State;
 
 use crate::audio_buffer_manager::AudioBufferCache;
 use crate::file_io::normalize_windows_path;
-use crate::logger::{log_debug, log_info};
+use crate::logger::log_info;
 
 /// Конфигурация параметров Voice Activity Detection (VAD)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,7 +312,7 @@ impl NativeVadProcessor {
             ((f * hop_size) as f64 / sample_rate as f64).min(total_duration)
         };
 
-        let mut time_spans: Vec<(f64, f64)> = raw_intervals
+        let time_spans: Vec<(f64, f64)> = raw_intervals
             .into_iter()
             .map(|(sf, ef)| (frame_to_sec(sf), frame_to_sec(ef) + (window_size as f64 / sample_rate as f64)))
             .collect();

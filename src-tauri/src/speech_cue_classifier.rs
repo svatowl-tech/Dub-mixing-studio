@@ -17,7 +17,7 @@ use regex::Regex;
 use rustfft::{FftPlanner, num_complex::Complex32};
 use serde::{Deserialize, Serialize};
 
-use crate::logger::{log_debug, log_info, log_warn};
+use crate::logger::log_info;
 
 // ============================================================================
 // 1. DATA MODELS & STRUCTS
