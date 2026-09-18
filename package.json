@@ -1,7 +1,7 @@
 {
   "name": "dub-mixing-studio",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Dub Mixing Studio - Professional Audio Mixing, Dubbing and Source Separation Software",
   "author": "Dub Mixing Studio Team",
   "type": "module",

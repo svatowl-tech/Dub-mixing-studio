@@ -648,7 +648,6 @@ pub async fn download_ai_model(
         // Прячем окно консоли на Windows
         #[cfg(target_os = "windows")]
         {
-            use std::os::windows::process::CommandExt;
             curl_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
 

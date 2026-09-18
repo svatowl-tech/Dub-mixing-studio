@@ -57,6 +57,7 @@ pub struct BufferCacheStats {
 }
 
 /// Тип хранения аудио-буфера в разделяемой памяти
+#[allow(dead_code)]
 pub enum AudioBufferData {
     /// Zero-Copy Memory Mapping для несжатых WAV файлов (Zero RAM overhead)
     MmapWav {

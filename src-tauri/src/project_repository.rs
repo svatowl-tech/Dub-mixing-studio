@@ -184,6 +184,15 @@ pub async fn run_project_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Err
         );
     ").execute(pool).await?;
 
+    // Миграции для обновления существующей схемы базы данных:
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN sample_rate INTEGER NOT NULL DEFAULT 48000;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN frame_rate REAL NOT NULL DEFAULT 24.0;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN target_lufs REAL NOT NULL DEFAULT -14.0;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN created_at TEXT NOT NULL DEFAULT '';").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN audio_offset_ms REAL NOT NULL DEFAULT 0.0;").execute(pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';").execute(pool).await;
+
     // 2. Таблица дорожек
     sqlx::query("
         CREATE TABLE IF NOT EXISTS tracks (

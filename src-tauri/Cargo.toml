@@ -1,6 +1,6 @@
 [package]
 name = "dubstudio"
-version = "1.1.0"
+version = "1.2.0"
 description = "Dub Mixing Studio - Professional Audio Mixing, Dubbing and Source Separation Software"
 authors = ["Dub Mixing Studio Team"]
 edition = "2021"
