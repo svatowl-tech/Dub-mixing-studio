@@ -80,6 +80,58 @@ export interface WaveformTransformResult {
   affectedCount: number;
 }
 
+export interface IntelligentClipResult {
+  clipId: string;
+  originalPath: string;
+  processedPath: string;
+}
+
+export interface IntelligentNormResult {
+  trackId: string;
+  processedClips: IntelligentClipResult[];
+}
+
+export interface SpectralClipResult {
+  clipId: string;
+  originalPath: string;
+  processedPath: string;
+}
+
+export interface SpectralBalancingResult {
+  trackId: string;
+  processedClips: SpectralClipResult[];
+}
+
+export interface LevelerClipResult {
+  clipId: string;
+  originalPath: string;
+  processedPath: string;
+}
+
+export interface SpeechLevelerResult {
+  trackId: string;
+  processedClips: LevelerClipResult[];
+}
+
+export interface SpotClipResult {
+  clipId: string;
+  originalPath: string;
+  processedPath: string;
+}
+
+export interface SpotCleanerResult {
+  trackId: string;
+  processedClips: SpotClipResult[];
+}
+
+export interface ClipProcessingInput {
+  id: string;
+  filePath: string;
+  startTimeMs: number;
+  durationMs: number;
+  sourceOffsetMs: number;
+}
+
 // 1. Normalization & Upward Compression
 export async function normalizeAudioNative(
   inputPath: string,
@@ -90,6 +142,126 @@ export async function normalizeAudioNative(
     inputPath,
     outputPath,
     targetLufs,
+  });
+}
+
+// ============================================================================
+// Phase 1.1: Intelligent Track Analysis & Normalization
+// ============================================================================
+
+export type WaveformClassification = 'silence' | 'noise' | 'quietFragment' | 'speech';
+
+export interface TrackAnalysisSegment {
+  startMs: number;
+  durationMs: number;
+  classification: WaveformClassification;
+  avgRmsDb: number;
+  peakDb: number;
+  isSibilant: boolean;
+  isPlosive: boolean;
+  isClick: boolean;
+}
+
+export interface TrackSpectralState {
+  avgLowsDb: number;
+  avgMidsDb: number;
+  avgHighsDb: number;
+  peakFreq: number;
+  peakFreqDb: number;
+  lowBassBoosted: boolean;
+  lowBassAttenuated: boolean;
+  highTrebleBoosted: boolean;
+  resonanceDetected: boolean;
+  spectralCentroidHz: number;
+  spectrumDb: number[];
+}
+
+export interface TrackAnalysisReport {
+  trackId: string;
+  trackName: string;
+  segments: TrackAnalysisSegment[];
+  spectralState: TrackSpectralState;
+  analysisTimestamp: number;
+}
+
+export interface ClipAnalysisInput {
+  id: string;
+  filePath: string;
+  startTimeMs: number;
+  durationMs: number;
+  sourceOffsetMs?: number;
+}
+
+export interface TrackAnalysisInput {
+  id: string;
+  name: string;
+  trackType: string;
+  clips: ClipAnalysisInput[];
+}
+
+export async function analyzeVoiceTracksNative(
+  projectDir: string,
+  tracks: TrackAnalysisInput[]
+): Promise<TrackAnalysisReport[]> {
+  return await invoke<TrackAnalysisReport[]>('analyze_voice_tracks', {
+    projectDir,
+    tracks,
+  });
+}
+
+export async function loadTrackAnalysisNative(
+  projectDir: string
+): Promise<TrackAnalysisReport[]> {
+  return await invoke<TrackAnalysisReport[]>('load_track_analysis', {
+    projectDir,
+  });
+}
+
+export async function processIntelligentNormalizationWithClipsNative(
+  projectDir: string,
+  trackId: string,
+  clips: ClipProcessingInput[]
+): Promise<IntelligentNormResult> {
+  return await invoke<IntelligentNormResult>('process_intelligent_normalization_with_clips', {
+    projectDir,
+    trackId,
+    clips,
+  });
+}
+
+export async function processSpectralBalancingNative(
+  projectDir: string,
+  trackId: string,
+  clips: ClipProcessingInput[]
+): Promise<SpectralBalancingResult> {
+  return await invoke<SpectralBalancingResult>('process_spectral_balancing', {
+    projectDir,
+    trackId,
+    clips,
+  });
+}
+
+export async function processSpeechLevelerNative(
+  projectDir: string,
+  trackId: string,
+  clips: ClipProcessingInput[]
+): Promise<SpeechLevelerResult> {
+  return await invoke<SpeechLevelerResult>('process_speech_leveler', {
+    projectDir,
+    trackId,
+    clips,
+  });
+}
+
+export async function processVocalSpotCleaningNative(
+  projectDir: string,
+  trackId: string,
+  clips: ClipProcessingInput[]
+): Promise<SpotCleanerResult> {
+  return await invoke<SpotCleanerResult>('process_vocal_spot_cleaning', {
+    projectDir,
+    trackId,
+    clips,
   });
 }
 

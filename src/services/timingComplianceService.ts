@@ -14,6 +14,9 @@ export interface SegmentAuditInput {
   matchedSubId?: string;
   fileOffsetMs?: number;
   fileDurationMs?: number;
+  isSibilant?: boolean;
+  isPlosive?: boolean;
+  isClick?: boolean;
 }
 
 export interface TrackAuditInput {
@@ -33,7 +36,7 @@ export interface SubtitleAuditInput {
 
 export interface RustTimingIssue {
   id: string;
-  issueType: 'overlap' | 'tooShort' | 'tooLong' | 'missing' | 'leadLagDelta';
+  issueType: 'overlap' | 'tooShort' | 'tooLong' | 'missing' | 'leadLagDelta' | 'sibilantExcess' | 'plosiveDetected' | 'clickFound';
   trackId: string;
   trackName?: string;
   segmentId?: string;
@@ -83,6 +86,9 @@ class TimingComplianceService {
             matchedSubId: s.matchedSubId,
             fileOffsetMs: s.fileOffset ? Math.round(s.fileOffset * 1000) : undefined,
             fileDurationMs: s.fileDuration ? Math.round(s.fileDuration * 1000) : undefined,
+            isSibilant: s.analysisFlags?.isSibilant,
+            isPlosive: s.analysisFlags?.isPlosive,
+            isClick: s.analysisFlags?.isClick,
           }))
         }));
 
@@ -127,6 +133,15 @@ class TimingComplianceService {
         break;
       case 'missing':
         type = 'missing';
+        break;
+      case 'sibilantExcess':
+        type = 'sibilant';
+        break;
+      case 'plosiveDetected':
+        type = 'plosive';
+        break;
+      case 'clickFound':
+        type = 'click';
         break;
       case 'leadLagDelta':
       default:

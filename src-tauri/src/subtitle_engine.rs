@@ -678,9 +678,11 @@ pub async fn process_subtitle_burn_stage(
 
     let cues_count = target_subtitles.len();
 
-    // Create temporary .ass file
-    let temp_dir = std::env::temp_dir();
-    let temp_ass_path = temp_dir.join(format!("dubstudio_subtitles_{}.ass", uuid::Uuid::new_v4()));
+    // Create temporary .ass file next to input video (on the spacious drive)
+    let in_vid_norm = crate::file_io::normalize_windows_path(&in_vid);
+    let in_vid_path = std::path::Path::new(&in_vid_norm);
+    let parent_dir = in_vid_path.parent().unwrap_or(in_vid_path);
+    let temp_ass_path = parent_dir.join(format!("dubstudio_subtitles_{}.ass", uuid::Uuid::new_v4()));
 
     export_subtitles_to_disk(&target_subtitles, &sub_config, &temp_ass_path, None)?;
 

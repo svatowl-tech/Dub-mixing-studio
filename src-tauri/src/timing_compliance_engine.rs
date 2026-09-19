@@ -27,6 +27,12 @@ pub enum TimingIssueType {
     Missing,
     /// Опережение или запаздывание старта фразы относительно оригинала/саба
     LeadLagDelta,
+    /// Избыточные сибилянты (свистящие)
+    SibilantExcess,
+    /// Взрывные согласные (Plosives/P-pops)
+    PlosiveDetected,
+    /// Щелчки или артефакты (Clicks)
+    ClickFound,
 }
 
 /// Итоговая запись аудита соответствия таймингов
@@ -74,6 +80,9 @@ pub struct SegmentAuditInput {
     pub matched_sub_id: Option<String>,
     pub file_offset_ms: Option<u64>,
     pub file_duration_ms: Option<u64>,
+    pub is_sibilant: Option<bool>,
+    pub is_plosive: Option<bool>,
+    pub is_click: Option<bool>,
 }
 
 /// Входные данные дорожки проекта для аудита
@@ -492,6 +501,64 @@ impl TimingSweepLineProcessor {
                         actual_duration_ms: Some(seg_dur),
                     });
                 }
+            }
+
+            // 5. Проверка на акустические аномалии (из нашего анализатора)
+            if seg.is_sibilant.unwrap_or(false) {
+                issues.push(TimingIssue {
+                    id: format!("val_sib_{}", seg.id),
+                    issue_type: TimingIssueType::SibilantExcess,
+                    track_id: track.id.clone(),
+                    track_name: Some(track.name.clone()),
+                    segment_id: Some(seg.id.clone()),
+                    time_start_ms: seg_start,
+                    time_end_ms: seg_end,
+                    delta_ms: 0,
+                    message: format!("На дорожке \"{}\" обнаружены избыточные сибилянты (свистящие)", track.name),
+                    severity: "info".to_string(),
+                    can_auto_fix: true,
+                    matched_sub_text: seg.text.clone(),
+                    target_duration_ms: None,
+                    actual_duration_ms: Some(seg_dur),
+                });
+            }
+
+            if seg.is_plosive.unwrap_or(false) {
+                issues.push(TimingIssue {
+                    id: format!("val_plo_{}", seg.id),
+                    issue_type: TimingIssueType::PlosiveDetected,
+                    track_id: track.id.clone(),
+                    track_name: Some(track.name.clone()),
+                    segment_id: Some(seg.id.clone()),
+                    time_start_ms: seg_start,
+                    time_end_ms: seg_end,
+                    delta_ms: 0,
+                    message: format!("На дорожке \"{}\" обнаружены взрывные согласные (P-pops)", track.name),
+                    severity: "info".to_string(),
+                    can_auto_fix: true,
+                    matched_sub_text: seg.text.clone(),
+                    target_duration_ms: None,
+                    actual_duration_ms: Some(seg_dur),
+                });
+            }
+
+            if seg.is_click.unwrap_or(false) {
+                issues.push(TimingIssue {
+                    id: format!("val_clk_{}", seg.id),
+                    issue_type: TimingIssueType::ClickFound,
+                    track_id: track.id.clone(),
+                    track_name: Some(track.name.clone()),
+                    segment_id: Some(seg.id.clone()),
+                    time_start_ms: seg_start,
+                    time_end_ms: seg_end,
+                    delta_ms: 0,
+                    message: format!("На дорожке \"{}\" обнаружены щелчки или артефакты", track.name),
+                    severity: "info".to_string(),
+                    can_auto_fix: true,
+                    matched_sub_text: seg.text.clone(),
+                    target_duration_ms: None,
+                    actual_duration_ms: Some(seg_dur),
+                });
             }
         }
 

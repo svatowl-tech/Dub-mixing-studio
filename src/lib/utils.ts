@@ -194,6 +194,14 @@ export const getGlobalAudioSettings = (): AudioSettings => {
  */
 export const safeConfirm = async (message: string, defaultValue: boolean = false): Promise<boolean> => {
   try {
+    if (typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__)) {
+      try {
+        const { ask } = await import('@tauri-apps/plugin-dialog');
+        return await ask(message, { title: 'Подтверждение', kind: 'warning' });
+      } catch (tauriErr) {
+        console.warn("[safeConfirm] Tauri ask failed, falling back to window.confirm:", tauriErr);
+      }
+    }
     const res = window.confirm(message);
     if ((res as any) instanceof Promise) {
       return await (res as any);

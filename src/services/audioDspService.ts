@@ -1,4 +1,4 @@
-import { AudioTrack, PrepProcessingConfig } from '../types';
+import { AudioTrack, PrepProcessingConfig, AudioSegment } from '../types';
 import { TimingAlignmentService } from './timingAlignmentService';
 import {
   applyWaveformUpwardCompressionNative,
@@ -10,6 +10,14 @@ import {
   transformWaveformDenoiseNative,
   transformWaveformDereverbNative,
   transformWaveformLevelerNative,
+  processIntelligentNormalizationWithClipsNative,
+  processSpectralBalancingNative,
+  processSpeechLevelerNative,
+  processVocalSpotCleaningNative,
+  analyzeVoiceTracksNative,
+  TrackAnalysisInput,
+  TrackAnalysisReport,
+  ClipProcessingInput,
 } from '../lib/dspBridge';
 
 export interface DspProcessResult {
@@ -144,6 +152,401 @@ export class AudioDspService {
         appliedGainDb: gainDeltaDb,
         upwardBoostedSegments: upwardBoostedCount,
       },
+      logSummary,
+      detailedLogs,
+    };
+  }
+
+  /**
+   * 1.0 ТРЕК-АНАЛИЗАТОР (Acoustic & Spectral Analysis)
+   * Анализирует дорожки и размечает сегменты (сибилянты, взрывные, клики, тишина).
+   */
+  public static async analyzeProjectVoiceTracksAsync(
+    projectDir: string,
+    tracks: AudioTrack[]
+  ): Promise<{ updatedTracks: AudioTrack[]; reports: TrackAnalysisReport[] }> {
+    const trackInputs: TrackAnalysisInput[] = tracks
+      .filter(t => AudioDspService.isDubActorTrack(t))
+      .map(t => ({
+        id: t.id,
+        name: t.name,
+        trackType: t.type,
+        clips: t.segments
+          .filter(s => s.filePath)
+          .map(s => ({
+            id: s.id,
+            filePath: s.filePath!,
+            startTimeMs: s.startTime * 1000,
+            durationMs: s.duration * 1000,
+            sourceOffsetMs: (s.fileOffset || 0) * 1000,
+          }))
+      }));
+
+    if (trackInputs.length === 0) {
+      return { updatedTracks: tracks, reports: [] };
+    }
+
+    const reports = await analyzeVoiceTracksNative(projectDir, trackInputs);
+
+    const updatedTracks = tracks.map(track => {
+      const report = reports.find(r => r.trackId === track.id);
+      if (!report) return track;
+
+      const updatedSegments = track.segments.map(seg => {
+        const segStartMs = seg.startTime * 1000;
+        const segEndMs = (seg.startTime + seg.duration) * 1000;
+
+        // Ищем сегменты анализа, которые перекрываются с этим клипом
+        const relevantAnalysis = report.segments.filter(as => 
+          as.startMs < segEndMs && (as.startMs + as.durationMs) > segStartMs
+        );
+
+        if (relevantAnalysis.length === 0) return seg;
+
+        return {
+          ...seg,
+          analysisFlags: {
+            isSibilant: relevantAnalysis.some(a => a.isSibilant),
+            isPlosive: relevantAnalysis.some(a => a.isPlosive),
+            isClick: relevantAnalysis.some(a => a.isClick),
+          }
+        };
+      });
+
+      return { ...track, segments: updatedSegments };
+    });
+
+    return { updatedTracks, reports };
+  }
+
+  /**
+   * 1.1 ИНТЕЛЛЕКТУАЛЬНАЯ НОРМАЛИЗАЦИЯ (Module 1.1)
+   * Использует классификацию волн для избирательного усиления.
+   */
+  public static async applyIntelligentNormalizationAsync(
+    projectDir: string,
+    tracks: AudioTrack[],
+    targetTrackId?: string
+  ): Promise<DspProcessResult> {
+    const detailedLogs: string[] = [];
+    detailedLogs.push(`[Rust DSP: Интеллектуальная нормализация 1.1] Старт обработки`);
+    detailedLogs.push(`Цель: Speech -> -24dB, Quiet -> -35dB, Silence/Noise -> No change, Limiter -> -9dB`);
+
+    let affectedSegmentsCount = 0;
+    const updatedTracks: AudioTrack[] = [];
+
+    for (const track of tracks) {
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) {
+        updatedTracks.push(track);
+        continue;
+      }
+      if (targetTrackId && track.id !== targetTrackId) {
+        updatedTracks.push(track);
+        continue;
+      }
+
+      detailedLogs.push(`Обработка дорожки: ${track.name} (${track.id})`);
+
+      const clips: ClipProcessingInput[] = track.segments
+        .filter(s => s.filePath)
+        .map(seg => ({
+          id: seg.id,
+          filePath: seg.filePath!,
+          startTimeMs: seg.startTime * 1000,
+          durationMs: seg.duration * 1000,
+          sourceOffsetMs: (seg.fileOffset || 0) * 1000,
+        }));
+
+      if (clips.length === 0) {
+        updatedTracks.push(track);
+        continue;
+      }
+
+      try {
+        const res = await processIntelligentNormalizationWithClipsNative(projectDir, track.id, clips);
+        
+        const updatedSegments = track.segments.map(seg => {
+          const processed = res.processedClips.find(p => p.clipId === seg.id);
+          if (processed) {
+            affectedSegmentsCount++;
+            return {
+              ...seg,
+              filePath: processed.processedPath,
+              backupFilePath: seg.filePath,
+              processedEffectName: 'Intelligent Norm 1.1',
+              gain: 1.0, // Сбрасываем гейн клипа в 1.0, так как он "запечен" в файл
+            };
+          }
+          return seg;
+        });
+
+        updatedTracks.push({ ...track, segments: updatedSegments });
+        detailedLogs.push(`Дорожка "${track.name}": успешно обработано ${res.processedClips.length} клипов`);
+      } catch (err) {
+        detailedLogs.push(`❌ Ошибка на дорожке "${track.name}": ${err}`);
+        updatedTracks.push(track);
+      }
+    }
+
+    const logSummary = affectedSegmentsCount > 0 
+      ? `Интеллектуальная нормализация завершена. Обработано сегментов: ${affectedSegmentsCount}.`
+      : `Нет подходящих сегментов для интеллектуальной нормализации.`;
+      
+    detailedLogs.push(logSummary);
+
+    return {
+      updatedTracks,
+      affectedSegmentsCount,
+      stats: {},
+      logSummary,
+      detailedLogs,
+    };
+  }
+
+  /**
+   * 1.2 СПЕКТРАЛЬНОЕ ВЫРАВНИВАНИЕ (Module 1.2)
+   * Подтягивает частоты к эталонной кривой на основе анализа.
+   */
+  public static async applySpectralBalancingAsync(
+    projectDir: string,
+    tracks: AudioTrack[],
+    targetTrackId?: string
+  ): Promise<DspProcessResult> {
+    const detailedLogs: string[] = [];
+    detailedLogs.push(`[Rust DSP: Спектральное выравнивание 1.2] Старт обработки`);
+    detailedLogs.push(`Цель: Усреднение спектра, HPF 60Hz, LPF 20kHz, устранение резонансов`);
+
+    let affectedSegmentsCount = 0;
+    const updatedTracks: AudioTrack[] = [];
+
+    for (const track of tracks) {
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) {
+        updatedTracks.push(track);
+        continue;
+      }
+      if (targetTrackId && track.id !== targetTrackId) {
+        updatedTracks.push(track);
+        continue;
+      }
+
+      detailedLogs.push(`Обработка дорожки: ${track.name} (${track.id})`);
+
+      const clips: ClipProcessingInput[] = track.segments
+        .filter(s => s.filePath)
+        .map(seg => ({
+          id: seg.id,
+          filePath: seg.filePath!,
+          startTimeMs: seg.startTime * 1000,
+          durationMs: seg.duration * 1000,
+          sourceOffsetMs: (seg.fileOffset || 0) * 1000,
+        }));
+
+      if (clips.length === 0) {
+        updatedTracks.push(track);
+        continue;
+      }
+
+      try {
+        const res = await processSpectralBalancingNative(projectDir, track.id, clips);
+        
+        const updatedSegments = track.segments.map(seg => {
+          const processed = res.processedClips.find(p => p.clipId === seg.id);
+          if (processed) {
+            affectedSegmentsCount++;
+            return {
+              ...seg,
+              filePath: processed.processedPath,
+              backupFilePath: seg.filePath,
+              processedEffectName: 'Spectral Balancing 1.2',
+            };
+          }
+          return seg;
+        });
+
+        updatedTracks.push({ ...track, segments: updatedSegments });
+        detailedLogs.push(`Дорожка "${track.name}": спектр выровнен для ${res.processedClips.length} клипов`);
+      } catch (err) {
+        detailedLogs.push(`❌ Ошибка на дорожке "${track.name}": ${err}`);
+        updatedTracks.push(track);
+      }
+    }
+
+    const logSummary = affectedSegmentsCount > 0 
+      ? `Спектральное выравнивание завершено. Обработано сегментов: ${affectedSegmentsCount}.`
+      : `Нет подходящих сегментов для спектрального выравнивания.`;
+      
+    detailedLogs.push(logSummary);
+
+    return {
+      updatedTracks,
+      affectedSegmentsCount,
+      stats: {},
+      logSummary,
+      detailedLogs,
+    };
+  }
+
+  /**
+   * 1.3 Speech Leveler (Module 1.3)
+   * Применяет компрессию и гейтирование на основе классификации.
+   */
+  public static async applySpeechLevelerAsync(
+    projectDir: string,
+    tracks: AudioTrack[],
+    targetTrackId?: string
+  ): Promise<DspProcessResult> {
+    const detailedLogs: string[] = [];
+    detailedLogs.push(`[Rust DSP: Speech Leveler 1.3] Старт обработки`);
+    detailedLogs.push(`Цель: Плотность голоса (Comp: -12dB, 3.44:1) и отсечение шума/тишины`);
+
+    let affectedSegmentsCount = 0;
+    const updatedTracks: AudioTrack[] = [];
+
+    for (const track of tracks) {
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) {
+        updatedTracks.push(track);
+        continue;
+      }
+      if (targetTrackId && track.id !== targetTrackId) {
+        updatedTracks.push(track);
+        continue;
+      }
+
+      detailedLogs.push(`Обработка дорожки: ${track.name} (${track.id})`);
+
+      const clips: ClipProcessingInput[] = track.segments
+        .filter(s => s.filePath)
+        .map(seg => ({
+          id: seg.id,
+          filePath: seg.filePath!,
+          startTimeMs: seg.startTime * 1000,
+          durationMs: seg.duration * 1000,
+          sourceOffsetMs: (seg.fileOffset || 0) * 1000,
+        }));
+
+      if (clips.length === 0) {
+        updatedTracks.push(track);
+        continue;
+      }
+
+      try {
+        const res = await processSpeechLevelerNative(projectDir, track.id, clips);
+        
+        const updatedSegments = track.segments.map(seg => {
+          const processed = res.processedClips.find(p => p.clipId === seg.id);
+          if (processed) {
+            affectedSegmentsCount++;
+            return {
+              ...seg,
+              filePath: processed.processedPath,
+              backupFilePath: seg.filePath,
+              processedEffectName: 'Speech Leveler 1.3',
+            };
+          }
+          return seg;
+        });
+
+        updatedTracks.push({ ...track, segments: updatedSegments });
+        detailedLogs.push(`Дорожка "${track.name}": речь выровнена и уплотнена`);
+      } catch (err) {
+        detailedLogs.push(`❌ Ошибка на дорожке "${track.name}": ${err}`);
+        updatedTracks.push(track);
+      }
+    }
+
+    const logSummary = affectedSegmentsCount > 0 
+      ? `Speech Leveler завершен. Обработано сегментов: ${affectedSegmentsCount}.`
+      : `Нет подходящих сегментов для Speech Leveler.`;
+      
+    detailedLogs.push(logSummary);
+
+    return {
+      updatedTracks,
+      affectedSegmentsCount,
+      stats: {},
+      logSummary,
+      detailedLogs,
+    };
+  }
+
+  /**
+   * 1.4 Vocal Spot Cleaning (Module 1.4)
+   * Точечная очистка: De-esser, Plosive reduction, Click removal.
+   */
+  public static async applyVocalSpotCleaningAsync(
+    projectDir: string,
+    tracks: AudioTrack[],
+    targetTrackId?: string
+  ): Promise<DspProcessResult> {
+    const detailedLogs: string[] = [];
+    detailedLogs.push(`[Rust DSP: Точечная очистка 1.4] Старт обработки`);
+    detailedLogs.push(`Цель: De-esser, Подавление взрывных согласных, Удаление кликов`);
+
+    let affectedSegmentsCount = 0;
+    const updatedTracks: AudioTrack[] = [];
+
+    for (const track of tracks) {
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) {
+        updatedTracks.push(track);
+        continue;
+      }
+      if (targetTrackId && track.id !== targetTrackId) {
+        updatedTracks.push(track);
+        continue;
+      }
+
+      detailedLogs.push(`Обработка дорожки: ${track.name} (${track.id})`);
+
+      const clips: ClipProcessingInput[] = track.segments
+        .filter(s => s.filePath)
+        .map(seg => ({
+          id: seg.id,
+          filePath: seg.filePath!,
+          startTimeMs: seg.startTime * 1000,
+          durationMs: seg.duration * 1000,
+          sourceOffsetMs: (seg.fileOffset || 0) * 1000,
+        }));
+
+      if (clips.length === 0) {
+        updatedTracks.push(track);
+        continue;
+      }
+
+      try {
+        const res = await processVocalSpotCleaningNative(projectDir, track.id, clips);
+        
+        const updatedSegments = track.segments.map(seg => {
+          const processed = res.processedClips.find(p => p.clipId === seg.id);
+          if (processed) {
+            affectedSegmentsCount++;
+            return {
+              ...seg,
+              filePath: processed.processedPath,
+              backupFilePath: seg.filePath,
+              processedEffectName: 'Spot Cleaning 1.4',
+            };
+          }
+          return seg;
+        });
+
+        updatedTracks.push({ ...track, segments: updatedSegments });
+        detailedLogs.push(`Дорожка "${track.name}": точечная очистка завершена`);
+      } catch (err) {
+        detailedLogs.push(`❌ Ошибка на дорожке "${track.name}": ${err}`);
+        updatedTracks.push(track);
+      }
+    }
+
+    const logSummary = affectedSegmentsCount > 0 
+      ? `Точечная очистка завершена. Обработано сегментов: ${affectedSegmentsCount}.`
+      : `Нет сегментов, требующих точечной очистки.`;
+      
+    detailedLogs.push(logSummary);
+
+    return {
+      updatedTracks,
+      affectedSegmentsCount,
+      stats: {},
       logSummary,
       detailedLogs,
     };

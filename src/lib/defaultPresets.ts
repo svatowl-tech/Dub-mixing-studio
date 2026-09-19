@@ -41,12 +41,22 @@ export const createDefaultPhase1 = (type: MixingType) => ({
   vstSteps: {},
   normalization: {
     enabled: type !== MixingType.VOICEOVER,
+    intelligentMode: type === MixingType.DUBBING || type === MixingType.REDUB,
     targetLufs: type === MixingType.DUBBING ? -23.0 : -16.0,
     noiseFloorDb: -55.0,
     upwardThresholdDb: -35.0,
     upwardRatio: 2.0,
     upwardGainDb: 6.0,
     bypass: false,
+  },
+  spectralBalancing: {
+    enabled: type === MixingType.DUBBING || type === MixingType.REDUB,
+  },
+  speechLeveler: {
+    enabled: type === MixingType.DUBBING || type === MixingType.REDUB,
+  },
+  vocalSpotCleaning: {
+    enabled: type === MixingType.DUBBING || type === MixingType.REDUB,
   },
   eqMatching: {
     enabled: type === MixingType.DUBBING || type === MixingType.REDUB,

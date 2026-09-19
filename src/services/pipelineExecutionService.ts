@@ -141,6 +141,14 @@ export class PipelineExecutionService {
         }
 
         if (stepId === 'normalization') {
+          // Гарантируем наличие свежего анализа перед нормализацией и эквализацией
+          const analysisRes = await AudioDspService.analyzeProjectVoiceTracksAsync(
+            (project as any).projectPath || '',
+            project.tracks
+          );
+          project = { ...project, tracks: analysisRes.updatedTracks };
+          onUpdateProject({ tracks: analysisRes.updatedTracks });
+
           const targetLufs = activePreset.phase1.normalization.targetLufs ?? -16.0;
           setStepExecution(prev => ({
             ...prev,
@@ -156,6 +164,146 @@ export class PipelineExecutionService {
           let lastNativeError = '';
 
           if (typeof window !== 'undefined' && isTauri()) {
+            if (activePreset.phase1.normalization.intelligentMode) {
+              // Модуль 1.1: Интеллектуальная нормализация на основе классификации волн
+              const res = await AudioDspService.applyIntelligentNormalizationAsync(
+                (project as any).projectPath || '',
+                project.tracks
+              );
+              onUpdateProject({ tracks: res.updatedTracks });
+              playbackEngine.clearCache();
+              await playbackEngine.updateTracks(res.updatedTracks);
+
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  status: 'success',
+                  progress: 100,
+                  log: res.logSummary,
+                  hasRollback: true
+                }
+              }));
+
+              addAuditLogs(res.detailedLogs.map((msg, i) => ({
+                id: `audit-intnorm-${Date.now()}-${i}`,
+                timestamp: Date.now(),
+                stageName: '1. Предобработка',
+                stepId: 'normalization',
+                status: 'success',
+                title: 'Интеллектуальная нормализация 1.1',
+                message: msg
+              })));
+
+              showToast(res.logSummary);
+              // Если мы запустили интеллектуальную нормализацию, то продолжаем дальше к спектральному выравниванию
+              // (вместо return выше, мы теперь просто даем им идти по цепочке)
+            }
+
+            if (activePreset.phase1.spectralBalancing.enabled) {
+              // Модуль 1.2: Спектральное выравнивание на основе анализа
+              const res = await AudioDspService.applySpectralBalancingAsync(
+                (project as any).projectPath || '',
+                project.tracks
+              );
+              onUpdateProject({ tracks: res.updatedTracks });
+              playbackEngine.clearCache();
+              await playbackEngine.updateTracks(res.updatedTracks);
+
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  status: 'success',
+                  progress: 100,
+                  log: res.logSummary,
+                  hasRollback: true
+                }
+              }));
+
+              addAuditLogs(res.detailedLogs.map((msg, i) => ({
+                id: `audit-specbalance-${Date.now()}-${i}`,
+                timestamp: Date.now(),
+                stageName: '1. Предобработка',
+                stepId: 'spectral-balancing',
+                status: 'success',
+                title: 'Спектральное выравнивание 1.2',
+                message: msg
+              })));
+              
+              if (!activePreset.phase1.normalization.intelligentMode) {
+                // Если нормализации не было, выводим тост сейчас
+                showToast(res.logSummary);
+              }
+            }
+
+            if (activePreset.phase1.speechLeveler.enabled) {
+              // Модуль 1.3: Speech Leveler (Компрессия + Гейтирование)
+              const res = await AudioDspService.applySpeechLevelerAsync(
+                (project as any).projectPath || '',
+                project.tracks
+              );
+              onUpdateProject({ tracks: res.updatedTracks });
+              playbackEngine.clearCache();
+              await playbackEngine.updateTracks(res.updatedTracks);
+
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  status: 'success',
+                  progress: 100,
+                  log: res.logSummary,
+                  hasRollback: true
+                }
+              }));
+
+              addAuditLogs(res.detailedLogs.map((msg, i) => ({
+                id: `audit-speechlevel-${Date.now()}-${i}`,
+                timestamp: Date.now(),
+                stageName: '1. Предобработка',
+                stepId: 'speech-leveler',
+                status: 'success',
+                title: 'Speech Leveler 1.3',
+                message: msg
+              })));
+            }
+
+            if (activePreset.phase1.vocalSpotCleaning.enabled) {
+              // Модуль 1.4: Точечная очистка (De-esser, Plosives, Clicks)
+              const res = await AudioDspService.applyVocalSpotCleaningAsync(
+                (project as any).projectPath || '',
+                project.tracks
+              );
+              onUpdateProject({ tracks: res.updatedTracks });
+              playbackEngine.clearCache();
+              await playbackEngine.updateTracks(res.updatedTracks);
+
+              setStepExecution(prev => ({
+                ...prev,
+                [stepId]: {
+                  status: 'success',
+                  progress: 100,
+                  log: res.logSummary,
+                  hasRollback: true
+                }
+              }));
+
+              addAuditLogs(res.detailedLogs.map((msg, i) => ({
+                id: `audit-spotclean-${Date.now()}-${i}`,
+                timestamp: Date.now(),
+                stageName: '1. Предобработка',
+                stepId: 'vocal-spot-cleaner',
+                status: 'success',
+                title: 'Точечная очистка 1.4',
+                message: msg
+              })));
+            }
+
+            if (activePreset.phase1.normalization.intelligentMode || 
+                activePreset.phase1.spectralBalancing.enabled ||
+                activePreset.phase1.speechLeveler.enabled ||
+                activePreset.phase1.vocalSpotCleaning.enabled) {
+               return; // Выходим, так как мы обработали кастомные шаги Rust
+            }
+
             for (const track of project.tracks) {
               if (AudioDspService.isDubActorTrack(track) && track.isProcessingEnabled !== false) {
                 for (const seg of track.segments) {

@@ -42,7 +42,10 @@ pub async fn concat_backstage_videos(
         file_list.push_str(&format!("file '{}'\n", escaped_path));
     }
 
-    let temp_file_path = std::env::temp_dir().join(format!("backstage_list_{}.txt", std::process::id()));
+    let out_norm = crate::file_io::normalize_windows_path(&output_path);
+    let out_path = std::path::Path::new(&out_norm);
+    let parent_dir = out_path.parent().unwrap_or(out_path);
+    let temp_file_path = parent_dir.join(format!("backstage_list_{}.txt", std::process::id()));
     std::fs::write(&temp_file_path, file_list).map_err(|e| e.to_string())?;
 
     // Склеиваем видео без перекодирования (stream copy), если это возможно
@@ -112,9 +115,11 @@ pub async fn merge_segments(
         return Err("No valid segments found to merge".to_string());
     }
 
-    // 2. Create FFmpeg concat file
-    let temp_dir = std::env::temp_dir();
-    let concat_file_path = temp_dir.join(format!("concat_{}.txt", project_id));
+    // 2. Create FFmpeg concat file next to output_path (spacious drive)
+    let out_norm = crate::file_io::normalize_windows_path(&output_path);
+    let out_path = std::path::Path::new(&out_norm);
+    let parent_dir = out_path.parent().unwrap_or(out_path);
+    let concat_file_path = parent_dir.join(format!("concat_{}.txt", project_id));
     let mut concat_content = String::new();
     for p in &file_paths {
         // FFmpeg concat demuxer requires single quotes escaped

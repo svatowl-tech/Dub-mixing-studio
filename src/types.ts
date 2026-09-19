@@ -262,6 +262,11 @@ export interface AudioSegment {
   whisperText?: string; // Распознанный текст через Whisper
   whisperConfidence?: number; // Уверенность распознавания (0..1)
   matchedSubId?: string; // ID связанной строки субтитров
+  analysisFlags?: {
+    isSibilant: boolean;
+    isPlosive: boolean;
+    isClick: boolean;
+  };
 
   // Метки и параметры сведения (Фаза 3)
   voiceCategory?: 'dialogue' | 'physics'; // 'dialogue' (есть сабы) или 'physics' (крики, кряхтение, звуки без сабов)
@@ -296,7 +301,7 @@ export interface AudioSegment {
 // Зафиксированная проблема тайминга для инспектора и звукорежиссера
 export interface TimingIssue {
   id: string;
-  type: 'overlap' | 'too_short' | 'too_long' | 'desync' | 'missing';
+  type: 'overlap' | 'too_short' | 'too_long' | 'desync' | 'missing' | 'sibilant' | 'plosive' | 'click';
   trackId: string;
   trackName: string;
   segmentId?: string;
@@ -346,6 +351,7 @@ export interface PrepProcessingConfig {
   // Нормализация громкости (Target LUFS)
   normalization: {
     enabled: boolean;
+    intelligentMode: boolean; // Модуль 1.1: Использование классификации волн для нормализации
     targetLufs: number; // Рекомендуемые: -16 LUFS (web) или -23 LUFS (TV)
     noiseFloorDb: number; // Порог фонового шума в dB
     upwardThresholdDb: number; // Порог подтяжки тихих фраз (апвард компрессия) в dB
@@ -354,6 +360,21 @@ export interface PrepProcessingConfig {
     bypass: boolean;
   };
   
+  // Спектральное выравнивание (Module 1.2: Авто-EQ на основе спектрального анализа)
+  spectralBalancing: {
+    enabled: boolean;
+  };
+
+  // Выравниватель речи (Module 1.3: Компрессия и гейтирование)
+  speechLeveler: {
+    enabled: boolean;
+  };
+
+  // Точечная очистка (Module 1.4: De-esser, Plosives, Clicks)
+  vocalSpotCleaning: {
+    enabled: boolean;
+  };
+
   // Приведение АЧХ к одному знаменателю (EQ Matching / Tone profiling / Neural Voice Matching)
   eqMatching: {
     enabled: boolean;

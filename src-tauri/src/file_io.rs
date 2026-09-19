@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use serde::Serialize;
 use hound;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::ShellExt;
 
 fn url_decode(input: &str) -> String {
@@ -123,15 +123,49 @@ pub fn get_file_info(path: String) -> Result<FileInfo, String> {
 }
 
 #[tauri::command]
-pub fn read_text_file(path: String) -> Result<String, String> {
+pub fn read_text_file(app_handle: AppHandle, path: String) -> Result<String, String> {
     let norm_path = normalize_windows_path(&path);
-    fs::read_to_string(norm_path).map_err(|e| format!("Failed to read file: {}", e))
+    let p = Path::new(&norm_path);
+
+    let target_path = if !p.is_absolute() {
+        if let Ok(app_data) = app_handle.path().app_data_dir() {
+            let app_data_file = app_data.join(&norm_path);
+            if app_data_file.exists() {
+                app_data_file
+            } else {
+                PathBuf::from(&norm_path)
+            }
+        } else {
+            PathBuf::from(&norm_path)
+        }
+    } else {
+        PathBuf::from(&norm_path)
+    };
+
+    fs::read_to_string(&target_path).map_err(|e| format!("Failed to read file: {}", e))
 }
 
 #[tauri::command]
-pub fn read_binary_file(path: String) -> Result<Vec<u8>, String> {
+pub fn read_binary_file(app_handle: AppHandle, path: String) -> Result<Vec<u8>, String> {
     let norm_path = normalize_windows_path(&path);
-    fs::read(norm_path).map_err(|e| format!("Failed to read binary file: {}", e))
+    let p = Path::new(&norm_path);
+
+    let target_path = if !p.is_absolute() {
+        if let Ok(app_data) = app_handle.path().app_data_dir() {
+            let app_data_file = app_data.join(&norm_path);
+            if app_data_file.exists() {
+                app_data_file
+            } else {
+                PathBuf::from(&norm_path)
+            }
+        } else {
+            PathBuf::from(&norm_path)
+        }
+    } else {
+        PathBuf::from(&norm_path)
+    };
+
+    fs::read(&target_path).map_err(|e| format!("Failed to read binary file: {}", e))
 }
 
 #[tauri::command]
@@ -290,9 +324,28 @@ pub fn init_project_folder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn save_project_file(path: String, data: String) -> Result<(), String> {
+pub fn save_project_file(app_handle: AppHandle, path: String, data: String) -> Result<(), String> {
     let norm_path = normalize_windows_path(&path);
-    fs::write(norm_path, data).map_err(|e| format!("Failed to save project file: {}", e))
+    let p = Path::new(&norm_path);
+
+    let target_path = if !p.is_absolute() {
+        if let Ok(app_data) = app_handle.path().app_data_dir() {
+            let _ = fs::create_dir_all(&app_data);
+            app_data.join(&norm_path)
+        } else {
+            PathBuf::from(&norm_path)
+        }
+    } else {
+        PathBuf::from(&norm_path)
+    };
+
+    if let Some(parent) = target_path.parent() {
+        if !parent.exists() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+
+    fs::write(&target_path, data).map_err(|e| format!("Failed to save project file: {}", e))
 }
 
 #[tauri::command]
@@ -462,13 +515,13 @@ pub fn ensure_valid_wav_path(path: &Path) -> Result<(PathBuf, bool), String> {
 
     println!("[ensure_valid_wav_path] Файл {} не является валидным WAV. Автоматическая конвертация через FFmpeg...", norm_path_str);
 
-    // 2. Генерация пути для временного WAV файла
+    // 2. Генерация пути для временного WAV файла в папке исходного файла (для экономии места на C:)
     let epoch_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let temp_dir = std::env::temp_dir();
-    let temp_wav = temp_dir.join(format!("dubstudio_conv_{}.wav", epoch_nanos));
+    let parent_dir = src.parent().unwrap_or(src);
+    let temp_wav = parent_dir.join(format!("dubstudio_conv_{}.wav", epoch_nanos));
 
     let ffmpeg_bin = find_ffmpeg_path();
     let output = std::process::Command::new(&ffmpeg_bin)

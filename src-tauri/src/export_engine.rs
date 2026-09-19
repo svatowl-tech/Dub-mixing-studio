@@ -14,6 +14,27 @@ use hound::WavReader;
 use std::io::Write;
 use sqlx::Row;
 
+pub fn get_spacious_temp_dir(project_path_opt: Option<&str>, suffix: &str) -> PathBuf {
+    if let Some(path_str) = project_path_opt {
+        let norm = crate::file_io::normalize_windows_path(path_str);
+        let p = Path::new(&norm);
+        if p.exists() {
+            let dir = if p.is_file() {
+                p.parent().unwrap_or(p)
+            } else {
+                p
+            };
+            let temp = dir.join(suffix);
+            if fs::create_dir_all(&temp).is_ok() {
+                return temp;
+            }
+        }
+    }
+    let temp = std::env::temp_dir().join(format!("{}_{}", suffix.trim_start_matches('.'), std::process::id()));
+    let _ = fs::create_dir_all(&temp);
+    temp
+}
+
 pub fn resolve_path(segment_path: &str, project_path: Option<&str>, output_path: &str) -> String {
     let segment_path_norm = crate::file_io::normalize_windows_path(segment_path);
     if std::path::Path::new(&segment_path_norm).exists() {
@@ -76,7 +97,7 @@ pub async fn export_all_stems(
         .map_err(|e| format!("Failed to parse project JSON: {}", e))?;
     
     // Create temp directory for stems
-    let temp_dir = env::temp_dir().join(format!("export_all_{}", std::process::id()));
+    let temp_dir = get_spacious_temp_dir(project.project_path.as_deref(), ".temp_export_all_stems");
     if temp_dir.exists() {
         let _ = fs::remove_dir_all(&temp_dir);
     }
@@ -492,7 +513,7 @@ pub async fn export_audio(
         return Err("No audio segments found to export. Please check if tracks are muted or empty.".to_string());
     }
 
-    let temp_dir = env::temp_dir().join(format!("dubstudio_export_{}", std::process::id()));
+    let temp_dir = get_spacious_temp_dir(project.project_path.as_deref(), ".temp_export");
     if temp_dir.exists() {
         let _ = fs::remove_dir_all(&temp_dir);
     }
@@ -993,7 +1014,7 @@ pub async fn export_audio_book(
     normalize_lufs: Option<bool>,
     segments: Vec<AudioBookSegmentData>,
 ) -> Result<String, String> {
-    let temp_dir = env::temp_dir().join(format!("audiobook_export_{}", std::process::id()));
+    let temp_dir = get_spacious_temp_dir(Some(&project_path), ".temp_export_audio_book");
     if temp_dir.exists() {
         let _ = fs::remove_dir_all(&temp_dir);
     }

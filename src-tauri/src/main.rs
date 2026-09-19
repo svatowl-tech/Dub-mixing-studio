@@ -51,8 +51,18 @@ mod timing_compliance_engine;
 mod waveform_bucket_engine;
 mod subtitle_fuzzy_engine;
 mod speech_cue_classifier;
+mod track_analysis;
+mod intelligent_normalization;
+mod spectral_balancing;
+mod speech_leveler;
+mod vocal_spot_cleaner;
 
 use speech_cue_classifier::classify_project_cues;
+use track_analysis::{analyze_voice_tracks, load_track_analysis};
+use intelligent_normalization::process_intelligent_normalization_with_clips;
+use spectral_balancing::process_spectral_balancing;
+use speech_leveler::process_speech_leveler;
+use vocal_spot_cleaner::process_vocal_spot_cleaning;
 use timing_compliance_engine::audit_project_timing;
 use waveform_bucket_engine::{compute_waveform_render_buckets, compute_waveform_buckets_from_peaks};
 use subtitle_fuzzy_engine::{parse_subtitle_file_native, match_transcription_with_script};
@@ -448,6 +458,12 @@ fn main() {
             quick_preview_export,
             batch_export,
             export_audio_book,
+            analyze_voice_tracks,
+            load_track_analysis,
+            process_intelligent_normalization_with_clips,
+            process_spectral_balancing,
+            process_speech_leveler,
+            process_vocal_spot_cleaning,
             export_backstage_video,
             concat_backstage_videos,
             get_media_info,
