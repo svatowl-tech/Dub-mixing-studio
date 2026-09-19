@@ -41,6 +41,36 @@ export const FinalRenderProgressModal: React.FC<FinalRenderProgressModalProps> =
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
+  const handleDownloadVideo = async () => {
+    if (!result) return;
+    const api = typeof window !== 'undefined' ? (window as any).electronAPI : null;
+    if (api && api.saveFile) {
+      try {
+        const saveRes = await api.saveFile({
+          title: 'Сохранить финальное видео с дубляжем',
+          defaultPath: result.videoFileName || 'final_video.mp4',
+          filters: [{ name: 'MP4 Video', extensions: ['mp4'] }]
+        });
+
+        if (saveRes && saveRes.success && saveRes.data) {
+          const destPath = saveRes.data;
+          if (result.videoFilePath && result.videoFilePath !== destPath && api.copyFileToProject) {
+            await api.copyFileToProject({ src: result.videoFilePath, destDir: destPath });
+          } else if (result.videoBlobUrl) {
+            downloadFile(result.videoBlobUrl, result.videoFileName || 'final_video.mp4');
+          }
+        }
+      } catch (e) {
+        console.warn('[FinalRenderModal] Save file error, falling back to download:', e);
+        if (result.videoBlobUrl) {
+          downloadFile(result.videoBlobUrl, result.videoFileName || 'final_video.mp4');
+        }
+      }
+    } else if (result.videoBlobUrl) {
+      downloadFile(result.videoBlobUrl, result.videoFileName || 'final_video.mp4');
+    }
+  };
+
   return (
     <div 
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in"
@@ -182,7 +212,7 @@ export const FinalRenderProgressModal: React.FC<FinalRenderProgressModalProps> =
 
                     <button
                       type="button"
-                      onClick={() => downloadFile(result.videoBlobUrl!, result.videoFileName || 'final_video.mp4')}
+                      onClick={handleDownloadVideo}
                       className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow-md shadow-indigo-600/30 cursor-pointer"
                     >
                       <Download className="w-3.5 h-3.5" />

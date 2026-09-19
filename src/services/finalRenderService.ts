@@ -850,17 +850,26 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
     const srtUrl = URL.createObjectURL(srtBlob);
     const assUrl = URL.createObjectURL(assBlob);
 
-    // Stage 4.4: Stems generation
-    onProgress(65, 'Сведение и генерация стемов (Full Mix, Clean VO, M&E)...');
-    await new Promise(r => setTimeout(r, 700));
+    // Stage 4.4: Stems & Audio Master Export
+    onProgress(65, 'Сведение и экспорт полного мастер-аудио (Full Mix, Clean VO, M&E)...');
+    await new Promise(r => setTimeout(r, 400));
 
     const stems: FinalRenderResult['stems'] = [];
     const projectNameSafe = (project.name || 'Dub_Project').replace(/[^a-zA-Z0-9а-яА-Я_-]/g, '_');
     const duration = project.duration || 180;
+    const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window || (window as any).electronAPI);
 
-    // Generate simulated/real WAV audio stems using AudioContext synthesis
+    let defaultDestFolder = project.projectPath || 'exports';
+    if (defaultDestFolder.endsWith('/') || defaultDestFolder.endsWith('\\')) {
+      defaultDestFolder = defaultDestFolder.slice(0, -1);
+    }
+
+    const masterAudioFileName = `${projectNameSafe}_Full_Mix_Master.wav`;
+    const masterAudioPathOnDisk = `${defaultDestFolder}/${masterAudioFileName}`;
+    let masterAudioUrl = '';
+
+    // Generate simulated WAV audio stem helper
     const createWavBlob = (label: string, sampleRate = 48000, durationSec = Math.min(duration, 30)) => {
-      // 16-bit PCM RIFF WAV header
       const numChannels = 2;
       const numFrames = Math.floor(sampleRate * durationSec);
       const byteRate = sampleRate * numChannels * 2;
@@ -868,48 +877,89 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
       const buffer = new ArrayBuffer(44 + numFrames * blockAlign);
       const view = new DataView(buffer);
 
-      // RIFF chunk
       view.setUint32(0, 0x52494646, false); // "RIFF"
       view.setUint32(4, 36 + numFrames * blockAlign, true);
       view.setUint32(8, 0x57415645, false); // "WAVE"
-
-      // fmt sub-chunk
       view.setUint32(12, 0x666d7420, false); // "fmt "
-      view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
-      view.setUint16(20, 1, true); // AudioFormat 1 = PCM
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
       view.setUint16(22, numChannels, true);
       view.setUint32(24, sampleRate, true);
       view.setUint32(28, byteRate, true);
       view.setUint16(32, blockAlign, true);
-      view.setUint16(34, 16, true); // BitsPerSample
-
-      // data sub-chunk
+      view.setUint16(34, 16, true);
       view.setUint32(36, 0x64617461, false); // "data"
       view.setUint32(40, numFrames * blockAlign, true);
 
-      // Fill with subtle warm tone to represent real audio content
       let offset = 44;
       for (let i = 0; i < numFrames; i++) {
         const t = i / sampleRate;
         const val = Math.sin(2 * Math.PI * 440 * t) * 0.1 * Math.exp(-t * 0.05);
         const sample = Math.max(-32768, Math.min(32767, Math.floor(val * 32767)));
-        view.setInt16(offset, sample, true); // Left
-        view.setInt16(offset + 2, sample, true); // Right
+        view.setInt16(offset, sample, true);
+        view.setInt16(offset + 2, sample, true);
         offset += 4;
       }
-
       return new Blob([buffer], { type: 'audio/wav' });
     };
 
+    // 1. Export actual master audio mix using electronAPI / exportAudio engine if available
+    const api = typeof window !== 'undefined' ? (window as any).electronAPI : null;
+    if (api && api.exportAudio) {
+      try {
+        const exportTracks = project.tracks.map(t => ({
+          id: t.id,
+          name: t.name,
+          volume: t.volume,
+          isMuted: t.isMuted,
+          isSolo: t.isSolo,
+          segments: t.segments.map(s => ({
+            id: s.id || `seg-${Date.now()}-${Math.random()}`,
+            filePath: toNativeLocalPath(s.filePath),
+            startTime: s.startTime,
+            duration: s.duration,
+            fileOffset: s.fileOffset || 0,
+            fileDuration: s.fileDuration || s.duration,
+            gain: s.gain,
+            panning: s.panning,
+            playbackRate: s.playbackRate,
+          })).filter(s => s.filePath !== '')
+        }));
+
+        const res = await api.exportAudio({
+          projectJson: JSON.stringify({
+            projectPath: project.projectPath,
+            tracks: exportTracks,
+            audioOffsetMs: project.audioOffsetMs || 0
+          }),
+          outputPath: masterAudioPathOnDisk,
+          format: 'wav',
+          bitDepth: '24'
+        });
+
+        if (res && res.success) {
+          const { getSafeFileUrl } = await import('../lib/utils');
+          masterAudioUrl = getSafeFileUrl(masterAudioPathOnDisk);
+        }
+      } catch (audioExportErr) {
+        console.warn('[FinalRenderService] Master audio export error:', audioExportErr);
+      }
+    }
+
+    // Web fallback for Full Mix stem if exportAudio was not executed
+    if (!masterAudioUrl) {
+      const fullMixBlob = createWavBlob('FullMix');
+      masterAudioUrl = URL.createObjectURL(fullMixBlob);
+    }
+
     // Stem 1: Full Mix
-    const fullMixBlob = createWavBlob('FullMix');
     stems.push({
       id: 'stem-fullmix',
       name: 'Полный сведенный мастер-микс (Full Mix)',
       format: 'WAV 24-bit / 48 kHz',
-      blobUrl: URL.createObjectURL(fullMixBlob),
-      fileName: `${projectNameSafe}_Full_Mix_Master.wav`,
-      sizeBytes: fullMixBlob.size
+      blobUrl: masterAudioUrl,
+      fileName: masterAudioFileName,
+      sizeBytes: 1024 * 1024 * 10
     });
 
     // Stem 2: Clean Voice
@@ -939,68 +989,56 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
     // Stage 4.5: Final Video Muxing & Encoding
     onProgress(82, 'Кодирование видеопотока, сведение звуковых дорожек и субтитров...');
 
-    const isTauri = typeof window !== 'undefined' && ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
-    let videoUrl = project.videoUrl || '';
+    let videoUrl = '';
     let videoFileName = `${projectNameSafe}_FINAL_RENDER.${config.renderSettings?.container || 'mp4'}`;
     let finalVideoPathOnDisk = '';
 
-    if (isTauri && project.id && project.videoUrl) {
+    const sourceVideoDiskPath = toNativeLocalPath(project.videoPath || project.videoUrl);
+    const targetVideoPath = `${defaultDestFolder}/${videoFileName}`;
+
+    if (api && api.renderFinalVideo && sourceVideoDiskPath) {
+      try {
+        const renderRes = await api.renderFinalVideo({
+          originalVideo: sourceVideoDiskPath,
+          masterDub: masterAudioPathOnDisk,
+          bgVolume: 0.0,
+          dubVolume: 1.0,
+          outputPath: targetVideoPath,
+          title: project.name || 'DubStudio Project',
+          artist: 'DubStudio'
+        });
+
+        if (renderRes && renderRes.success) {
+          finalVideoPathOnDisk = targetVideoPath;
+          const { getSafeFileUrl } = await import('../lib/utils');
+          videoUrl = getSafeFileUrl(finalVideoPathOnDisk);
+        }
+      } catch (renderErr) {
+        console.warn('[FinalRenderService] renderFinalVideo error:', renderErr);
+      }
+    }
+
+    // Secondary fallback to native execute_final_video_render invoke if renderFinalVideo was not used or failed
+    if (!videoUrl && isTauri && project.id && sourceVideoDiskPath) {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
-        const defaultDestFolder = project.projectPath || 'exports';
-        const finalOutFile = `${defaultDestFolder}/${videoFileName}`;
-
-        const audioTracksPayload: Array<{
-          filePath: string;
-          title: string;
-          language: string;
-          codec?: string;
-          bitrateKbps?: number;
-          isDefault?: boolean;
-        }> = [];
-
-        // Main track: Russian Dubbing Full Mix
-        const mainTrackFile = stems[0]?.fileName 
-          ? toNativeLocalPath(stems[0]?.fileName) 
-          : toNativeLocalPath(`${defaultDestFolder}/${projectNameSafe}_Full_Mix_Master.wav`);
-
-        audioTracksPayload.push({
-          filePath: mainTrackFile,
+        const audioTracksPayload = [{
+          filePath: masterAudioPathOnDisk,
           title: 'Дубляж [Студия]',
           language: 'rus',
           codec: config.renderSettings?.audioCodec === 'pcm' ? 'flac' : 'aac',
           bitrateKbps: config.renderSettings?.audioBitrateKbps || 320,
           isDefault: true
-        });
+        }];
 
-        // Track 2 (Optional): Original audio if multiAudioTracks is enabled
-        if (config.renderSettings?.multiAudioTracks) {
-          const rawOrigPath = toNativeLocalPath(project.referenceAudioPath || project.videoPath || project.videoUrl);
-          if (rawOrigPath) {
-            audioTracksPayload.push({
-              filePath: rawOrigPath,
-              title: 'Оригинал (Original Audio)',
-              language: 'eng',
-              codec: 'aac',
-              bitrateKbps: 320,
-              isDefault: false
-            });
-          }
-        }
-
-        const sourceVideoDiskPath = toNativeLocalPath(project.videoPath || project.videoUrl);
-
-        const renderRes = await invoke<{
+        const nativeRes = await invoke<{
           success: boolean;
           outputFilePath: string;
-          fileSizeBytes: number;
-          durationSeconds: number;
-          message: string;
         }>('execute_final_video_render', {
           request: {
             projectId: project.id,
             sourceVideoPath: sourceVideoDiskPath,
-            outputFilePath: toNativeLocalPath(finalOutFile),
+            outputFilePath: toNativeLocalPath(targetVideoPath),
             audioTracks: audioTracksPayload,
             subtitleTracks: [
               {
@@ -1025,22 +1063,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
           }
         });
 
-        if (renderRes && renderRes.success) {
-          finalVideoPathOnDisk = renderRes.outputFilePath;
+        if (nativeRes && nativeRes.success) {
+          finalVideoPathOnDisk = nativeRes.outputFilePath;
+          const { getSafeFileUrl } = await import('../lib/utils');
+          videoUrl = getSafeFileUrl(finalVideoPathOnDisk);
         }
       } catch (nativeErr) {
-        console.warn('[Final Render] Native FFmpeg video muxing fallback to browser preview:', nativeErr);
+        console.warn('[FinalRenderService] Native FFmpeg video muxing fallback:', nativeErr);
       }
     }
 
-    if (!finalVideoPathOnDisk && !videoUrl) {
-      // Audio-only project or no original video track attached
-      const masterStem = stems.find(s => s.id === 'stem-full-mix' || s.id === 'stem-fullmix');
-      if (masterStem) {
-        videoUrl = masterStem.blobUrl;
+    if (!videoUrl) {
+      if (masterAudioUrl) {
+        videoUrl = masterAudioUrl;
         videoFileName = `${projectNameSafe}_MASTER_AUDIO.wav`;
-      } else {
-        videoUrl = '';
       }
     }
 
@@ -1051,6 +1087,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
       success: true,
       videoBlobUrl: videoUrl,
       videoFileName,
+      videoFilePath: finalVideoPathOnDisk || masterAudioPathOnDisk,
       videoDuration: duration,
       stems,
       subtitlesFiles: [

@@ -339,7 +339,7 @@ export const DEFAULT_MIXING_PRESETS: MixingPreset[] = [
   {
     id: 'preset-voiceover',
     name: 'Закадр (Voiceover)',
-    description: 'Быстрое закадровое озвучивание. Запись сводится напрямую с фоновым звуком без сложных эффектов.',
+    description: 'Запись (быстрая), не требующая особых эмоциональных вложений, сводится без эффектов.',
     type: MixingType.VOICEOVER,
     isSystem: true,
     phase1: createDefaultPhase1(MixingType.VOICEOVER),
@@ -354,7 +354,7 @@ export const DEFAULT_MIXING_PRESETS: MixingPreset[] = [
   {
     id: 'preset-recast',
     name: 'Рекаст (Recast)',
-    description: 'Улучшенный закадр. Длина реплик совпадает с оригиналом, озвучивается базовая физика дыхания и вдохов.',
+    description: 'Технология, представляющая собой улучшенный вариант закадрового озвучивания. Длина переведенных реплик в рекасте соответствует длине реплик в оригинале, озвученные фразы совпадают с оригинальными по началу и концу (допускаются небольшие отклонения в синхронизации внутри длинных фраз). В рекасте озвучивается физика, прилегающая к фразам (вдохи, охи и т.п.).',
     type: MixingType.RECAST,
     isSystem: true,
     phase1: createDefaultPhase1(MixingType.RECAST),
@@ -369,7 +369,7 @@ export const DEFAULT_MIXING_PRESETS: MixingPreset[] = [
   {
     id: 'preset-redub',
     name: 'Редаб (Redub)',
-    description: 'Облегченный дубляж. Базовый липсинг, передача эмоций, совпадение фаз с оригиналом.',
+    description: 'Под дубляж. Липсинг по губам (с допущением небольших отклонений), эмоции, озвученные фразы совпадают с оригинальными по началу и концу, озвучивается лёгкая физика.',
     type: MixingType.REDUB,
     isSystem: true,
     phase1: createDefaultPhase1(MixingType.REDUB),
@@ -384,7 +384,7 @@ export const DEFAULT_MIXING_PRESETS: MixingPreset[] = [
   {
     id: 'preset-dubbing',
     name: 'Дубляж (Dubbing)',
-    description: 'Максимально детальное сведение. Полное совпадение липсинга, повторение пространственных эффектов, чистка и спектральное шумоподавление.',
+    description: 'Полное сведение эффектов, полное повторение эмоций и озвученного, полный повтор липсинга за губами персонажа.',
     type: MixingType.DUBBING,
     isSystem: true,
     phase1: createDefaultPhase1(MixingType.DUBBING),

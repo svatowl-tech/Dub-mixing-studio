@@ -149,7 +149,8 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             size_mb: 115.0,
             recommended_for: "Вокальные треки с плотным инструментальным сопровождением".to_string(),
             urls: vec![
-                "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDX23C/MDX23C-8Step-VocFT.onnx".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR_MDXNET_KARA_2.onnx".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/MDX23C_D1581.ckpt".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -158,13 +159,14 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
         ModelCatalogItem {
             id: "hp_karaoke_uvr".to_string(),
             name: "5_HP Karaoke UVR".to_string(),
-            filename: "5_HP-Karaoke-UVR.onnx".to_string(),
+            filename: "5_HP-Karaoke-UVR.pth".to_string(),
             category: "separation".to_string(),
             description: "Специализированный алгоритм извлечения чистого минуса и караоке.".to_string(),
             size_mb: 60.5,
             recommended_for: "Создание качественной фонограммы без остатков бэк-вокала".to_string(),
             urls: vec![
-                "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/5_HP-Karaoke-UVR.onnx".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/5_HP-Karaoke-UVR.pth".to_string(),
+                "https://huggingface.co/comsharp/UVR_resources/resolve/main/models/VR_Arch/5_HP-Karaoke-UVR.pth".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -180,7 +182,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             recommended_for: "Профессиональный студийный мастеринг и бескомпромиссная чистота голоса".to_string(),
             urls: vec![
                 "https://huggingface.co/KimberleyJSN/melbandroformer/resolve/main/MelBandRoformer.ckpt".to_string(),
-                "https://huggingface.co/anvuew/MelBandRoformer/resolve/main/MelBandRoformer.ckpt".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -196,7 +198,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             recommended_for: "Кинематографические миксы с объемной звуковой сценой".to_string(),
             urls: vec![
                 "https://huggingface.co/anvuew/BS-RoFormer/resolve/main/bs_roformer_anvuew_sdr_12.45.ckpt".to_string(),
-                "https://huggingface.co/jarredou/aufr33-jarredou_BS-Roformer_Viperx_1297/resolve/main/model.ckpt".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/model_bs_roformer_ep_317_sdr_12.9755.ckpt".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -215,9 +217,9 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             size_mb: 64.8,
             recommended_for: "Дикторские записи, сделанные в обычных не заглушенных комнатах".to_string(),
             urls: vec![
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx".to_string(),
                 "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Reverb_HQ_By_FoxJoy.onnx".to_string(),
                 "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx".to_string(),
-                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -232,6 +234,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             size_mb: 44.5,
             recommended_for: "Легкое эхо в помещениях со шторами и коврами".to_string(),
             urls: vec![
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-De-Echo-Normal.pth".to_string(),
                 "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Normal.pth".to_string(),
                 "https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoNormal.pth".to_string(),
             ],
@@ -248,6 +251,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             size_mb: 44.5,
             recommended_for: "Записи в пустых помещениях и сложных акустических условиях".to_string(),
             urls: vec![
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-De-Echo-Aggressive.pth".to_string(),
                 "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Aggressive.pth".to_string(),
                 "https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoAggressive.pth".to_string(),
             ],
@@ -265,6 +269,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             recommended_for: "Очистка записей с накамерных и петличных микрофонов".to_string(),
             urls: vec![
                 "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeEcho-DeReverb.pth".to_string(),
+                "https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoDeReverb.pth".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -277,14 +282,13 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
         ModelCatalogItem {
             id: "uvr_denoise_foxjoy".to_string(),
             name: "VR-DeNoise FoxJoy (Вокал / Речь)".to_string(),
-            filename: "VR-DeNoise-FoxJoy.onnx".to_string(),
+            filename: "UVR-DeNoise.pth".to_string(),
             category: "denoise".to_string(),
             description: "Флагманская модель FoxJoy для глубокой очистки речевого вокала от фонового шума.".to_string(),
             size_mb: 44.8,
             recommended_for: "Основной выбор для профессиональной очистки дикторских дорожек".to_string(),
             urls: vec![
-                "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/VR-DeNoise-FoxJoy.onnx".to_string(),
-                "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/VR-DeNoise-FoxJoy.onnx".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -299,7 +303,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             size_mb: 25.4,
             recommended_for: "Быстрая высококачественная очистка речи без металлического призвука".to_string(),
             urls: vec![
-                "https://huggingface.co/niobures/DeepFilterNet/resolve/main/models/onnx/Audio-Cleaner/df_dec.onnx".to_string(),
+                "https://huggingface.co/bitsydarel/deepfilternet3-onnx/resolve/main/df_dec.onnx".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -308,13 +312,13 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
         ModelCatalogItem {
             id: "uvr_denoise_full".to_string(),
             name: "UVR-DeNoise Full (Глубокое подавление)".to_string(),
-            filename: "UVR-DeNoise-Full.onnx".to_string(),
+            filename: "UVR-DeNoise.pth".to_string(),
             category: "denoise".to_string(),
             description: "Бескомпромиссная глубокая очистка сложного шипящего и гудящего шума.".to_string(),
             size_mb: 52.0,
             recommended_for: "Сильно зашумленные репортажные и архивные аудиозаписи".to_string(),
             urls: vec![
-                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise-Full.onnx".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -323,13 +327,14 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
         ModelCatalogItem {
             id: "uvr_denoise_lite".to_string(),
             name: "VR-DeNoise Lite (Быстрая очистка)".to_string(),
-            filename: "UVR-DeNoise-Lite.onnx".to_string(),
+            filename: "UVR-DeNoise-Lite.pth".to_string(),
             category: "denoise".to_string(),
             description: "Легкая модель для оперативного подавления постоянного шума с низким расходом ресурсов.".to_string(),
             size_mb: 28.5,
             recommended_for: "Быстрый рендеринг на слабых видеокартах и процессорах".to_string(),
             urls: vec![
-                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise-Lite.onnx".to_string(),
+                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise-Lite.pth".to_string(),
+                "https://huggingface.co/comsharp/UVR_resources/resolve/main/models/VR_Arch/UVR-DeNoise-Lite.pth".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -338,13 +343,13 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
         ModelCatalogItem {
             id: "cascade_net".to_string(),
             name: "Cascade-Net Dual Denoise".to_string(),
-            filename: "cascade_net.onnx".to_string(),
+            filename: "deepfilter.onnx".to_string(),
             category: "denoise".to_string(),
             description: "Двухкаскадный нейрофильтр шума для тяжелых промышленных и уличных шумов.".to_string(),
             size_mb: 64.0,
             recommended_for: "Уличный шум, кондиционеры и толпа на заднем плане".to_string(),
             urls: vec![
-                "https://huggingface.co/niobures/DeepFilterNet/resolve/main/models/onnx/Audio-Cleaner/cascade_net.onnx".to_string(),
+                "https://huggingface.co/soniqo/DeepFilterNet3-ONNX/resolve/main/deepfilter.onnx".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -766,15 +771,45 @@ pub async fn download_ai_model(
         return Ok("built-in-dsp".to_string());
     }
 
-    let download_urls: Vec<String> = if let Some(url) = custom_url {
+    let raw_urls: Vec<String> = if let Some(url) = custom_url {
         if !url.trim().is_empty() {
-            vec![url]
+            vec![url.trim().to_string()]
         } else {
             model.urls.clone()
         }
     } else {
         model.urls.clone()
     };
+
+    let mut download_urls: Vec<String> = Vec::new();
+    for u in raw_urls {
+        if !download_urls.contains(&u) {
+            download_urls.push(u.clone());
+        }
+        if u.contains("huggingface.co/") {
+            let mirror = u.replace("huggingface.co/", "hf-mirror.com/");
+            if !download_urls.contains(&mirror) {
+                download_urls.push(mirror);
+            }
+        } else if u.contains("hf-mirror.com/") {
+            let orig = u.replace("hf-mirror.com/", "huggingface.co/");
+            if !download_urls.contains(&orig) {
+                download_urls.push(orig);
+            }
+        }
+    }
+
+    // Дополнительный динамический фоллбэк на публичный хаб UVR моделей
+    if model.filename.ends_with(".onnx") || model.filename.ends_with(".pth") {
+        let blane_url = format!("https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/{}", model.filename);
+        if !download_urls.contains(&blane_url) {
+            download_urls.push(blane_url.clone());
+            let blane_mirror = blane_url.replace("huggingface.co/", "hf-mirror.com/");
+            if !download_urls.contains(&blane_mirror) {
+                download_urls.push(blane_mirror);
+            }
+        }
+    }
 
     if download_urls.is_empty() {
         return Err(format!("У модели '{}' отсутствуют ссылки для скачивания", model.name));
@@ -835,15 +870,16 @@ pub async fn download_ai_model(
         let mut curl_cmd = tokio::process::Command::new("curl");
         curl_cmd
             .arg("-L") // Follow redirects (HuggingFace / GitHub)
+            .arg("--location-trusted")
             .arg("-f") // Fail silently on server errors (404, 500)
             .arg("-A") // Provide browser User-Agent
-            .arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+            .arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             .arg("--retry")
-            .arg("3")
-            .arg("--retry-delay")
             .arg("2")
+            .arg("--retry-delay")
+            .arg("1")
             .arg("--connect-timeout")
-            .arg("30")
+            .arg("20")
             .arg("-o")
             .arg(&temp_dest)
             .arg(url);

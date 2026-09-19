@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useDropzone } from 'react-dropzone';
-import { getSafeFileUrl, getGlobalAudioSettings, safeConfirm, getAbsoluteFilePath } from './lib/utils';
+import { getSafeFileUrl, getGlobalAudioSettings, safeConfirm, getAbsoluteFilePath, safeStringifyProject } from './lib/utils';
 import { addToWebFileCache } from './lib/tauriLegacyWrapper';
 import { IOLogger } from './lib/ioLogger';
 import ExportModal from './components/ExportModal';
@@ -1852,7 +1852,7 @@ export default function App() {
     try {
       logger.info(`Starting all stems ZIP export to ${outputPath}`);
       const resultRes = await window.electronAPI.exportAllStems({
-        projectJson: JSON.stringify(project),
+        projectJson: safeStringifyProject(project),
         outputPath: outputPath
       });
       if (resultRes.success) {

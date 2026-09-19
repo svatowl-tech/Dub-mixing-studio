@@ -131,20 +131,22 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     size_mb: 115.0,
     recommended_for: 'Вокальные треки с плотным инструментальным сопровождением',
     urls: [
-      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDX23C/MDX23C-8Step-VocFT.onnx'
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR_MDXNET_KARA_2.onnx',
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/MDX23C_D1581.ckpt'
     ],
     is_installed: false
   },
   {
     id: 'hp_karaoke_uvr',
     name: '5_HP Karaoke UVR',
-    filename: '5_HP-Karaoke-UVR.onnx',
+    filename: '5_HP-Karaoke-UVR.pth',
     category: 'separation',
     description: 'Специализированный алгоритм извлечения чистого минуса и караоке.',
     size_mb: 60.5,
     recommended_for: 'Создание качественной фонограммы без остатков бэк-вокала',
     urls: [
-      'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/5_HP-Karaoke-UVR.onnx'
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/5_HP-Karaoke-UVR.pth',
+      'https://huggingface.co/comsharp/UVR_resources/resolve/main/models/VR_Arch/5_HP-Karaoke-UVR.pth'
     ],
     is_installed: false
   },
@@ -158,7 +160,7 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     recommended_for: 'Профессиональный студийный мастеринг и бескомпромиссная чистота голоса',
     urls: [
       'https://huggingface.co/KimberleyJSN/melbandroformer/resolve/main/MelBandRoformer.ckpt',
-      'https://huggingface.co/anvuew/MelBandRoformer/resolve/main/MelBandRoformer.ckpt'
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt'
     ],
     is_installed: false
   },
@@ -172,7 +174,7 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     recommended_for: 'Кинематографические миксы с объемной звуковой сценой',
     urls: [
       'https://huggingface.co/anvuew/BS-RoFormer/resolve/main/bs_roformer_anvuew_sdr_12.45.ckpt',
-      'https://huggingface.co/jarredou/aufr33-jarredou_BS-Roformer_Viperx_1297/resolve/main/model.ckpt'
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/model_bs_roformer_ep_317_sdr_12.9755.ckpt'
     ],
     is_installed: false
   },
@@ -187,9 +189,9 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     size_mb: 64.8,
     recommended_for: 'Дикторские записи, сделанные в обычных не заглушенных комнатах',
     urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx',
       'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Reverb_HQ_By_FoxJoy.onnx',
-      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx',
-      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx'
+      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx'
     ],
     is_installed: false
   },
@@ -202,6 +204,7 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     size_mb: 44.5,
     recommended_for: 'Легкое эхо в помещениях со шторами и коврами',
     urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-De-Echo-Normal.pth',
       'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Normal.pth',
       'https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoNormal.pth'
     ],
@@ -216,6 +219,7 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     size_mb: 44.5,
     recommended_for: 'Записи в пустых помещениях и сложных акустических условиях',
     urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-De-Echo-Aggressive.pth',
       'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Aggressive.pth',
       'https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoAggressive.pth'
     ],
@@ -230,7 +234,8 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     size_mb: 55.2,
     recommended_for: 'Очистка записей с накамерных и петличных микрофонов',
     urls: [
-      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeEcho-DeReverb.pth'
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeEcho-DeReverb.pth',
+      'https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoDeReverb.pth'
     ],
     is_installed: false
   },
@@ -239,14 +244,13 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
   {
     id: 'uvr_denoise_foxjoy',
     name: 'VR-DeNoise FoxJoy (Вокал / Речь)',
-    filename: 'VR-DeNoise-FoxJoy.onnx',
+    filename: 'UVR-DeNoise.pth',
     category: 'denoise',
     description: 'Флагманская модель FoxJoy для глубокой очистки речевого вокала от фонового шума.',
     size_mb: 44.8,
     recommended_for: 'Основной выбор для профессиональной очистки дикторских дорожек',
     urls: [
-      'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/VR-DeNoise-FoxJoy.onnx',
-      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/VR-DeNoise-FoxJoy.onnx'
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth'
     ],
     is_installed: false
   },
@@ -259,46 +263,47 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     size_mb: 25.4,
     recommended_for: 'Быстрая высококачественная очистка речи без металлического призвука',
     urls: [
-      'https://huggingface.co/niobures/DeepFilterNet/resolve/main/models/onnx/Audio-Cleaner/df_dec.onnx'
+      'https://huggingface.co/bitsydarel/deepfilternet3-onnx/resolve/main/df_dec.onnx'
     ],
     is_installed: false
   },
   {
     id: 'uvr_denoise_full',
     name: 'UVR-DeNoise Full (Глубокое подавление)',
-    filename: 'UVR-DeNoise-Full.onnx',
+    filename: 'UVR-DeNoise.pth',
     category: 'denoise',
     description: 'Бескомпромиссная глубокая очистка сложного шипящего и гудящего шума.',
     size_mb: 52.0,
     recommended_for: 'Сильно зашумленные репортажные и архивные аудиозаписи',
     urls: [
-      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise-Full.onnx'
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth'
     ],
     is_installed: false
   },
   {
     id: 'uvr_denoise_lite',
     name: 'VR-DeNoise Lite (Быстрая очистка)',
-    filename: 'UVR-DeNoise-Lite.onnx',
+    filename: 'UVR-DeNoise-Lite.pth',
     category: 'denoise',
     description: 'Легкая модель для оперативного подавления постоянного шума с низким расходом ресурсов.',
     size_mb: 28.5,
     recommended_for: 'Быстрый рендеринг на слабых видеокартах и процессорах',
     urls: [
-      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise-Lite.onnx'
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise-Lite.pth',
+      'https://huggingface.co/comsharp/UVR_resources/resolve/main/models/VR_Arch/UVR-DeNoise-Lite.pth'
     ],
     is_installed: false
   },
   {
     id: 'cascade_net',
     name: 'Cascade-Net Dual Denoise',
-    filename: 'cascade_net.onnx',
+    filename: 'deepfilter.onnx',
     category: 'denoise',
     description: 'Двухкаскадный нейрофильтр шума для тяжелых промышленных и уличных шумов.',
     size_mb: 64.0,
     recommended_for: 'Уличный шум, кондиционеры и толпа на заднем плане',
     urls: [
-      'https://huggingface.co/niobures/DeepFilterNet/resolve/main/models/onnx/Audio-Cleaner/cascade_net.onnx'
+      'https://huggingface.co/soniqo/DeepFilterNet3-ONNX/resolve/main/deepfilter.onnx'
     ],
     is_installed: false
   },

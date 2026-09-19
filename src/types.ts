@@ -1365,6 +1365,7 @@ export interface FinalRenderResult {
   success: boolean;
   videoBlobUrl?: string;
   videoFileName?: string;
+  videoFilePath?: string;
   videoDuration: number;
   stems: Array<{
     id: string;

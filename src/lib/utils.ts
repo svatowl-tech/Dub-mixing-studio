@@ -249,3 +249,92 @@ export const createPrefixedAudioPath = (prefix: string, fullPath: string): strin
   return dir ? `${dir}/${newFileName}` : newFileName;
 };
 
+/**
+ * Безопасный сериализатор данных проекта в JSON без ошибок RangeError: Invalid string length
+ * и без гигантских отступов / перегрузки массивными числами.
+ */
+export function safeStringifyProject(data: any): string {
+  if (!data) return JSON.stringify(data);
+
+  try {
+    const sanitized = sanitizeProjectObject(data);
+    return JSON.stringify(sanitized);
+  } catch (err) {
+    console.warn('[safeStringifyProject] Standard JSON.stringify failed, using emergency stripped fallback:', err);
+    try {
+      const emergencySanitized = stripHeavyArrays(data);
+      return JSON.stringify(emergencySanitized);
+    } catch (e) {
+      console.error('[safeStringifyProject] Emergency JSON.stringify failed:', e);
+      return '{}';
+    }
+  }
+}
+
+function sanitizeProjectObject(data: any, depth = 0): any {
+  if (depth > 12) return null;
+  if (!data || typeof data !== 'object') return data;
+  if (data instanceof Uint8Array || data instanceof Float32Array || data instanceof ArrayBuffer) return null;
+
+  if (Array.isArray(data)) {
+    return data.map(item => sanitizeProjectObject(item, depth + 1));
+  }
+
+  const clean: Record<string, any> = {};
+  for (const key of Object.keys(data)) {
+    const value = data[key];
+
+    // Исключаем огромные/временные блобы и прочие тяжелые поля
+    if (key === 'blobUrl' || (key === 'audioUrl' && typeof value === 'string' && value.startsWith('blob:'))) {
+      continue;
+    }
+
+    // Даунсамплим пики огибающей, если они огромные (> 6000 точек)
+    if ((key === 'originalPeaks' || key === 'waveform') && Array.isArray(value)) {
+      if (value.length > 6000) {
+        const step = Math.ceil(value.length / 6000);
+        const sampled: number[] = [];
+        for (let i = 0; i < value.length; i += step) {
+          const v = value[i];
+          sampled.push(typeof v === 'number' ? Number(v.toFixed(4)) : 0);
+        }
+        clean[key] = sampled;
+      } else {
+        clean[key] = value.map(v => typeof v === 'number' ? Number(v.toFixed(4)) : v);
+      }
+      continue;
+    }
+
+    if (value && typeof value === 'object') {
+      clean[key] = sanitizeProjectObject(value, depth + 1);
+    } else {
+      clean[key] = value;
+    }
+  }
+
+  return clean;
+}
+
+function stripHeavyArrays(data: any): any {
+  if (!data || typeof data !== 'object') return data;
+  const copy = { ...data };
+  delete copy.originalPeaks;
+  if (Array.isArray(copy.tracks)) {
+    copy.tracks = copy.tracks.map((t: any) => {
+      if (!t || typeof t !== 'object') return t;
+      const tc = { ...t };
+      if (Array.isArray(tc.segments)) {
+        tc.segments = tc.segments.map((s: any) => {
+          if (!s || typeof s !== 'object') return s;
+          const sc = { ...s };
+          delete sc.waveform;
+          return sc;
+        });
+      }
+      return tc;
+    });
+  }
+  return copy;
+}
+
+

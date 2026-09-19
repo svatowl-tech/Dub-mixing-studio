@@ -175,7 +175,14 @@
           "cancel_model_download",
           "delete_ai_model",
           "open_models_directory",
-          "check_model_installed"
+          "check_model_installed",
+          "detect_speech_regions",
+          "audit_project_timing",
+          "compute_waveform_render_buckets",
+          "compute_waveform_buckets_from_peaks",
+          "parse_subtitle_file_native",
+          "match_transcription_with_script",
+          "classify_project_cues"
         ],
         "deny": []
       }

@@ -3,7 +3,7 @@ import { invoke, isTauri, convertFileSrc } from '@tauri-apps/api/core';
 import { open, save, message } from '@tauri-apps/plugin-dialog';
 import { listen, emit, UnlistenFn } from '@tauri-apps/api/event';
 
-import { safeConfirm, getSafeFileUrl } from './utils';
+import { safeConfirm, getSafeFileUrl, safeStringifyProject } from './utils';
 import { IOLogger } from './ioLogger';
 import { UniversalParserService } from '../services/UniversalParserService';
 import { SubtitleLine } from '../types';
@@ -342,10 +342,10 @@ export const tauriAPI = {
       const fileName = `${args.projectData.name}.dub`;
       const filePath = `${args.projectPath}/${fileName}`.replace(/\\/g, '/');
       
-      // Clean up for saving (remove temporary UI state)
-      const cleanData = { ...args.projectData };
+      // Clean up and safely stringify for saving
+      const jsonContent = safeStringifyProject(args.projectData);
       
-      await invoke('save_project_file', { path: filePath, data: JSON.stringify(cleanData, null, 2) });
+      await invoke('save_project_file', { path: filePath, data: jsonContent });
       
       // Sync into SQLite transactional database
       try {

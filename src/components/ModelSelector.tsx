@@ -34,6 +34,9 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
   const [downloadProgress, setDownloadProgress] = useState<ModelDownloadProgress | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
+  const [customUrl, setCustomUrl] = useState('');
+  const [showCustomUrlInput, setShowCustomUrlInput] = useState(false);
+
   useEffect(() => {
     const service = AIModelService.getInstance();
     const unsubscribe = service.subscribe((allModels) => {
@@ -65,12 +68,14 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
     }
   }, [value, selectedModelInfo]);
 
-  const handleDownload = async () => {
+  const handleDownload = async (overrideUrl?: string) => {
     if (!selectedModelInfo) return;
     setDownloading(true);
     setDownloadError(null);
     try {
-      await service.downloadModel(selectedModelInfo.id);
+      await service.downloadModel(selectedModelInfo.id, overrideUrl || (customUrl.trim() ? customUrl.trim() : undefined));
+      setShowCustomUrlInput(false);
+      setCustomUrl('');
     } catch (err: any) {
       setDownloadError(err?.message || 'Ошибка загрузки модели');
     } finally {
@@ -167,8 +172,70 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
           )}
 
           {downloadError && (
-            <div className="text-[11px] text-rose-400 font-medium">
-              ❌ {downloadError}
+            <div className="flex flex-col gap-2 pt-1 border-t border-amber-500/20 text-[11px]">
+              <div className="text-rose-400 font-medium leading-tight">
+                ❌ {downloadError}
+              </div>
+
+              {showCustomUrlInput ? (
+                <div className="flex items-center gap-1.5 mt-1">
+                  <input
+                    type="url"
+                    placeholder="Вставьте ссылку на зеркало или .onnx / .pth..."
+                    value={customUrl}
+                    onChange={(e) => setCustomUrl(e.target.value)}
+                    className="flex-1 bg-slate-900 border border-amber-500/40 rounded px-2 py-1 text-xs text-white placeholder-slate-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleDownload()}
+                    className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded text-xs shrink-0"
+                  >
+                    Скачать
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowCustomUrlInput(false)}
+                    className="px-2 py-1 bg-slate-800 text-slate-400 rounded text-xs"
+                  >
+                    Отмена
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center gap-2 text-[10px]">
+                  <button
+                    type="button"
+                    onClick={() => setShowCustomUrlInput(true)}
+                    className="text-amber-300 hover:underline font-medium"
+                  >
+                    🔗 Указать своё зеркало / ссылку
+                  </button>
+                  {onOpenModelManager && (
+                    <>
+                      <span className="text-slate-600">•</span>
+                      <button
+                        type="button"
+                        onClick={onOpenModelManager}
+                        className="text-cyan-300 hover:underline font-medium"
+                      >
+                        ⚙️ Менеджер моделей
+                      </button>
+                    </>
+                  )}
+                  {builtInOptions.length > 0 && (
+                    <>
+                      <span className="text-slate-600">•</span>
+                      <button
+                        type="button"
+                        onClick={() => onChange(builtInOptions[0].id)}
+                        className="text-emerald-400 hover:underline font-medium"
+                      >
+                        ⚡ Использовать встроенный DSP ({builtInOptions[0].name})
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

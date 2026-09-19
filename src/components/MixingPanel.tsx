@@ -69,6 +69,7 @@ import {
   NormalizationStats,
   SeparationResult
 } from '../types';
+import { GlobalStepSettingsService } from '../services/globalStepSettingsService';
 import { 
   DEFAULT_MIXING_PRESETS,
   DEFAULT_PHASE1_ORDER,
@@ -223,9 +224,12 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
   const [isOpen, setIsOpen] = useState(true);
   const [activeTab, setActiveTab] = useState<'prep' | 'timing' | 'mixing' | 'render'>('prep');
-  const [presets, setPresets] = useState<MixingPreset[]>(DEFAULT_MIXING_PRESETS);
+  const [presets, setPresets] = useState<MixingPreset[]>(() => GlobalStepSettingsService.getMergedPresets());
   const [selectedPresetId, setSelectedPresetId] = useState<string>('preset-voiceover');
-  const [activePreset, setActivePreset] = useState<MixingPreset>(DEFAULT_MIXING_PRESETS[0]);
+  const [activePreset, setActivePreset] = useState<MixingPreset>(() => {
+    const merged = GlobalStepSettingsService.getMergedPresets();
+    return merged[0];
+  });
   
   // States for preset creation
   const [isCreatingPreset, setIsCreatingPreset] = useState(false);
@@ -1575,19 +1579,38 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     }, 1800);
   };
 
-  // Load project presets if available
+  // Helper to persist updated preset and step configurations globally to app directory
+  const saveUpdatedPresetGlobally = (updatedPreset: MixingPreset) => {
+    setPresets(prevPresets => {
+      const updatedList = prevPresets.map(p => p.id === updatedPreset.id ? updatedPreset : p);
+      if (!updatedList.some(p => p.id === updatedPreset.id)) {
+        updatedList.push(updatedPreset);
+      }
+      GlobalStepSettingsService.saveGlobalSettings(updatedList, updatedPreset.id);
+      return updatedList;
+    });
+  };
+
+  // Load project presets and persistent global step settings
   useEffect(() => {
-    if (project) {
-      const allPresets = [...DEFAULT_MIXING_PRESETS, ...(project.customPresets || [])];
+    GlobalStepSettingsService.initGlobalSettingsFromDisk().then(globalPayload => {
+      const mergedGlobal = GlobalStepSettingsService.getMergedPresets();
+      const customProjPresets = project?.customPresets || [];
+      
+      const allPresetsMap = new Map<string, MixingPreset>();
+      mergedGlobal.forEach(p => allPresetsMap.set(p.id, p));
+      customProjPresets.forEach(p => allPresetsMap.set(p.id, p));
+      
+      const allPresets = Array.from(allPresetsMap.values());
       setPresets(allPresets);
-      
-      const activeId = project.activePresetId || 'preset-voiceover';
+
+      const activeId = project?.activePresetId || globalPayload.activePresetId || selectedPresetId || 'preset-voiceover';
       setSelectedPresetId(activeId);
-      
-      const current = allPresets.find(p => p.id === activeId) || DEFAULT_MIXING_PRESETS[0];
-      setActivePreset(JSON.parse(JSON.stringify(current))); // Deep copy to prevent mutating store directly without save
-    }
-  }, [project]);
+
+      const current = allPresets.find(p => p.id === activeId) || mergedGlobal[0];
+      setActivePreset(JSON.parse(JSON.stringify(current)));
+    });
+  }, [project?.id]);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -1667,34 +1690,35 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   const handlePresetChange = (presetId: string) => {
     setSelectedPresetId(presetId);
     const found = presets.find(p => p.id === presetId);
-    if (found && project) {
+    if (found) {
       setActivePreset(JSON.parse(JSON.stringify(found)));
-      onUpdateProject({ activePresetId: presetId });
+      if (project) {
+        onUpdateProject({ activePresetId: presetId });
+      }
+      GlobalStepSettingsService.saveGlobalSettings(presets, presetId);
       showToast(`Применен пресет: ${found.name}`);
     }
   };
 
-  // Save changes to current preset (only if custom, otherwise prompt to create new)
+  // Explicitly save current step settings globally to application folder file
   const handleSavePresetChanges = () => {
-    if (!project) return;
-    
-    const isSystem = activePreset.isSystem;
-    if (isSystem) {
-      // Prompt creation
-      setNewPresetName(`${activePreset.name} (Копия)`);
-      setNewPresetDesc(`Пользовательская копия пресета ${activePreset.name}`);
-      setNewPresetType(activePreset.type);
-      setIsCreatingPreset(true);
-      return;
+    saveUpdatedPresetGlobally(activePreset);
+    if (project && !activePreset.isSystem) {
+      const updatedCustomPresets = (project.customPresets || []).map(p => 
+        p.id === activePreset.id ? activePreset : p
+      );
+      onUpdateProject({ customPresets: updatedCustomPresets });
     }
+    showToast(`Глобальные настройки шагов для «${activePreset.name}» сохранены в папку приложения!`);
+  };
 
-    // Save changes to custom preset
-    const updatedCustomPresets = (project.customPresets || []).map(p => 
-      p.id === activePreset.id ? activePreset : p
-    );
-    
-    onUpdateProject({ customPresets: updatedCustomPresets });
-    showToast(`Изменения в пресете «${activePreset.name}» сохранены!`);
+  // Reset all step settings back to original factory defaults
+  const handleResetToFactoryDefaults = async () => {
+    const factoryPresets = await GlobalStepSettingsService.resetToFactoryDefaults();
+    setPresets(factoryPresets);
+    const active = factoryPresets.find(p => p.id === selectedPresetId) || factoryPresets[0];
+    setActivePreset(JSON.parse(JSON.stringify(active)));
+    showToast('Настройки шагов сброшены к заводским по умолчанию');
   };
 
   // Create new custom preset
@@ -1761,6 +1785,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     
     const updated = { ...activePreset, [orderKey]: currentOrder };
     setActivePreset(updated);
+    saveUpdatedPresetGlobally(updated);
     showToast('Порядок этапов изменён');
   };
 
@@ -1804,6 +1829,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
     const updated = { ...activePreset, [orderKey]: currentOrder };
     setActivePreset(updated);
+    saveUpdatedPresetGlobally(updated);
     showToast('Порядок этапов изменён');
   };
   const renderStepContainer = (
@@ -2947,21 +2973,25 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   const updatePhase1 = (updates: Partial<PrepProcessingConfig>) => {
     const updated = { ...activePreset, phase1: { ...activePreset.phase1, ...updates } };
     setActivePreset(updated);
+    saveUpdatedPresetGlobally(updated);
   };
 
   const updatePhase2 = (updates: Partial<TimingAlignmentConfig>) => {
     const updated = { ...activePreset, phase2: { ...activePreset.phase2, ...updates } };
     setActivePreset(updated);
+    saveUpdatedPresetGlobally(updated);
   };
 
   const updatePhase3 = (updates: Partial<MixingEffectsConfig>) => {
     const updated = { ...activePreset, phase3: { ...activePreset.phase3, ...updates } };
     setActivePreset(updated);
+    saveUpdatedPresetGlobally(updated);
   };
 
   const updatePhase4 = (updates: Partial<FinalMixConfig>) => {
     const updated = { ...activePreset, phase4: { ...activePreset.phase4, ...updates } };
     setActivePreset(updated);
+    saveUpdatedPresetGlobally(updated);
   };
 
   // --- Phase 2 Actions & Timing Handlers ---
@@ -3217,14 +3247,25 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           {/* Preset Selector Panel */}
           <div className="p-3 bg-zinc-900/60 border-b border-white/5 flex flex-col gap-2 flex-shrink-0">
             <div className="flex items-center gap-2 justify-between">
-              <span className="text-[9px] font-black uppercase tracking-widest text-zinc-500">Пресет сведения</span>
-              <div className="flex items-center gap-1">
+              <span className="text-[9px] font-black uppercase tracking-widest text-emerald-400 flex items-center gap-1 truncate pr-1">
+                <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />
+                Глобальные настройки шагов
+              </span>
+              <div className="flex items-center gap-1 flex-shrink-0">
                 <button 
                   onClick={handleSavePresetChanges}
-                  title="Сохранить изменения"
-                  className="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-300 hover:text-white rounded-lg border border-white/5 transition-all"
+                  title="Принудительно сохранить глобальные настройки шагов в папку приложения"
+                  className="p-1.5 bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-300 hover:text-white rounded-lg border border-white/5 transition-all flex items-center gap-1 text-[10px] font-bold"
                 >
-                  <Save className="w-3.5 h-3.5" />
+                  <Save className="w-3.5 h-3.5 text-indigo-400" />
+                  <span className="hidden sm:inline">Сохранить</span>
+                </button>
+                <button 
+                  onClick={handleResetToFactoryDefaults}
+                  title="Сбросить настройки шагов к заводским"
+                  className="p-1.5 bg-zinc-800 hover:bg-rose-900/30 hover:border-rose-500/30 active:scale-95 text-zinc-400 hover:text-rose-300 rounded-lg border border-white/5 transition-all"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
                 </button>
                 <button 
                   onClick={handleSharePreset}
