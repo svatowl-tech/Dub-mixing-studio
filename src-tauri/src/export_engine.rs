@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::env;
 // sync
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};

@@ -1,51 +1,9 @@
 use std::fs;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
-use hound::{WavReader, WavWriter, WavSpec, SampleFormat};
+use hound::{WavReader, WavWriter, SampleFormat};
 use crate::track_analysis::{TrackAnalysisReport, WaveformClassification};
-use crate::logger::{log_debug, log_info};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IntelligentNormResult {
-    pub track_id: String,
-    pub output_path: String,
-    pub clips_processed: usize,
-}
-
-/// Применяет интеллектуальную нормализацию к дорожке на основе данных анализа
-#[tauri::command]
-pub async fn process_intelligent_normalization(
-    project_dir: String,
-    track_id: String,
-) -> Result<Vec<IntelligentNormResult>, String> {
-    log_info(&format!("[IntelligentNorm] Starting for track: {}", track_id));
-
-    // 1. Загрузка отчета анализа
-    let norm_project_dir = crate::file_io::normalize_windows_path(&project_dir);
-    let analysis_file_path = Path::new(&norm_project_dir).join(".dubstudio").join("track_analysis.json");
-    
-    if !analysis_file_path.exists() {
-        return Err("Analysis cache not found. Please run track analysis first.".to_string());
-    }
-
-    let json_str = fs::read_to_string(&analysis_file_path).map_err(|e| e.to_string())?;
-    let reports: Vec<TrackAnalysisReport> = serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
-    
-    let report = reports.iter().find(|r| r.track_id == track_id)
-        .ok_or_else(|| format!("Analysis for track {} not found", track_id))?;
-
-    // Нам нужны данные о клипах этой дорожки. 
-    // Поскольку команда вызывается из контекста проекта, нам нужно получить текущее состояние клипов.
-    // Для этого воспользуемся загрузкой проекта (или передадим клипы в аргументах).
-    // Учитывая архитектуру, лучше передать список клипов для обработки.
-    
-    // Но так как у нас есть проект в БД, мы можем его вытянуть, если нужно.
-    // Однако для модуля 1.1 допустим, что мы работаем с файлами напрямую или передаем их.
-    // Вернемся к main.rs чтобы посмотреть как вызываются другие DSP команды.
-    
-    Err("Implementation requires clip list. Please use process_intelligent_normalization_with_clips".to_string())
-}
+use crate::logger::log_info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

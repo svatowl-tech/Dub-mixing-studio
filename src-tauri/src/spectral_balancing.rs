@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
-use hound::{WavReader, WavWriter, WavSpec, SampleFormat};
+use hound::{WavReader, WavWriter, SampleFormat};
 use rustfft::{FftPlanner, num_complex::Complex32};
 use crate::track_analysis::{TrackAnalysisReport};
-use crate::logger::{log_debug, log_info};
+use crate::logger::log_info;
 use crate::intelligent_normalization::{ClipProcessingInput};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,7 +157,6 @@ fn process_single_clip_spectral(
 
     let mut reader = WavReader::open(p).map_err(|e| e.to_string())?;
     let spec = reader.spec();
-    let sample_rate = spec.sample_rate;
     let channels = spec.channels as usize;
 
     let mut samples: Vec<f32> = match spec.sample_format {
@@ -190,7 +189,7 @@ fn process_single_clip_spectral(
 
     // Для каждого канала отдельно
     for ch in 0..channels {
-        let mut ch_samples: Vec<f32> = samples.iter().enumerate()
+        let ch_samples: Vec<f32> = samples.iter().enumerate()
             .filter(|(i, _)| i % channels == ch)
             .map(|(_, &s)| s)
             .collect();
