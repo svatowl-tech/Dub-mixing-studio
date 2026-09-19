@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
-use hound::{WavReader, WavWriter, WavSpec, SampleFormat};
+use hound::{WavReader, WavWriter, SampleFormat};
 use crate::track_analysis::{TrackAnalysisReport, WaveformClassification};
 use crate::logger::{log_info};
 use crate::intelligent_normalization::{ClipProcessingInput};
@@ -113,8 +113,8 @@ fn process_single_clip_leveler(
     let mut envelope_db = -90.0f32;
     
     // Классификатор (окно 200мс)
-    let window_size_ms = 200.0;
-    let samples_per_window = (window_size_ms / 1000.0 * sample_rate as f64) as usize;
+    let _window_size_ms = 200.0;
+    let _samples_per_window = (_window_size_ms / 1000.0 * sample_rate as f64) as usize;
     let num_samples = samples.len();
 
     // Проходим по сэмплам

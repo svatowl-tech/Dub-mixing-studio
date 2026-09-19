@@ -412,6 +412,7 @@ pub fn analyze_voice_tracks(
                     high_treble_boosted: false,
                     resonance_detected: false,
                     spectral_centroid_hz: 0.0,
+                    spectrum_db: Vec::new(),
                 },
                 analysis_timestamp: now,
             };

@@ -520,7 +520,7 @@ pub fn ensure_valid_wav_path(path: &Path) -> Result<(PathBuf, bool), String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let parent_dir = src.parent().unwrap_or(src);
+    let parent_dir = src.parent().unwrap_or(&src);
     let temp_wav = parent_dir.join(format!("dubstudio_conv_{}.wav", epoch_nanos));
 
     let ffmpeg_bin = find_ffmpeg_path();
