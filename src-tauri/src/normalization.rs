@@ -463,23 +463,17 @@ pub fn process_peak_adjustment(
     output_path: &Path,
     target_peak_db: f64,
 ) -> Result<PeakAdjustmentStats, AudioError> {
-    let norm_in_str = crate::file_io::normalize_windows_path(&input_path.to_string_lossy());
-    let norm_out_str = crate::file_io::normalize_windows_path(&output_path.to_string_lossy());
-    let wav_path = std::path::PathBuf::from(&norm_in_str);
-    
-    let is_temp = if wav_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase() != "wav" {
-        true
-    } else {
-        false
-    };
+    if !input_path.exists() {
+        return Err(AudioError::InvalidData(format!(
+            "Input audio file does not exist: {}",
+            input_path.display()
+        )));
+    }
 
-    let effective_wav_path = if is_temp {
-        crate::file_io::ensure_valid_wav_path(&norm_in_str)?
-    } else {
-        norm_in_str.clone()
-    };
+    let (wav_path, is_temp) = crate::file_io::ensure_valid_wav_path(input_path)
+        .map_err(|e| AudioError::InvalidData(e))?;
 
-    let mut reader = WavReader::open(&effective_wav_path)?;
+    let mut reader = WavReader::open(&wav_path)?;
     let spec = reader.spec();
     let sample_rate = spec.sample_rate;
     let channels = spec.channels as usize;
@@ -487,18 +481,20 @@ pub fn process_peak_adjustment(
     let raw_samples: Vec<f32> = match spec.sample_format {
         SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap_or(0.0)).collect(),
         SampleFormat::Int => {
-            let bits = spec.bits_per_sample;
-            if bits <= 16 {
-                reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / 32768.0).collect()
-            } else if bits <= 24 {
-                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 8388608.0).collect()
-            } else {
-                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / i32::MAX as f32).collect()
+            match spec.bits_per_sample {
+                16 => reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / 32768.0).collect(),
+                24 => reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 8388608.0).collect(),
+                32 => reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 2147483648.0).collect(),
+                8  => reader.samples::<i8>().map(|s| s.unwrap_or(0) as f32 / 128.0).collect(),
+                b => return Err(AudioError::InvalidData(format!("Unsupported bit depth: {}", b))),
             }
         }
     };
 
     if raw_samples.is_empty() || channels == 0 {
+        if is_temp {
+            let _ = std::fs::remove_file(&wav_path);
+        }
         return Err(AudioError::InvalidData("Empty or invalid audio stream for peak adjustment".to_string()));
     }
 
@@ -523,6 +519,7 @@ pub fn process_peak_adjustment(
 
     let processed_samples: Vec<f32> = raw_samples.iter().map(|s| s * gain_factor).collect();
 
+    let norm_out_str = crate::file_io::normalize_windows_path(&output_path.to_string_lossy());
     let out_path_buf = std::path::PathBuf::from(&norm_out_str);
     if let Some(parent) = out_path_buf.parent() {
         std::fs::create_dir_all(parent)?;
@@ -542,7 +539,7 @@ pub fn process_peak_adjustment(
     writer.finalize()?;
 
     if is_temp {
-        let _ = std::fs::remove_file(&effective_wav_path);
+        let _ = std::fs::remove_file(&wav_path);
     }
 
     let final_peak_db = if max_peak_lin > 1e-7 { target_peak_db } else { -120.0 };

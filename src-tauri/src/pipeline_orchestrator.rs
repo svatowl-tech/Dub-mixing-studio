@@ -514,7 +514,7 @@ async fn run_native_pipeline(
 
     // Шаг 1.5: Итоговая EBU R128 Нормализация громкости (в самом конце предподготовки)
     check_pause_and_cancel(&handle).await?;
-    let norm_in = if denoise_out.exists() { denoise_out } else { denoise_in };
+    let norm_in = if denoise_out.exists() { denoise_out.clone() } else { denoise_in.clone() };
     let norm_out = workspace_dir.join("05_normalized.wav");
     let target_lufs = settings.target_dialogue_lufs.unwrap_or(-16.0);
 
@@ -572,7 +572,7 @@ async fn run_native_pipeline(
         "Анализ пауз речи и генерация голосовых масок...",
     );
 
-    let phase2_input = if denoise_out.exists() { denoise_out } else { denoise_in };
+    let phase2_input = if norm_out.exists() { norm_out } else if denoise_out.exists() { denoise_out } else { denoise_in };
     let mut speech_cues = Vec::new();
     let mut _sample_rate_detected = 48000u32;
 
