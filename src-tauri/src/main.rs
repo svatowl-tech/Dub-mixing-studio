@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+pub mod process_utils;
 mod audio_engine;
 mod export_engine;
 mod db;
@@ -113,7 +114,7 @@ use vst_host::{
     batch_process_vst_chain,
     SharedVstHostState, VstHostState,
 };
-use normalization::{normalize_audio, estimate_lufs_from_pcm, apply_waveform_upward_compression};
+use normalization::{normalize_audio, adjust_peak_audio, estimate_lufs_from_pcm, apply_waveform_upward_compression};
 use eq_matching::match_eq_profile;
 use declick::clean_clicks;
 use deplosive::apply_deplosive;
@@ -474,6 +475,7 @@ fn main() {
             install_audio_separator_pkg,
             run_audio_separator_cmd,
             normalize_audio,
+            adjust_peak_audio,
             estimate_lufs_from_pcm,
             apply_waveform_upward_compression,
             match_eq_profile,

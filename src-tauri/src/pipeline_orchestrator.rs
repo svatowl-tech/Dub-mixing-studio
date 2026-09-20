@@ -23,7 +23,7 @@ use crate::eq_matching::process_match_eq_profile;
 use crate::mastering_limiter::{
     process_mastering_limiter, DitherType, MasteringLimiterConfig, MasteringStandard,
 };
-use crate::normalization::process_normalization;
+use crate::normalization::{process_normalization, process_peak_adjustment};
 use crate::silence_split::{detect_speech_segments, SilenceSplitConfig};
 use crate::smart_align::{
     perform_smart_alignment_analysis, resolve_audio_samples, wsola_time_stretch, SmartAlignConfig,
@@ -327,31 +327,31 @@ async fn run_native_pipeline(
     // ========================================================================
     // ФАЗА 1: ПРЕДОБРАБОТКА И ОЧИСТКА АУДИО (PHASE 1: PREPROCESSING)
     // ========================================================================
+    // Шаг 1.1: Пиковая подстройка громкости по самому высокому пику (-9 dBFS)
     check_pause_and_cancel(&handle).await?;
     emit_telemetry(
         &app,
         &handle,
         PipelinePhase::Phase1_Preprocessing,
-        "Шаг 1.1: Нормализация громкости",
+        "Шаг 1.1: Пиковая подстройка громкости (-9 dBFS)",
         5.0,
         0.0,
-        "Старт EBU R128 нормализации диалоговых треков...",
+        "Старт подстройки громкости по пику -9.0 dBFS...",
     );
 
-    let norm_out = workspace_dir.join("01_normalized.wav");
-    let target_lufs = settings.target_dialogue_lufs.unwrap_or(-16.0);
+    let peak_out = workspace_dir.join("01_peak_adjusted.wav");
 
     if working_voice_wav.exists() {
-        match process_normalization(&working_voice_wav, &norm_out, target_lufs) {
+        match process_peak_adjustment(&working_voice_wav, &peak_out, -9.0) {
             Ok(stats) => {
                 emit_telemetry(
                     &app,
                     &handle,
                     PipelinePhase::Phase1_Preprocessing,
-                    "Шаг 1.1: Нормализация громкости",
-                    12.0,
+                    "Шаг 1.1: Пиковая подстройка громкости (-9 dBFS)",
+                    10.0,
                     100.0,
-                    &format!("Нормализация завершена: {:.1} LUFS (Пик: {:.1} dBFS)", stats.final_lufs, stats.final_true_peak_db),
+                    &format!("Пиковая подстройка завершена: пик приведен к -9.0 dBFS (исходный {:.1} dBFS, гейн: {:+.1} dB)", stats.initial_peak_db, stats.gain_applied_db),
                 );
             }
             Err(e) => {
@@ -359,12 +359,12 @@ async fn run_native_pipeline(
                     &app,
                     &handle,
                     PipelinePhase::Phase1_Preprocessing,
-                    "Шаг 1.1: Нормализация громкости",
-                    12.0,
+                    "Шаг 1.1: Пиковая подстройка громкости (-9 dBFS)",
+                    10.0,
                     100.0,
-                    &format!("Внимание при нормализации: {}. Переход к следующему шагу.", e),
+                    &format!("Внимание при пиковой подстройке: {}. Переход к следующему шагу.", e),
                 );
-                let _ = fs::copy(&working_voice_wav, &norm_out);
+                let _ = fs::copy(&working_voice_wav, &peak_out);
             }
         }
     } else {
@@ -372,8 +372,8 @@ async fn run_native_pipeline(
             &app,
             &handle,
             PipelinePhase::Phase1_Preprocessing,
-            "Шаг 1.1: Нормализация громкости",
-            12.0,
+            "Шаг 1.1: Пиковая подстройка громкости (-9 dBFS)",
+            10.0,
             100.0,
             "Исходный голос не найден на диске, пропуск шага 1.1",
         );
@@ -381,7 +381,7 @@ async fn run_native_pipeline(
 
     // Шаг 1.2: EQ Matching
     check_pause_and_cancel(&handle).await?;
-    let eq_input = if norm_out.exists() { norm_out } else { working_voice_wav.clone() };
+    let eq_input = if peak_out.exists() { peak_out } else { working_voice_wav.clone() };
     let eq_out = workspace_dir.join("02_eq_matched.wav");
     let eq_profile = settings.eq_profile.as_deref().unwrap_or("warm_broadcast");
 
@@ -403,7 +403,7 @@ async fn run_native_pipeline(
                     &handle,
                     PipelinePhase::Phase1_Preprocessing,
                     "Шаг 1.2: EQ Matching спектральный баланс",
-                    20.0,
+                    18.0,
                     100.0,
                     "Спектральное соответствие успешно рассчитано через OLA FFT",
                 );
@@ -414,7 +414,7 @@ async fn run_native_pipeline(
                     &handle,
                     PipelinePhase::Phase1_Preprocessing,
                     "Шаг 1.2: EQ Matching спектральный баланс",
-                    20.0,
+                    18.0,
                     100.0,
                     &format!("Профиль EQ: {}. Перенос аудио без искажений.", e),
                 );
@@ -434,7 +434,7 @@ async fn run_native_pipeline(
         &handle,
         PipelinePhase::Phase1_Preprocessing,
         "Шаг 1.3: Удаление артефактов и кликов (De-Click)",
-        22.0,
+        20.0,
         0.0,
         &format!("Многопоточный поиск и очистка щелчков (Чувствительность: {:.1}%)...", declick_sens),
     );
@@ -447,7 +447,7 @@ async fn run_native_pipeline(
                     &handle,
                     PipelinePhase::Phase1_Preprocessing,
                     "Шаг 1.3: Удаление артефактов и кликов (De-Click)",
-                    25.0,
+                    22.0,
                     100.0,
                     &format!("Устранено {} щелчков (восстановлено {} сэмплов)", rep.clicks_detected, rep.samples_restored),
                 );
@@ -458,7 +458,7 @@ async fn run_native_pipeline(
                     &handle,
                     PipelinePhase::Phase1_Preprocessing,
                     "Шаг 1.3: Удаление артефактов и кликов (De-Click)",
-                    25.0,
+                    22.0,
                     100.0,
                     &format!("Внимание De-Click: {}. Использован предыдущий буфер.", e),
                 );
@@ -479,7 +479,7 @@ async fn run_native_pipeline(
         &handle,
         PipelinePhase::Phase1_Preprocessing,
         "Шаг 1.4: Нейросетевое шумоподавление (UVR De-Noise)",
-        26.0,
+        24.0,
         0.0,
         "Запуск спектрального подавления шума...",
     );
@@ -492,7 +492,7 @@ async fn run_native_pipeline(
                     &handle,
                     PipelinePhase::Phase1_Preprocessing,
                     "Шаг 1.4: Нейросетевое шумоподавление (UVR De-Noise)",
-                    30.0,
+                    27.0,
                     100.0,
                     &format!("Шумоподавление выполнено: снижение шума на {:.1} dB", rep.noise_reduction_db),
                 );
@@ -503,13 +503,59 @@ async fn run_native_pipeline(
                     &handle,
                     PipelinePhase::Phase1_Preprocessing,
                     "Шаг 1.4: Нейросетевое шумоподавление (UVR De-Noise)",
-                    30.0,
+                    27.0,
                     100.0,
                     &format!("Пропуск UVR нейросети ({}), сохранение исходного сигнала.", e),
                 );
                 let _ = fs::copy(&denoise_in, &denoise_out);
             }
         }
+    }
+
+    // Шаг 1.5: Итоговая EBU R128 Нормализация громкости (в самом конце предподготовки)
+    check_pause_and_cancel(&handle).await?;
+    let norm_in = if denoise_out.exists() { denoise_out } else { denoise_in };
+    let norm_out = workspace_dir.join("05_normalized.wav");
+    let target_lufs = settings.target_dialogue_lufs.unwrap_or(-16.0);
+
+    emit_telemetry(
+        &app,
+        &handle,
+        PipelinePhase::Phase1_Preprocessing,
+        "Шаг 1.5: Итоговая EBU R128 Нормализация громкости",
+        28.0,
+        0.0,
+        &format!("Финальная нормализация очищенной речи до целевых {:.1} LUFS...", target_lufs),
+    );
+
+    if norm_in.exists() {
+        match process_normalization(&norm_in, &norm_out, target_lufs) {
+            Ok(stats) => {
+                emit_telemetry(
+                    &app,
+                    &handle,
+                    PipelinePhase::Phase1_Preprocessing,
+                    "Шаг 1.5: Итоговая EBU R128 Нормализация громкости",
+                    30.0,
+                    100.0,
+                    &format!("Нормализация завершена: {:.1} LUFS (Пик: {:.1} dBFS, гейн: {:+.1} dB)", stats.final_lufs, stats.final_true_peak_db, stats.gain_applied_db),
+                );
+            }
+            Err(e) => {
+                emit_telemetry(
+                    &app,
+                    &handle,
+                    PipelinePhase::Phase1_Preprocessing,
+                    "Шаг 1.5: Итоговая EBU R128 Нормализация громкости",
+                    30.0,
+                    100.0,
+                    &format!("Внимание при итоговой нормализации: {}. Использован чистый сигнал.", e),
+                );
+                let _ = fs::copy(&norm_in, &norm_out);
+            }
+        }
+    } else {
+        let _ = fs::copy(&working_voice_wav, &norm_out);
     }
 
     // ========================================================================

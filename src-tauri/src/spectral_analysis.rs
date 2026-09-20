@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::f32::consts::PI;
 use std::path::Path;
 use crate::logger::log_debug;
+use crate::process_utils::CommandExtHide;
 
 /// Одиночный кадр спектрограммы
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,7 +306,7 @@ pub fn load_audio_samples<P: AsRef<Path>>(path: P) -> Result<(Vec<f32>, u32), St
     let temp_wav_str = temp_wav.to_string_lossy().to_string();
     let norm_path = crate::file_io::normalize_windows_path(&path_ref.to_string_lossy());
 
-    let output = std::process::Command::new("ffmpeg")
+    let output = std::process::Command::new("ffmpeg").hide_window()
         .args(&[
             "-y",
             "-v", "quiet",

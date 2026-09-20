@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, Mutex};
+use crate::process_utils::CommandExtHide;
 
 /// Глобальный идентификатор запущенного дочернего процесса разделения (PID)
 static CURRENT_SEPARATION_PID: AtomicU32 = AtomicU32::new(0);
@@ -153,7 +154,7 @@ pub fn find_embedded_python(app_handle: &AppHandle) -> Result<PathBuf, String> {
 
     // 5. Fallback на системный Python, если встроенный переносной не обнаружен
     for cmd in &["python3", "python", "py"] {
-        if let Ok(output) = std::process::Command::new(cmd).arg("--version").output() {
+        if let Ok(output) = std::process::Command::new(cmd).hide_window().arg("--version").output() {
             if output.status.success() {
                 return Ok(PathBuf::from(cmd));
             }
@@ -285,6 +286,7 @@ except Exception:
 "#;
 
     let mut cmd = tokio::process::Command::new(&python_str);
+    cmd.hide_window();
     cmd.args(&[
         "-c",
         py_runner,
@@ -369,7 +371,7 @@ except Exception:
                 let _ = child.kill().await;
                 #[cfg(windows)]
                 if pid > 0 {
-                    let _ = std::process::Command::new("taskkill")
+                    let _ = std::process::Command::new("taskkill").hide_window()
                         .args(&["/F", "/PID", &pid.to_string(), "/T"])
                         .output();
                 }
@@ -540,14 +542,14 @@ pub async fn cancel_source_separation() -> Result<bool, String> {
     if pid > 0 {
         #[cfg(windows)]
         {
-            let _ = std::process::Command::new("taskkill")
+            let _ = std::process::Command::new("taskkill").hide_window()
                 .args(&["/F", "/PID", &pid.to_string(), "/T"])
                 .output();
         }
 
         #[cfg(not(windows))]
         {
-            let _ = std::process::Command::new("kill")
+            let _ = std::process::Command::new("kill").hide_window()
                 .args(&["-9", &pid.to_string()])
                 .output();
         }

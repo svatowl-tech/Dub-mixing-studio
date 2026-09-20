@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use crate::process_utils::CommandExtHide;
 
 use crate::db::AppState;
 use crate::file_io::{find_ffmpeg_path, normalize_windows_path};
@@ -191,16 +192,11 @@ async fn probe_media_duration_seconds(file_path: &str) -> Option<f64> {
     };
 
     let mut cmd = Command::new(&ffprobe_bin);
+    cmd.hide_window();
     cmd.arg("-v").arg("error")
         .arg("-show_entries").arg("format=duration")
         .arg("-of").arg("default=noprint_wrappers=1:nokey=1")
         .arg(file_path);
-
-    #[cfg(target_os = "windows")]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
 
     if let Ok(output) = cmd.output().await {
         if output.status.success() {
@@ -257,6 +253,7 @@ impl VideoMuxEngine {
 
         // 3. Формирование аргументов FFmpeg
         let mut cmd = Command::new(&ffmpeg_bin);
+        cmd.hide_window();
         cmd.arg("-y"); // Перезапись без запроса
 
         // Добавляем прогресс в машиночитаемом формате

@@ -66,7 +66,7 @@ pub fn generate_hann_window(size: usize) -> Vec<f32> {
 /// Поиск пути к файлу ONNX-модели UVR-DeNoise
 pub fn find_model_path(app_handle: &AppHandle, model_name: &str) -> Option<PathBuf> {
     // Встроенные DSP-модели не требуют поиска ONNX файлов
-    if model_name == "spectral_gate" || model_name == "deep_noise" || model_name == "intel_ai_denoise" {
+    if model_name == "spectral_gate" {
         return None;
     }
 
@@ -401,7 +401,7 @@ pub async fn denoise_audio_task(
             let py_model = match chosen_model.as_str() {
                 "uvr_denoise_full" | "full" => "UVR-DeNoise-Full.onnx",
                 "uvr_denoise_lite" | "lite" => "UVR-DeNoise-Lite.onnx",
-                "uvr_denoise_foxjoy" | "foxjoy" | "deep_noise" | "intel_ai_denoise" | "rnnoise" | "spectral_gate" => "VR-DeNoise-FoxJoy.onnx",
+                "uvr_denoise_foxjoy" | "foxjoy" => "VR-DeNoise-FoxJoy.onnx",
                 m if m.ends_with(".onnx") => m,
                 _ => "VR-DeNoise-FoxJoy.onnx",
             };
@@ -664,8 +664,6 @@ pub async fn denoise_audio_task(
         let model_id = chosen_model.as_str();
 
         let (dsp_engine_name, max_db): (&str, f32) = match model_id {
-            "intel_ai_denoise" => ("Intel Voice Clean (4-Band Downward Expander)", 30.0),
-            "deep_noise" => ("Deep Denoise (Bark Psychoacoustic Noise Tracker)", 36.0),
             "uvr_denoise_lite" => ("VR-DeNoise Lite (Fast Spectral Gate)", 22.0),
             "uvr_denoise_foxjoy" => ("VR-DeNoise FoxJoy (Formant Speech Protector)", 28.0),
             "uvr_denoise_full" => ("VR-DeNoise Full (Deep Multi-Stage Denoise)", 40.0),
@@ -711,51 +709,6 @@ pub async fn denoise_audio_task(
                 let mut gains = vec![1.0_f32; num_bins];
 
                 match model_id {
-                    "intel_ai_denoise" => {
-                        let bands: [(usize, usize); 4] = [
-                            (0, 12),
-                            (12, 70),
-                            (70, 280),
-                            (280, num_bins),
-                        ];
-
-                        for (start_b, end_b) in bands {
-                            let mut band_energy = 0.0_f32;
-                            let mut band_noise = 0.0_f32;
-                            for k in start_b..end_b.min(num_bins) {
-                                band_energy += magnitudes[f][k];
-                                band_noise += noise_floor[k];
-                            }
-                            let count = (end_b.min(num_bins) - start_b).max(1) as f32;
-                            band_energy /= count;
-                            band_noise /= count;
-
-                            let exp_threshold = band_noise * (1.5 + strength_factor * 1.5);
-                            let band_gain = if band_energy > exp_threshold {
-                                1.0_f32
-                            } else {
-                                let ratio = (band_energy / exp_threshold.max(1e-6)).clamp(0.0, 1.0);
-                                let exp_curve = ratio.powf(1.0 + strength_factor * 1.8);
-                                (min_atten_linear + (1.0 - min_atten_linear) * exp_curve).clamp(min_atten_linear, 1.0)
-                            };
-
-                            for k in start_b..end_b.min(num_bins) {
-                                gains[k] = band_gain;
-                            }
-                        }
-                    },
-                    "deep_noise" => {
-                        for k in 0..num_bins {
-                            let orig = magnitudes[f][k];
-                            let floor = noise_floor[k] * (1.1 + strength_factor * 1.4);
-                            if orig <= floor {
-                                gains[k] = min_atten_linear;
-                            } else {
-                                let snr = (orig - floor) / orig;
-                                gains[k] = (snr.powf(1.2)).clamp(min_atten_linear, 1.0);
-                            }
-                        }
-                    },
                     "uvr_denoise_foxjoy" => {
                         for k in 0..num_bins {
                             let orig = magnitudes[f][k];

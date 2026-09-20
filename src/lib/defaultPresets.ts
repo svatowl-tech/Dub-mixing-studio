@@ -1,7 +1,7 @@
 import { MixingPreset, MixingType, MixingEffectsConfig } from '../types';
 
 export const DEFAULT_PHASE1_ORDER = [
-  'normalization',
+  'peakAdjustment',
   'spectralBalancing',
   'speechLeveler',
   'vocalSpotCleaning',
@@ -12,11 +12,12 @@ export const DEFAULT_PHASE1_ORDER = [
   'denoise',
   'dereverb',
   'volumeLeveler',
-  'sourceSeparation'
+  'sourceSeparation',
+  'normalization'
 ];
 
 export const VOICEOVER_PHASE1_ORDER = [
-  'normalization',
+  'peakAdjustment',
   'spectralBalancing',
   'speechLeveler',
   'vocalSpotCleaning',
@@ -26,7 +27,8 @@ export const VOICEOVER_PHASE1_ORDER = [
   'deEsser',
   'denoise',
   'dereverb',
-  'volumeLeveler'
+  'volumeLeveler',
+  'normalization'
 ];
 
 export const DEFAULT_PHASE2_ORDER = [
@@ -70,8 +72,13 @@ export const createDefaultPhase1 = (type: MixingType) => ({
   enabled: true,
   missingModelBehavior: 'fallback_dsp' as const,
   vstSteps: {},
+  peakAdjustment: {
+    enabled: true, // Первый шаг: безопасная подстройка громкости по самому высокому пику (-9 dBFS)
+    targetPeakDb: -9.0,
+    bypass: false,
+  },
   normalization: {
-    enabled: true, // Включено: выравнивание по громкости и нормализация для всех типов
+    enabled: true, // В конце предподготовки: итоговая нормализация EBU R128 до целевого LUFS
     intelligentMode: true, // Интеллектуальный режим на базе полного спектрального анализа и классификации волн
     targetLufs: type === MixingType.DUBBING ? -23.0 : -16.0,
     noiseFloorDb: -55.0,
@@ -118,13 +125,13 @@ export const createDefaultPhase1 = (type: MixingType) => ({
   denoise: {
     enabled: true, // Включено: шумоподавление
     strength: type === MixingType.DUBBING ? 75 : 65,
-    model: (type === MixingType.DUBBING ? 'deep_noise' : 'UVR-DeNoise') as any,
+    model: (type === MixingType.DUBBING ? 'uvr_denoise_foxjoy' : 'spectral_gate') as any,
     bypass: false,
   },
   dereverb: {
     enabled: true, // Включено: дериверберация
     strength: type === MixingType.DUBBING ? 70 : 45,
-    model: (type === MixingType.DUBBING ? 'room_cleaner_neural' : 'rt_dereverb_v2') as any,
+    model: (type === MixingType.DUBBING ? 'reverb_foxjoy' : 'rt_dereverb_v2') as any,
     bypass: false,
   },
   volumeLeveler: {

@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::logger::log_debug;
 use tauri_plugin_shell::ShellExt;
+use crate::process_utils::CommandExtHide;
 
 async fn get_video_duration(app_handle: &AppHandle, file_path: &str) -> Result<f64, String> {
     let norm_file_path = crate::file_io::normalize_windows_path(file_path);
@@ -25,7 +26,7 @@ async fn get_video_duration(app_handle: &AppHandle, file_path: &str) -> Result<f
 
     if !output.status.success() {
         // Fallback to system ffprobe
-        let fallback = tokio::process::Command::new("ffprobe")
+        let fallback = tokio::process::Command::new("ffprobe").hide_window()
             .args(&[
                 "-v", "error",
                 "-show_entries", "format=duration",
@@ -114,7 +115,7 @@ pub async fn extract_audio_peaks_bin(app_handle: AppHandle, file_path: String, o
     if !success {
         log_debug(&format!("FFmpeg sidecar failed or not found ({}), trying fallback to system ffmpeg...", err_msg));
         // Fallback to system ffmpeg
-        let fallback_output = tokio::process::Command::new("ffmpeg")
+        let fallback_output = tokio::process::Command::new("ffmpeg").hide_window()
             .args(&[
                 "-y",
                 "-v", "quiet",
@@ -309,7 +310,7 @@ pub async fn generate_waveform_peaks(app_handle: AppHandle, file_path: String, p
     
     if !success {
         // Fallback to system ffmpeg
-        let fallback_output = tokio::process::Command::new("ffmpeg")
+        let fallback_output = tokio::process::Command::new("ffmpeg").hide_window()
             .args(&[
                 "-y",
                 "-v", "quiet",

@@ -146,12 +146,12 @@ export interface TrackProcessing {
   denoise?: {
     enabled: boolean;
     strength: number; // 0..100
-    model: 'deep_noise' | 'spectral_gate' | 'rnnoise' | 'intel_ai_denoise' | 'uvr_denoise_lite' | 'uvr_denoise_foxjoy' | 'uvr_denoise_full' | 'deepfilternet3' | 'cascade_net';
+    model: 'spectral_gate' | 'uvr_denoise_foxjoy' | 'uvr_denoise_lite' | 'uvr_denoise_full' | 'deepfilternet3';
   };
   dereverb?: {
     enabled: boolean;
     strength: number; // 0..100
-    model: 'rt_dereverb_v2' | 'room_cleaner_neural' | 'adaptive_gate' | 'uvr_deecho_normal' | 'uvr_deecho_aggressive' | 'reverb_foxjoy' | 'mdx_dereverb_room';
+    model: 'rt_dereverb_v2' | 'uvr_deecho_normal' | 'uvr_deecho_aggressive' | 'reverb_foxjoy' | 'mdx_dereverb_room';
   };
   vstPlugins?: VstPluginInstance[];
   lufsNormalize?: {
@@ -357,7 +357,14 @@ export interface PrepProcessingConfig {
   // Поведение при отсутствии скачанной нейросетевой модели: DSP-фоллбэк или пропуск шага
   missingModelBehavior?: 'fallback_dsp' | 'skip';
   
-  // Нормализация громкости (Target LUFS)
+  // Подстройка громкости по пику (-9 dBFS) - самый первый шаг предподготовки
+  peakAdjustment?: {
+    enabled: boolean;
+    targetPeakDb: number; // По умолчанию -9.0 dBFS
+    bypass: boolean;
+  };
+
+  // Нормализация громкости (Target LUFS) - итоговый шаг в конце Фазы 1
   normalization: {
     enabled: boolean;
     intelligentMode: boolean; // Модуль 1.1: Использование классификации волн для нормализации
@@ -427,7 +434,7 @@ export interface PrepProcessingConfig {
   denoise: {
     enabled: boolean;
     strength: number; // 0..100
-    model: 'deep_noise' | 'spectral_gate' | 'rnnoise' | 'intel_ai_denoise' | 'uvr_denoise_lite' | 'uvr_denoise_foxjoy' | 'uvr_denoise_full' | 'deepfilternet3';
+    model: 'spectral_gate' | 'uvr_denoise_foxjoy' | 'uvr_denoise_lite' | 'uvr_denoise_full' | 'deepfilternet3';
     bypass: boolean;
   };
   
@@ -435,7 +442,7 @@ export interface PrepProcessingConfig {
   dereverb: {
     enabled: boolean;
     strength: number; // 0..100
-    model: 'rt_dereverb_v2' | 'room_cleaner_neural' | 'adaptive_gate' | 'uvr_deecho_normal' | 'uvr_deecho_aggressive' | 'reverb_foxjoy' | 'mdx_dereverb_room';
+    model: 'rt_dereverb_v2' | 'uvr_deecho_normal' | 'uvr_deecho_aggressive' | 'reverb_foxjoy' | 'mdx_dereverb_room';
     bypass: boolean;
   };
   
@@ -463,6 +470,16 @@ export interface NormalizationStats {
   finalTruePeakDb: number;
   gainAppliedDb: number;
   upwardCompressionApplied: boolean;
+  sampleRate: number;
+  channels: number;
+  durationSec: number;
+  outputPath?: string;
+}
+
+export interface PeakAdjustmentStats {
+  initialPeakDb: number;
+  finalPeakDb: number;
+  gainAppliedDb: number;
   sampleRate: number;
   channels: number;
   durationSec: number;

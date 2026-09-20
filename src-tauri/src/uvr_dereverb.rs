@@ -67,7 +67,7 @@ pub fn generate_hann_window(size: usize) -> Vec<f32> {
 /// Поиск ONNX-модели UVR De-Echo / De-Reverb в ресурсах и стандартных путях проекта
 pub fn find_dereverb_model_path(app_handle: &AppHandle, model_name: &str) -> Option<PathBuf> {
     // Встроенные DSP-модели не требуют поиска ONNX файлов
-    if model_name == "rt_dereverb_v2" || model_name == "room_cleaner_neural" || model_name == "adaptive_gate" {
+    if model_name == "rt_dereverb_v2" {
         return None;
     }
 
@@ -751,8 +751,6 @@ pub async fn run_dereverb_pipeline(
         // --- РЕЖИМ 2: ТОЧНЫЙ ВЫСОКОСКОРОСТНОЙ DSP-ДВИЖОК ДЛЯ ВЫБРАННОЙ МОДЕЛИ ДЕРЕВЕРБЕРАЦИИ ---
         let model_id = chosen_model.as_str();
         let (dsp_engine_name, max_atten_db): (&str, f32) = match model_id {
-            "room_cleaner_neural" => ("Neural Room Cleaner (Room Mode & Resonance Notcher)", 22.0),
-            "adaptive_gate" => ("Adaptive Transient Gate (Attack Preserver & Diffuse Cleaner)", 28.0),
             "uvr_deecho_aggressive" => ("VR-DeEcho Aggressive (Deep Reflection Cutter)", 32.0),
             "uvr_deecho_normal" => ("VR-DeEcho Normal (Balanced Ambience Reducer)", 20.0),
             _ => ("RT_Dereverb v2 (Spectral Envelope Decay Tracking)", 24.0),
@@ -773,47 +771,6 @@ pub async fn run_dereverb_pipeline(
             let num_bins = FFT_SIZE / 2 + 1;
 
             match model_id {
-                "room_cleaner_neural" => {
-                    // Подавление резонансов помещения (стоячие волны 100-650 Гц = бины 4..30)
-                    let mut decay_tail = vec![0.0_f32; num_bins];
-                    let decay_factor = (0.85 - 0.35 * dry_wet_blend).clamp(0.45, 0.90);
-
-                    for f in 0..num_frames {
-                        for k in 0..num_bins {
-                            let cur = magnitudes[f][k];
-                            let is_room_resonance = k >= 5 && k <= 26;
-                            let resonance_scale = if is_room_resonance { 1.25 } else { 1.0 };
-                            let estimated_reverb = decay_tail[k] * decay_factor * resonance_scale;
-                            let clean_mag = (cur - estimated_reverb * dry_wet_blend).max(0.0);
-
-                            decay_tail[k] = cur.max(estimated_reverb);
-                            magnitudes[f][k] = clean_mag;
-                        }
-                    }
-                },
-                "adaptive_gate" => {
-                    // Адаптивный Transient Gate: атаки речи сохраняются на 100%, диффузный шлейф подавляется
-                    let mut prev_frame = vec![0.0_f32; num_bins];
-                    let min_floor = 10.0_f32.powf((-max_atten_db * dry_wet_blend) / 20.0).clamp(0.01, 1.0);
-
-                    for f in 0..num_frames {
-                        for k in 0..num_bins {
-                            let cur = magnitudes[f][k];
-                            let prev = prev_frame[k];
-                            let delta = cur - prev;
-
-                            let gain = if delta > 0.0 {
-                                1.0_f32
-                            } else {
-                                let decay_ratio = (cur / prev.max(1e-6)).clamp(0.0, 1.0);
-                                (min_floor + (1.0 - min_floor) * decay_ratio.powf(1.0 + dry_wet_blend * 1.5)).clamp(min_floor, 1.0)
-                            };
-
-                            prev_frame[k] = cur;
-                            magnitudes[f][k] = cur * gain;
-                        }
-                    }
-                },
                 "uvr_deecho_aggressive" => {
                     // Агрессивное подавление комнатного хвоста
                     let mut decay_tail = vec![0.0_f32; num_bins];

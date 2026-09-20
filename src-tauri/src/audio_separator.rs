@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use serde::Serialize;
+use crate::process_utils::CommandExtHide;
 
 #[derive(Serialize, Clone)]
 pub struct SeparatorStatus {
@@ -60,7 +61,7 @@ fn find_python(app_handle: &AppHandle) -> Option<String> {
     }
 
     for cmd in &["python3", "python", "py"] {
-        if let Ok(output) = std::process::Command::new(cmd).arg("--version").output() {
+        if let Ok(output) = std::process::Command::new(cmd).hide_window().arg("--version").output() {
             if output.status.success() {
                 return Some(cmd.to_string());
             }
@@ -126,7 +127,7 @@ fn find_models_dir(app_handle: &AppHandle) -> Option<PathBuf> {
 // Поиск команды pip на системе
 fn find_pip(python_cmd: &str) -> Option<String> {
     // Сначала проверим модуль pip через выбранный питон
-    if let Ok(output) = std::process::Command::new(python_cmd)
+    if let Ok(output) = std::process::Command::new(python_cmd).hide_window()
         .args(&["-m", "pip", "--version"])
         .output() {
         if output.status.success() {
@@ -136,7 +137,7 @@ fn find_pip(python_cmd: &str) -> Option<String> {
     
     // Иначе попробуем напрямую pip3 / pip
     for cmd in &["pip3", "pip"] {
-        if let Ok(output) = std::process::Command::new(cmd).arg("--version").output() {
+        if let Ok(output) = std::process::Command::new(cmd).hide_window().arg("--version").output() {
             if output.status.success() {
                 return Some(cmd.to_string());
             }
@@ -162,11 +163,11 @@ pub async fn check_audio_separator_status(app_handle: AppHandle) -> Result<Separ
 
         // Проверим установлен ли пакет audio-separator и импортируется ли он
         let check_cmd = if python_cmd == "py" {
-            std::process::Command::new("py")
+            std::process::Command::new("py").hide_window()
                 .args(&["-3", "-c", "import audio_separator; print(audio_separator.__version__)"])
                 .output()
         } else {
-            std::process::Command::new(&python_cmd)
+            std::process::Command::new(&python_cmd).hide_window()
                 .args(&["-c", "import audio_separator; print(audio_separator.__version__ if hasattr(audio_separator, '__version__') else 'unknown')"])
                 .output()
         };
@@ -179,7 +180,7 @@ pub async fn check_audio_separator_status(app_handle: AppHandle) -> Result<Separ
         }
 
         // Проверим доступность CUDA/GPU через PyTorch
-        let torch_cmd = std::process::Command::new(&python_cmd)
+        let torch_cmd = std::process::Command::new(&python_cmd).hide_window()
             .args(&["-c", "import torch; print(torch.cuda.is_available())"])
             .output();
         if let Ok(output) = torch_cmd {
@@ -235,7 +236,7 @@ pub async fn install_audio_separator_pkg(app_handle: AppHandle, use_gpu: bool) -
     
     // Запускаем процесс установки
     tauri::async_runtime::spawn(async move {
-        let mut child = match tokio::process::Command::new(&python_cmd_clone)
+        let mut child = match tokio::process::Command::new(&python_cmd_clone).hide_window()
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -320,7 +321,7 @@ pub async fn run_audio_separator_cmd(
         });
 
         // Голос: центральный канал (M = L + R) с полосовым голосовым фильтром 160-7500 Гц
-        let _ = std::process::Command::new("ffmpeg")
+        let _ = std::process::Command::new("ffmpeg").hide_window()
             .args(&[
                 "-y",
                 "-i", &norm_input,
@@ -336,7 +337,7 @@ pub async fn run_audio_separator_cmd(
         });
 
         // Музыка / M&E: противофазное подавление центра (S = L - R)
-        let _ = std::process::Command::new("ffmpeg")
+        let _ = std::process::Command::new("ffmpeg").hide_window()
             .args(&[
                 "-y",
                 "-i", &norm_input,
@@ -456,6 +457,7 @@ except Exception:
 "#;
 
     let mut cmd = tokio::process::Command::new(&python_cmd);
+    cmd.hide_window();
     cmd.args(&[
         "-c",
         py_runner,

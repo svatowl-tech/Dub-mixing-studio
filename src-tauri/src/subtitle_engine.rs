@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
+use crate::process_utils::CommandExtHide;
 
 use crate::db::SubtitleLine;
 use crate::file_io::{find_ffmpeg_path, normalize_windows_path};
@@ -412,7 +413,7 @@ async fn probe_video_duration(video_path: &Path) -> Option<f64> {
     let norm_path = normalize_windows_path(&video_path.to_string_lossy());
 
     // Run quick metadata probe
-    let output = Command::new(&ffmpeg_bin)
+    let output = Command::new(&ffmpeg_bin).hide_window()
         .arg("-hide_banner")
         .arg("-i")
         .arg(&norm_path)
@@ -477,6 +478,7 @@ pub async fn burn_subtitles_ffmpeg(
     let a_codec = options.audio_codec.unwrap_or_else(|| "copy".to_string());
 
     let mut cmd = Command::new(&ffmpeg_bin);
+    cmd.hide_window();
     cmd.arg("-y")
        .arg("-hide_banner")
        .arg("-stats")

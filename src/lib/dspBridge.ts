@@ -26,6 +26,16 @@ export interface NormalizationStats {
   outputPath: string;
 }
 
+export interface PeakAdjustmentStats {
+  initialPeakDb: number;
+  finalPeakDb: number;
+  gainAppliedDb: number;
+  sampleRate: number;
+  channels: number;
+  durationSec: number;
+  outputPath: string;
+}
+
 export interface DeclickReport {
   clicksDetected: number;
   samplesRestored: number;
@@ -133,6 +143,18 @@ export interface ClipProcessingInput {
 }
 
 // 1. Normalization & Upward Compression
+export async function adjustPeakAudioNative(
+  inputPath: string,
+  outputPath: string,
+  targetPeakDb?: number
+): Promise<PeakAdjustmentStats> {
+  return await invoke<PeakAdjustmentStats>('adjust_peak_audio', {
+    inputPath,
+    outputPath,
+    targetPeakDb: targetPeakDb ?? -9.0,
+  });
+}
+
 export async function normalizeAudioNative(
   inputPath: string,
   outputPath: string,

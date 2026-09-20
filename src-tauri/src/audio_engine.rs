@@ -10,6 +10,7 @@ use std::thread;
 use tauri::{AppHandle, Emitter, State, Manager};
 use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
 use crate::logger::log_debug;
+use crate::process_utils::CommandExtHide;
 
 // --- DATA STRUCTURES ---
 
@@ -1075,11 +1076,10 @@ pub async fn start_recording(
                 ffmpeg_args.push("-y".to_string());
                 ffmpeg_args.push(video_path.to_str().ok_or("Invalid path")?.to_string());
 
-                let child = std::process::Command::new("ffmpeg")
+                let child = std::process::Command::new("ffmpeg").hide_window()
                     .args(&ffmpeg_args)
                     .stdin(std::process::Stdio::piped())
                     .stderr(stderr_file)
-                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
                     .spawn();
 
                 match child {
@@ -1151,7 +1151,7 @@ pub async fn start_recording(
                 args.push("-y".to_string());
                 args.push(video_path.to_str().ok_or("Invalid path")?.to_string());
 
-                let child = std::process::Command::new("ffmpeg")
+                let child = std::process::Command::new("ffmpeg").hide_window()
                     .args(&args)
                     .stdin(std::process::Stdio::piped())
                     .spawn();

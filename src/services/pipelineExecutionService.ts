@@ -140,6 +140,49 @@ export class PipelineExecutionService {
           }
         }
 
+        if (stepId === 'peakAdjustment') {
+          setStepExecution(prev => ({
+            ...prev,
+            [stepId]: {
+              ...prev[stepId],
+              progress: 30,
+              log: `Подстройка громкости по самому высокому пику (целевой пик -9.0 dBFS)...`
+            }
+          }));
+
+          const res = await AudioDspService.applyPeakAdjustmentAsync(
+            project.tracks,
+            activePreset.phase1.peakAdjustment
+          );
+          project = { ...project, tracks: res.updatedTracks };
+          onUpdateProject({ tracks: res.updatedTracks });
+          playbackEngine.clearCache();
+          await playbackEngine.updateTracks(res.updatedTracks);
+
+          setStepExecution(prev => ({
+            ...prev,
+            [stepId]: {
+              status: 'success',
+              progress: 100,
+              log: res.logSummary,
+              hasRollback: true
+            }
+          }));
+
+          addAuditLogs(res.detailedLogs.map((msg, i) => ({
+            id: `audit-peakadj-${Date.now()}-${i}`,
+            timestamp: Date.now(),
+            stageName: '1. Предобработка',
+            stepId: 'peakAdjustment',
+            status: 'success',
+            title: 'Подстройка громкости по пику (-9 dBFS)',
+            message: msg
+          })));
+
+          showToast(res.logSummary);
+          return;
+        }
+
         if (stepId === 'normalization') {
           // Гарантируем наличие свежего анализа перед нормализацией и эквализацией
           const analysisRes = await AudioDspService.analyzeProjectVoiceTracksAsync(
@@ -828,7 +871,7 @@ export class PipelineExecutionService {
         if (stepId === 'denoise') {
           let modelName = activePreset.phase1.denoise.model || 'UVR-DeNoise';
           const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
-          const isNeuralModel = ['uvr_denoise', 'uvr_denoise_lite', 'uvr_denoise_foxjoy', 'uvr_denoise_full', 'deepfilternet3', 'deep_noise', 'cascade_net', 'intel_ai_denoise', 'UVR-DeNoise'].includes(modelName);
+          const isNeuralModel = ['uvr_denoise', 'uvr_denoise_lite', 'uvr_denoise_foxjoy', 'uvr_denoise_full', 'deepfilternet3', 'UVR-DeNoise'].includes(modelName);
 
           if (isNeuralModel) {
             const isInstalled = await AIModelService.getInstance().checkModelInstalled(modelName);
@@ -977,7 +1020,7 @@ export class PipelineExecutionService {
         if (stepId === 'dereverb') {
           let modelName = activePreset.phase1.dereverb.model || 'rt_dereverb_v2';
           const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
-          const isNeuralModel = ['uvr_deecho_normal', 'uvr_deecho_aggressive', 'reverb_foxjoy', 'mdx_dereverb_room', 'room_cleaner_neural'].includes(modelName);
+          const isNeuralModel = ['uvr_deecho_normal', 'uvr_deecho_aggressive', 'reverb_foxjoy', 'mdx_dereverb_room'].includes(modelName);
 
           if (isNeuralModel) {
             const isInstalled = await AIModelService.getInstance().checkModelInstalled(modelName);

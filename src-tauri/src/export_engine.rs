@@ -9,6 +9,7 @@ use tokio::sync::Semaphore;
 use zip::ZipWriter;
 use zip::write::FileOptions;
 use crate::db::AppState;
+use crate::process_utils::CommandExtHide;
 use hound::WavReader;
 use std::io::Write;
 use sqlx::Row;
@@ -139,6 +140,7 @@ pub async fn export_all_stems(
         
         let ffmpeg_bin = crate::file_io::find_ffmpeg_path();
         let mut cmd = Command::new(&ffmpeg_bin);
+        cmd.hide_window();
         cmd.arg("-y");
         for seg in &valid_segments {
             let resolved_path = resolve_path(
@@ -379,6 +381,7 @@ pub async fn export_stems(
                 // We use filter_complex to place each segment at its correct timeline position
                 let ffmpeg_bin = crate::file_io::find_ffmpeg_path();
                 let mut cmd = Command::new(&ffmpeg_bin);
+                cmd.hide_window();
                 cmd.arg("-y");
 
                 for seg in &valid_segments {
@@ -543,6 +546,8 @@ pub async fn export_audio(
         let sem_clone = Arc::clone(&semaphore);
         let proj_path = project_path_clone.clone();
         let out_path = output_path_clone.clone();
+        let app_handle_task = app_handle.clone();
+        let total_segs = total_tasks - 1;
         
         let handle = tokio::spawn(async move {
             let _permit = sem_clone.acquire().await.map_err(|e| e.to_string())?;
@@ -564,7 +569,7 @@ pub async fn export_audio(
             if trim_dur <= 0.0 {
                 // If trimmed duration is less than or equal to zero, segment is outside the timeline
                 // We generate a tiny silence file just to satisfy the next steps without crashing
-                Command::new(crate::file_io::find_ffmpeg_path())
+                Command::new(crate::file_io::find_ffmpeg_path()).hide_window()
                     .arg("-y")
                     .arg("-f").arg("lavfi")
                     .arg("-i").arg("anullsrc=r=48000:cl=stereo:d=0.1")
@@ -609,20 +614,21 @@ pub async fn export_audio(
                 &out_path,
             );
             
-            let status = Command::new(crate::file_io::find_ffmpeg_path())
-                .arg("-y")
-                .arg("-i").arg(&resolved_path)
-                .arg("-af").arg(&filter)
-                .arg("-c:a").arg("pcm_s16le")
-                .arg("-ar").arg("48000")
-                .arg(out_file.to_str().unwrap())
-                .output()
-                .await
-                .map_err(|e| format!("Failed spawning ffmpeg: {}", e))?;
+            let seg_args = vec![
+                "-y".to_string(),
+                "-i".to_string(), resolved_path,
+                "-af".to_string(), filter,
+                "-c:a".to_string(), "pcm_s16le".to_string(),
+                "-ar".to_string(), "48000".to_string(),
+                out_file.to_str().unwrap().to_string(),
+            ];
 
-            if !status.status.success() {
-                return Err(format!("FFmpeg error processing {}: {}", segment.file_path.as_ref().unwrap(), String::from_utf8_lossy(&status.stderr)));
-            }
+            crate::media_processor::run_ffmpeg_with_progress(
+                app_handle_task,
+                seg_args,
+                format!("Экспорт сегмента {}/{}", i + 1, total_segs),
+                Some(trim_dur),
+            ).await?;
 
             Ok::<PathBuf, String>(out_file)
         });
@@ -698,7 +704,7 @@ pub async fn export_audio(
             chunk_args.push("48000".to_string());
             chunk_args.push(out_file.to_str().unwrap().to_string());
 
-            let status = Command::new(crate::file_io::find_ffmpeg_path())
+            let status = Command::new(crate::file_io::find_ffmpeg_path()).hide_window()
                 .args(&chunk_args)
                 .output()
                 .await
@@ -895,6 +901,7 @@ pub async fn batch_export(
             // 2. Build and run FFmpeg command for this replica
             let ffmpeg_bin = crate::file_io::find_ffmpeg_path();
             let mut cmd = Command::new(&ffmpeg_bin);
+            cmd.hide_window();
             cmd.arg("-y");
 
             // Base silence input
@@ -1108,6 +1115,7 @@ pub async fn export_backstage_video(
 ) -> Result<String, String> {
     let ffmpeg_bin = crate::file_io::find_ffmpeg_path();
     let mut cmd = Command::new(&ffmpeg_bin);
+    cmd.hide_window();
     cmd.args(&[
         "-y",
         "-i", &main_video_path,

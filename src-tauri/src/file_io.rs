@@ -5,6 +5,7 @@ use serde::Serialize;
 use hound;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::ShellExt;
+use crate::process_utils::CommandExtHide;
 
 fn url_decode(input: &str) -> String {
     let mut bytes = Vec::new();
@@ -266,6 +267,7 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
     // Use FFmpeg to convert
     let ffmpeg_bin = find_ffmpeg_path();
     let mut command = std::process::Command::new(&ffmpeg_bin);
+    command.hide_window();
     command.arg("-y").arg("-i").arg(temp_path.to_str().unwrap());
     
     if is_backstage {
@@ -413,7 +415,7 @@ pub async fn copy_file_to_project(app_handle: tauri::AppHandle, src: String, des
 
             if !converted {
                 let ffmpeg_bin = find_ffmpeg_path();
-                if let Ok(out) = tokio::process::Command::new(&ffmpeg_bin).args(&[
+                if let Ok(out) = tokio::process::Command::new(&ffmpeg_bin).hide_window().args(&[
                     "-y", "-i", &norm_src,
                     "-ar", "48000", "-c:a", "pcm_s16le", 
                     &dest_str
@@ -484,7 +486,7 @@ pub async fn ensure_track_audio_wav(app_handle: AppHandle, file_path: String) ->
 
     if !converted {
         let ffmpeg_bin = find_ffmpeg_path();
-        let out = tokio::process::Command::new(&ffmpeg_bin).args(&[
+        let out = tokio::process::Command::new(&ffmpeg_bin).hide_window().args(&[
             "-y", "-i", &norm_path,
             "-ar", "48000", "-c:a", "pcm_s16le",
             &dest_str
@@ -524,7 +526,7 @@ pub fn ensure_valid_wav_path(path: &Path) -> Result<(PathBuf, bool), String> {
     let temp_wav = parent_dir.join(format!("dubstudio_conv_{}.wav", epoch_nanos));
 
     let ffmpeg_bin = find_ffmpeg_path();
-    let output = std::process::Command::new(&ffmpeg_bin)
+    let output = std::process::Command::new(&ffmpeg_bin).hide_window()
         .args(&[
             "-y",
             "-i", &norm_path_str,
@@ -567,21 +569,21 @@ pub fn open_path(path: String) -> Result<(), String> {
     let norm = normalize_windows_path(&path);
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
+        std::process::Command::new("explorer").hide_window()
             .arg(&norm)
             .spawn()
             .map_err(|e| format!("Не удалось открыть путь в проводнике: {}", e))?;
     }
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        std::process::Command::new("open").hide_window()
             .arg(&norm)
             .spawn()
             .map_err(|e| format!("Не удалось открыть путь: {}", e))?;
     }
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open")
+        std::process::Command::new("xdg-open").hide_window()
             .arg(&norm)
             .spawn()
             .map_err(|e| format!("Не удалось открыть путь: {}", e))?;

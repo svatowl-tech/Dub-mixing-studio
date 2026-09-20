@@ -20,6 +20,18 @@ pub struct NormalizationStats {
     pub output_path: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PeakAdjustmentStats {
+    pub initial_peak_db: f64,
+    pub final_peak_db: f64,
+    pub gain_applied_db: f64,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub duration_sec: f64,
+    pub output_path: String,
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum AudioError {
@@ -440,6 +452,125 @@ pub async fn normalize_audio(
 
     tokio::task::spawn_blocking(move || {
         process_normalization(&in_path_buf, &out_path_buf, target)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Task execution failed: {}", e))?
+}
+
+pub fn process_peak_adjustment(
+    input_path: &Path,
+    output_path: &Path,
+    target_peak_db: f64,
+) -> Result<PeakAdjustmentStats, AudioError> {
+    let norm_in_str = crate::file_io::normalize_windows_path(&input_path.to_string_lossy());
+    let norm_out_str = crate::file_io::normalize_windows_path(&output_path.to_string_lossy());
+    let wav_path = std::path::PathBuf::from(&norm_in_str);
+    
+    let is_temp = if wav_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase() != "wav" {
+        true
+    } else {
+        false
+    };
+
+    let effective_wav_path = if is_temp {
+        crate::file_io::ensure_valid_wav_path(&norm_in_str)?
+    } else {
+        norm_in_str.clone()
+    };
+
+    let mut reader = WavReader::open(&effective_wav_path)?;
+    let spec = reader.spec();
+    let sample_rate = spec.sample_rate;
+    let channels = spec.channels as usize;
+
+    let raw_samples: Vec<f32> = match spec.sample_format {
+        SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap_or(0.0)).collect(),
+        SampleFormat::Int => {
+            let bits = spec.bits_per_sample;
+            if bits <= 16 {
+                reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / 32768.0).collect()
+            } else if bits <= 24 {
+                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 8388608.0).collect()
+            } else {
+                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / i32::MAX as f32).collect()
+            }
+        }
+    };
+
+    if raw_samples.is_empty() || channels == 0 {
+        return Err(AudioError::InvalidData("Empty or invalid audio stream for peak adjustment".to_string()));
+    }
+
+    let total_frames = raw_samples.len() / channels;
+    let duration_sec = total_frames as f64 / sample_rate as f64;
+
+    let max_peak_lin = raw_samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+    let initial_peak_db = if max_peak_lin > 1e-7 {
+        20.0 * (max_peak_lin as f64).log10()
+    } else {
+        -120.0
+    };
+
+    let target_peak_lin = 10.0f32.powf(target_peak_db as f32 / 20.0);
+    let gain_factor = if max_peak_lin > 1e-7 {
+        target_peak_lin / max_peak_lin
+    } else {
+        1.0
+    };
+
+    let gain_applied_db = 20.0 * (gain_factor as f64).log10();
+
+    let processed_samples: Vec<f32> = raw_samples.iter().map(|s| s * gain_factor).collect();
+
+    let out_path_buf = std::path::PathBuf::from(&norm_out_str);
+    if let Some(parent) = out_path_buf.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let out_spec = WavSpec {
+        channels: channels as u16,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: SampleFormat::Float,
+    };
+
+    let mut writer = WavWriter::create(&out_path_buf, out_spec)?;
+    for sample in processed_samples {
+        writer.write_sample(sample)?;
+    }
+    writer.finalize()?;
+
+    if is_temp {
+        let _ = std::fs::remove_file(&effective_wav_path);
+    }
+
+    let final_peak_db = if max_peak_lin > 1e-7 { target_peak_db } else { -120.0 };
+
+    Ok(PeakAdjustmentStats {
+        initial_peak_db: (initial_peak_db * 10.0).round() / 10.0,
+        final_peak_db: (final_peak_db * 10.0).round() / 10.0,
+        gain_applied_db: (gain_applied_db * 10.0).round() / 10.0,
+        sample_rate,
+        channels: channels as u16,
+        duration_sec: (duration_sec * 100.0).round() / 100.0,
+        output_path: norm_out_str,
+    })
+}
+
+/// Tauri command exposing peak gain adjustment (-9 dBFS default) to frontend.
+#[tauri::command]
+pub async fn adjust_peak_audio(
+    input_path: String,
+    output_path: String,
+    target_peak_db: Option<f64>,
+) -> Result<PeakAdjustmentStats, String> {
+    let in_path_buf = std::path::PathBuf::from(crate::file_io::normalize_windows_path(&input_path));
+    let out_path_buf = std::path::PathBuf::from(crate::file_io::normalize_windows_path(&output_path));
+    let target = target_peak_db.unwrap_or(-9.0);
+
+    tokio::task::spawn_blocking(move || {
+        process_peak_adjustment(&in_path_buf, &out_path_buf, target)
             .map_err(|e| e.to_string())
     })
     .await

@@ -741,7 +741,27 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     setIsApplyingEffect(true);
 
     try {
-      if (effectType === 'normalization') {
+      if (effectType === 'peakAdjustment') {
+        const res = await AudioDspService.applyPeakAdjustmentAsync(
+          project.tracks,
+          activePreset.phase1.peakAdjustment,
+          selectedSegment?.trackId,
+          selectedSegment?.segment?.id
+        );
+        onUpdateProject({ tracks: res.updatedTracks });
+        playbackEngine.clearCache();
+        await playbackEngine.updateTracks(res.updatedTracks);
+        addAuditLogs(res.detailedLogs.map((msg, i) => ({
+          id: `audit-peakadj-${Date.now()}-${i}`,
+          timestamp: Date.now(),
+          stageName: '1. Предобработка',
+          stepId: 'peakAdjustment',
+          status: 'success',
+          title: 'Подстройка громкости по пику (-9 dBFS)',
+          message: msg
+        })));
+        showToast(res.logSummary);
+      } else if (effectType === 'normalization') {
         const targetLufs = activePreset.phase1.normalization.targetLufs ?? -16.0;
         let lastNativeNorm: NormalizationStats | null = null;
         let processedCount = 0;
@@ -1017,7 +1037,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         let processedTracksCount = 0;
         let modelName = activePreset.phase1.denoise.model || 'UVR-DeNoise';
         const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
-        const isNeuralModel = ['uvr_denoise', 'uvr_denoise_lite', 'uvr_denoise_foxjoy', 'uvr_denoise_full', 'deepfilternet3', 'deep_noise', 'cascade_net', 'intel_ai_denoise', 'UVR-DeNoise'].includes(modelName);
+        const isNeuralModel = ['uvr_denoise', 'uvr_denoise_lite', 'uvr_denoise_foxjoy', 'uvr_denoise_full', 'deepfilternet3', 'UVR-DeNoise'].includes(modelName);
 
         if (isNeuralModel && !AIModelService.getInstance().isModelInstalled(modelName)) {
           if (missingBehavior === 'skip') {
@@ -1103,7 +1123,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         let processedTracksCount = 0;
         let modelName = activePreset.phase1.dereverb.model || 'rt_dereverb_v2';
         const missingBehavior = activePreset.phase1.missingModelBehavior || 'fallback_dsp';
-        const isNeuralModel = ['uvr_deecho_normal', 'uvr_deecho_aggressive', 'reverb_foxjoy', 'mdx_dereverb_room', 'room_cleaner_neural'].includes(modelName);
+        const isNeuralModel = ['uvr_deecho_normal', 'uvr_deecho_aggressive', 'reverb_foxjoy', 'mdx_dereverb_room'].includes(modelName);
 
         if (isNeuralModel && !AIModelService.getInstance().isModelInstalled(modelName)) {
           if (missingBehavior === 'skip') {
@@ -3873,6 +3893,54 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                       let stepBypass = false;
                       let handleBypassToggle = () => {};
 
+                      if (stepKey === "peakAdjustment") {
+                        stepName = "1.0 Подстройка по пику (-9 dBFS)";
+                        stepDesc = "Первичная регулировка макс. пика без компрессии и подъема шума";
+                        stepIcon = <Volume2 className="w-3.5 h-3.5 text-cyan-400" />;
+                        stepBypass = activePreset.phase1.peakAdjustment?.bypass ?? false;
+                        handleBypassToggle = () => updatePhase1({
+                          peakAdjustment: {
+                            enabled: !(activePreset.phase1.peakAdjustment?.enabled ?? true),
+                            targetPeakDb: activePreset.phase1.peakAdjustment?.targetPeakDb ?? -9.0,
+                            bypass: !stepBypass
+                          }
+                        });
+                        stepElement = (
+                          <div className="space-y-4 animate-fade-in text-xs">
+                            <div className="text-[10px] text-zinc-400 leading-normal bg-zinc-950/40 p-2.5 rounded-lg border border-white/5 space-y-1">
+                              <p>
+                                <strong className="text-cyan-400">Первый шаг предподготовки:</strong> подстройка громкости по самому высоком пику аудиосигнала до -9.0 dBFS.
+                              </p>
+                              <p>
+                                Это создает правильный запас громкости (headroom) перед спектральной обработкой и шумоподавлением, не перегружая тракт и не поднимая фоновые шумы из небытия.
+                              </p>
+                            </div>
+                            <div className="p-2.5 bg-zinc-950/20 rounded-lg border border-white/5 space-y-1.5">
+                              <div className="flex justify-between items-center text-[10px]">
+                                <span className="text-zinc-400 font-medium">Целевой макс. пик:</span>
+                                <span className="text-cyan-400 font-bold">{(activePreset.phase1.peakAdjustment?.targetPeakDb ?? -9.0).toFixed(1)} dBFS</span>
+                              </div>
+                              <input
+                                type="range"
+                                min="-18.0"
+                                max="0.0"
+                                step="0.5"
+                                value={activePreset.phase1.peakAdjustment?.targetPeakDb ?? -9.0}
+                                onChange={(e) => updatePhase1({
+                                  peakAdjustment: {
+                                    enabled: true,
+                                    targetPeakDb: parseFloat(e.target.value),
+                                    bypass: activePreset.phase1.peakAdjustment?.bypass ?? false
+                                  }
+                                })}
+                                className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-cyan-500"
+                              />
+                            </div>
+                            {renderProcessingActions('peakAdjustment', 'Применить подстройку по пику', 'bg-cyan-600 hover:bg-cyan-500')}
+                          </div>
+                        );
+                      }
+
                       if (stepKey === "normalization") {
                         stepName = "Нормализация и Апвард";
                         stepDesc = "Выравнивание тихих фраз без шума";
@@ -4428,9 +4496,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                   denoise: { ...activePreset.phase1.denoise, model: val as any }
                                 })}
                                 builtInOptions={[
-                                  { id: 'spectral_gate', name: 'Спектральный гейт (AFFTDN - DSP)' },
-                                  { id: 'deep_noise', name: 'Deep Denoise (RNNoise DSP)' },
-                                  { id: 'intel_ai_denoise', name: 'Intel Voice Clean (Экспандер DSP)' }
+                                  { id: 'spectral_gate', name: 'Спектральный гейт (AFFTDN - DSP)' }
                                 ]}
                               />
                             </div>
@@ -4473,9 +4539,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                   dereverb: { ...activePreset.phase1.dereverb, model: val as any }
                                 })}
                                 builtInOptions={[
-                                  { id: 'rt_dereverb_v2', name: 'RT_Dereverb v2 (DSP спектральное вычитание)' },
-                                  { id: 'room_cleaner_neural', name: 'Neural Room Cleaner (Резонансы DSP)' },
-                                  { id: 'adaptive_gate', name: 'Адаптивный гейт (Transient Gate DSP)' }
+                                  { id: 'rt_dereverb_v2', name: 'RT_Dereverb v2 (DSP спектральное вычитание)' }
                                 ]}
                               />
                             </div>

@@ -94,36 +94,47 @@ async function invokeWithWatchdog<T>(
     args: any = {}, 
     options: { 
         timeoutMs?: number, 
-        progressEvent?: string,
+        progressEvent?: string | string[],
         onTimeout?: () => void 
     } = {}
 ): Promise<T> {
     if (!IS_TAURI) throw new Error("Not in Tauri environment");
-    const timeout = options.timeoutMs || 30000;
+    const timeout = options.timeoutMs || 300000; // 5 minutes default
     let timer: any;
     let lastProgress = Date.now();
 
-    // Listen for progress to reset the watchdog timer
-    let unlisten: UnlistenFn | undefined;
-    if (options.progressEvent) {
-        unlisten = await listen(options.progressEvent, () => {
-            lastProgress = Date.now();
-        });
+    // Listen for progress events to reset the watchdog timer
+    const unlistens: UnlistenFn[] = [];
+    const eventList = Array.isArray(options.progressEvent) 
+        ? options.progressEvent 
+        : (options.progressEvent ? [options.progressEvent] : ['export-progress', 'media-progress', 'stem-progress']);
+
+    for (const evt of eventList) {
+        try {
+            const u = await listen(evt, () => {
+                lastProgress = Date.now();
+            });
+            unlistens.push(u);
+        } catch (e) {
+            // ignore
+        }
     }
 
     const check = async () => {
-        if (Date.now() - lastProgress > timeout) {
-            console.warn(`[Watchdog] Command ${cmd} is taking too long without progress.`);
+        const elapsed = Date.now() - lastProgress;
+        if (elapsed > timeout) {
+            const elapsedSecs = Math.round(elapsed / 1000);
+            console.warn(`[Watchdog] Command ${cmd} is taking longer than expected (${elapsedSecs}s) without progress events.`);
             if (options.onTimeout) options.onTimeout();
+            lastProgress = Date.now(); // Reset progress timer so dialog isn't continuously spammed
             try {
-                const isConfirmed = await safeConfirm(`Операция "${cmd}" выполняется слишком долго (>30 сек) без обновлений. Попробовать отменить или проверить логи?`);
+                const isConfirmed = await safeConfirm(`Операция "${cmd}" выполняется уже ${elapsedSecs} сек. Продолжить ожидание?`);
                 if (isConfirmed) {
-                    // In a real app we might trigger a cancel signal here if Rust supported it
+                    lastProgress = Date.now();
                 }
             } catch(e) {}
-        } else {
-            timer = setTimeout(check, 5000);
         }
+        timer = setTimeout(check, 5000);
     };
 
     timer = setTimeout(check, 5000);
@@ -133,7 +144,9 @@ async function invokeWithWatchdog<T>(
         return result;
     } finally {
         clearTimeout(timer);
-        if (unlisten) unlisten();
+        for (const u of unlistens) {
+            u();
+        }
     }
 }
 
@@ -871,7 +884,7 @@ export const tauriAPI = {
             format: options.format || 'wav',
             bitDepth: options.bitDepth,
             bitrate: options.bitrate
-        }, { progressEvent: 'export-progress' });
+        }, { timeoutMs: 1200000, progressEvent: ['export-progress', 'media-progress'] });
         IOLogger.log('EXPORT', 'exportAudio', 'SUCCESS', { outputPath: options.outputPath });
         return { success: true, data: { success: true } };
     } catch(err) {
@@ -901,7 +914,7 @@ export const tauriAPI = {
             outputPath: options.outputPath,
             title: options.title || "Unknown",
             artist: options.artist || "Unknown"
-        }, { progressEvent: 'export-progress' });
+        }, { timeoutMs: 1200000, progressEvent: ['export-progress', 'media-progress'] });
         IOLogger.log('EXPORT', 'renderFinalVideo', 'SUCCESS', { outputPath: options.outputPath });
         return { success: true, data: { success: true } };
     } catch(err) {
@@ -923,7 +936,7 @@ export const tauriAPI = {
                 bit_depth: args.bitDepth,
                 output_dir: args.outputDir
             }
-        }, { progressEvent: 'stem-progress' });
+        }, { timeoutMs: 1200000, progressEvent: ['stem-progress', 'export-progress', 'media-progress'] });
         return { success: true, data: { success: true } };
     } catch(err) {
         console.error("Stem Export Error:", err);
@@ -1389,7 +1402,7 @@ export const tauriAPI = {
           normalizeLufs: options.normalizeLUFS || options.normalizeLufs,
           segments: options.segments
       };
-      const result = await invoke<string>('export_audio_book', mappedOptions);
+      const result = await invokeWithWatchdog<string>('export_audio_book', mappedOptions, { timeoutMs: 1200000, progressEvent: ['export-progress', 'media-progress'] });
       return { success: true, data: { success: true, path: result } };
     } catch(err) {
       return { success: false, error: String(err) };
@@ -1469,7 +1482,7 @@ export const tauriAPI = {
   exportAllStems: async (args: { projectJson: string, outputPath: string }): Promise<BridgeResponse<string>> => {
     if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
     try {
-        const result = await invokeWithWatchdog('export_all_stems', args);
+        const result = await invokeWithWatchdog('export_all_stems', args, { timeoutMs: 1200000, progressEvent: ['stem-progress', 'export-progress', 'media-progress'] });
         return { success: true, data: result as string };
     } catch(err) {
         return { success: false, error: String(err) };

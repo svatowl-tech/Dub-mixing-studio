@@ -8,6 +8,7 @@ use sqlx::Row;
 use crate::waveform_engine::generate_waveform_peaks;
 
 use crate::logger::{log_debug, log_info, log_error};
+use crate::process_utils::CommandExtHide;
 
 #[derive(serde::Serialize, Clone)]
 struct MediaProgress {
@@ -50,7 +51,7 @@ pub async fn concat_backstage_videos(
 
     // Склеиваем видео без перекодирования (stream copy), если это возможно
     // Внимание: это работает стабильно, если все исходники имеют одинаковые параметры (кодек, разрешение)
-    let output = std::process::Command::new("ffmpeg")
+    let output = std::process::Command::new("ffmpeg").hide_window()
         .args(&[
             "-y",
             "-f", "concat",
@@ -335,6 +336,7 @@ pub(crate) async fn run_ffmpeg_with_progress(
                         percent,
                         operation: operation_name.clone(),
                     });
+                    let _ = app_handle.emit("export-progress", percent);
                 }
             },
             CommandEvent::Stdout(line_bytes) => {
@@ -593,7 +595,7 @@ pub async fn create_blank_video(
     duration: f64,
     output_path: String,
 ) -> Result<String, String> {
-    let output = std::process::Command::new("ffmpeg")
+    let output = std::process::Command::new("ffmpeg").hide_window()
         .args(&[
             "-y",
             "-f", "lavfi",

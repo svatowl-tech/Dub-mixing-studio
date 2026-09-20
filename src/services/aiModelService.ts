@@ -91,7 +91,6 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     size_mb: 79.8,
     recommended_for: 'Глубокая многодорожечная реставрация фильма и видеоряда',
     urls: [
-      'https://huggingface.co/dokodesuka/htdemucs_ft/resolve/main/htdemucs_ft.yaml',
       'https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs_ft.yaml'
     ],
     is_installed: false
@@ -118,7 +117,8 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     size_mb: 79.8,
     recommended_for: 'Экспресс-разделение дубляжа и фоновой музыки',
     urls: [
-      'https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs_ft.yaml'
+      'https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs_ft.yaml',
+      'https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs.yaml'
     ],
     is_installed: false
   },
@@ -291,59 +291,6 @@ export const FALLBACK_CATALOG: ModelCatalogItem[] = [
     urls: [
       'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise-Lite.pth',
       'https://huggingface.co/comsharp/UVR_resources/resolve/main/models/VR_Arch/UVR-DeNoise-Lite.pth'
-    ],
-    is_installed: false
-  },
-  {
-    id: 'cascade_net',
-    name: 'Cascade-Net Dual Denoise',
-    filename: 'deepfilter.onnx',
-    category: 'denoise',
-    description: 'Двухкаскадный нейрофильтр шума для тяжелых промышленных и уличных шумов.',
-    size_mb: 64.0,
-    recommended_for: 'Уличный шум, кондиционеры и толпа на заднем плане',
-    urls: [
-      'https://huggingface.co/soniqo/DeepFilterNet3-ONNX/resolve/main/deepfilter.onnx'
-    ],
-    is_installed: false
-  },
-  {
-    id: 'uvr_denoise',
-    name: 'UVR DeNoise HQ',
-    filename: 'UVR-DeNoise.pth',
-    category: 'denoise',
-    description: 'Глубокое нейросетевое шумоподавление фонового гула, шума вентиляторов и шипения.',
-    size_mb: 44.8,
-    recommended_for: 'Основное шумоподавление при подготовке вокала к сведению',
-    urls: [
-      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth'
-    ],
-    is_installed: false
-  },
-  {
-    id: 'silero_vad',
-    name: 'Silero Voice Activity Detector',
-    filename: 'silero_vad.onnx',
-    category: 'denoise',
-    description: 'Нейросетевой детектор голосовой активности. Точно находит границы слов и пауз.',
-    size_mb: 1.8,
-    recommended_for: 'Автоматическая нарезка дорожек на реплики и удаление фонового шума в паузах',
-    urls: [
-      'https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx',
-      'https://huggingface.co/snakers4/silero-vad/resolve/main/silero_vad.onnx'
-    ],
-    is_installed: false
-  },
-  {
-    id: 'rnnoise_neural',
-    name: 'RNNoise Neural Gate',
-    filename: 'rnn_model.onnx',
-    category: 'denoise',
-    description: 'Сверхлегкий рекуррентный фильтр шума в реальном времени с нулевой задержкой.',
-    size_mb: 1.5,
-    recommended_for: 'Мониторинг при записи и быстрый гейтинг на слабых ПК',
-    urls: [
-      'https://huggingface.co/niobures/RNNoise/resolve/main/models/ailia-models/rnn_model.onnx'
     ],
     is_installed: false
   },
@@ -558,10 +505,12 @@ export class AIModelService {
   public isModelInstalled(idOrFilename: string): boolean {
     if (!idOrFilename) return false;
     const builtInDSP = [
-      'spectral_gate', 'deep_noise', 'intel_ai_denoise',
-      'rt_dereverb_v2', 'room_cleaner_neural', 'adaptive_gate',
-      'fast_dsp_splitter', 'vocal_spectral_matcher', 'vocal_timbre_transfer',
-      'web-stt', 'auto'
+      'spectral_gate',
+      'rt_dereverb_v2',
+      'fast_dsp_splitter',
+      'vocal_spectral_matcher',
+      'web-stt',
+      'auto'
     ];
     if (builtInDSP.includes(idOrFilename.trim().toLowerCase())) {
       return true;

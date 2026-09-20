@@ -4,6 +4,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
+use crate::process_utils::CommandExtHide;
 
 /// Каталожная запись нейросетевой модели
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,7 +104,6 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             size_mb: 79.8,
             recommended_for: "Глубокая многодорожечная реставрация фильма и видеоряда".to_string(),
             urls: vec![
-                "https://huggingface.co/dokodesuka/htdemucs_ft/resolve/main/htdemucs_ft.yaml".to_string(),
                 "https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs_ft.yaml".to_string(),
             ],
             is_installed: false,
@@ -135,6 +135,7 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             recommended_for: "Экспресс-разделение дубляжа и фоновой музыки".to_string(),
             urls: vec![
                 "https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs_ft.yaml".to_string(),
+                "https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs.yaml".to_string(),
             ],
             is_installed: false,
             installed_bytes: None,
@@ -340,67 +341,6 @@ pub fn get_catalog() -> Vec<ModelCatalogItem> {
             installed_bytes: None,
             local_path: None,
         },
-        ModelCatalogItem {
-            id: "cascade_net".to_string(),
-            name: "Cascade-Net Dual Denoise".to_string(),
-            filename: "deepfilter.onnx".to_string(),
-            category: "denoise".to_string(),
-            description: "Двухкаскадный нейрофильтр шума для тяжелых промышленных и уличных шумов.".to_string(),
-            size_mb: 64.0,
-            recommended_for: "Уличный шум, кондиционеры и толпа на заднем плане".to_string(),
-            urls: vec![
-                "https://huggingface.co/soniqo/DeepFilterNet3-ONNX/resolve/main/deepfilter.onnx".to_string(),
-            ],
-            is_installed: false,
-            installed_bytes: None,
-            local_path: None,
-        },
-        ModelCatalogItem {
-            id: "uvr_denoise".to_string(),
-            name: "UVR DeNoise HQ".to_string(),
-            filename: "UVR-DeNoise.pth".to_string(),
-            category: "denoise".to_string(),
-            description: "Глубокое нейросетевое шумоподавление фонового гула, шума вентиляторов и шипения.".to_string(),
-            size_mb: 44.8,
-            recommended_for: "Основное шумоподавление при подготовке вокала к сведению".to_string(),
-            urls: vec![
-                "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth".to_string(),
-            ],
-            is_installed: false,
-            installed_bytes: None,
-            local_path: None,
-        },
-        ModelCatalogItem {
-            id: "silero_vad".to_string(),
-            name: "Silero Voice Activity Detector".to_string(),
-            filename: "silero_vad.onnx".to_string(),
-            category: "denoise".to_string(),
-            description: "Нейросетевой детектор голосовой активности. Точно находит границы слов и пауз.".to_string(),
-            size_mb: 1.8,
-            recommended_for: "Автоматическая нарезка дорожек на реплики и удаление фонового шума в паузах".to_string(),
-            urls: vec![
-                "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx".to_string(),
-                "https://huggingface.co/snakers4/silero-vad/resolve/main/silero_vad.onnx".to_string(),
-            ],
-            is_installed: false,
-            installed_bytes: None,
-            local_path: None,
-        },
-        ModelCatalogItem {
-            id: "rnnoise_neural".to_string(),
-            name: "RNNoise Neural Gate".to_string(),
-            filename: "rnn_model.onnx".to_string(),
-            category: "denoise".to_string(),
-            description: "Сверхлегкий рекуррентный фильтр шума в реальном времени с нулевой задержкой.".to_string(),
-            size_mb: 1.5,
-            recommended_for: "Мониторинг при записи и быстрый гейтинг на слабых ПК".to_string(),
-            urls: vec![
-                "https://huggingface.co/niobures/RNNoise/resolve/main/models/ailia-models/rnn_model.onnx".to_string(),
-            ],
-            is_installed: false,
-            installed_bytes: None,
-            local_path: None,
-        },
 
         // =========================================================================
         // 4. SPEECH RECOGNITION & ALIGNMENT (Whisper ASR)
@@ -556,6 +496,15 @@ pub fn locate_model_file(app_handle: &AppHandle, filename: &str) -> Option<(Path
 
     let mut candidate_filenames: Vec<String> = vec![filename.to_string()];
     match filename {
+        "htdemucs_vocals_bgm.yaml" | "htdemucs_ft.yaml" => {
+            candidate_filenames.push("htdemucs_ft.yaml".to_string());
+            candidate_filenames.push("htdemucs_vocals_bgm.yaml".to_string());
+            candidate_filenames.push("htdemucs.yaml".to_string());
+        }
+        "htdemucs.yaml" => {
+            candidate_filenames.push("htdemucs.yaml".to_string());
+            candidate_filenames.push("htdemucs_ft.yaml".to_string());
+        }
         "UVR-DeNoise.onnx" | "UVR-DeNoise.pth" => {
             candidate_filenames.push("UVR-DeNoise.pth".to_string());
             candidate_filenames.push("UVR-DeNoise.onnx".to_string());
@@ -628,8 +577,13 @@ pub fn locate_model_file(app_handle: &AppHandle, filename: &str) -> Option<(Path
             if path.exists() && path.is_file() {
                 if let Ok(meta) = path.metadata() {
                     let size = meta.len();
-                    // Проверяем, что файл не нулевой
-                    if size > 1024 {
+                    // Для конфигурационных YAML/JSON файлов минимальный размер от 10 байт
+                    let min_size = if cand.ends_with(".yaml") || cand.ends_with(".yml") || cand.ends_with(".json") {
+                        10
+                    } else {
+                        1024
+                    };
+                    if size >= min_size {
                         return Some((path, size));
                     }
                 }
@@ -680,7 +634,7 @@ pub fn open_models_directory(app_handle: AppHandle) -> Result<String, String> {
 
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("explorer")
+        let _ = std::process::Command::new("explorer").hide_window()
             .arg(&models_dir)
             .spawn()
             .map_err(|e| format!("Не удалось открыть проводник: {}", e))?;
@@ -688,7 +642,7 @@ pub fn open_models_directory(app_handle: AppHandle) -> Result<String, String> {
 
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open")
+        let _ = std::process::Command::new("open").hide_window()
             .arg(&models_dir)
             .spawn()
             .map_err(|e| format!("Не удалось открыть Finder: {}", e))?;
@@ -696,7 +650,7 @@ pub fn open_models_directory(app_handle: AppHandle) -> Result<String, String> {
 
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("xdg-open")
+        let _ = std::process::Command::new("xdg-open").hide_window()
             .arg(&models_dir)
             .spawn()
             .map_err(|e| format!("Не удалось открыть файловый менеджер: {}", e))?;
@@ -868,6 +822,7 @@ pub async fn download_ai_model(
 
         // Используем curl с поддержкой редиректов (-L), User-Agent и тайм-аутов
         let mut curl_cmd = tokio::process::Command::new("curl");
+        curl_cmd.hide_window();
         curl_cmd
             .arg("-L") // Follow redirects (HuggingFace / GitHub)
             .arg("--location-trusted")
@@ -942,8 +897,22 @@ pub async fn download_ai_model(
                         Ok(Some(status)) => {
                             if status.success() {
                                 if let Ok(meta) = std::fs::metadata(&temp_dest) {
-                                    if meta.len() > 1024 {
-                                        success = true;
+                                    let min_size = if model.filename.ends_with(".yaml") || model.filename.ends_with(".yml") || model.filename.ends_with(".json") {
+                                        10
+                                    } else {
+                                        1024
+                                    };
+                                    if meta.len() >= min_size {
+                                        // Дополнительная проверка: убеждаемся, что не скачался 404 HTML или пустой ответ
+                                        if let Ok(head_content) = std::fs::read_to_string(&temp_dest) {
+                                            if head_content.contains("<!DOCTYPE") || head_content.contains("<html") || head_content.starts_with("404: Not Found") {
+                                                last_error = "Сервер вернул HTML-страницу ошибки вместо файла модели".to_string();
+                                            } else {
+                                                success = true;
+                                            }
+                                        } else {
+                                            success = true;
+                                        }
                                     } else {
                                         last_error = format!("Скачанный файл пустой или поврежден (размер {} байт)", meta.len());
                                     }
@@ -1023,6 +992,15 @@ pub async fn download_ai_model(
             } else {
                 let _ = std::fs::remove_file(&temp_dest);
             }
+        }
+
+        // Если скачали htdemucs_vocals_bgm.yaml или htdemucs_ft.yaml, создаем зеркальную копию для поддержки всех псевдонимов Demucs
+        if model.filename == "htdemucs_vocals_bgm.yaml" {
+            let ft_dest = target_dir.join("htdemucs_ft.yaml");
+            let _ = std::fs::copy(&final_dest, &ft_dest);
+        } else if model.filename == "htdemucs_ft.yaml" {
+            let bgm_dest = target_dir.join("htdemucs_vocals_bgm.yaml");
+            let _ = std::fs::copy(&final_dest, &bgm_dest);
         }
 
         let final_size = std::fs::metadata(&final_dest).map(|m| m.len()).unwrap_or(0);

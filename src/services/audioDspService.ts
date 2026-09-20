@@ -1,5 +1,7 @@
 import { AudioTrack, PrepProcessingConfig, AudioSegment } from '../types';
 import { TimingAlignmentService } from './timingAlignmentService';
+import { invoke } from '@tauri-apps/api/core';
+import { createPrefixedAudioPath, invalidateFileUrl, isTauriAvailable } from '../lib/utils';
 import {
   applyWaveformUpwardCompressionNative,
   estimateLufsFromPcmNative,
@@ -15,6 +17,7 @@ import {
   processSpeechLevelerNative,
   processVocalSpotCleaningNative,
   analyzeVoiceTracksNative,
+  PeakAdjustmentStats,
   TrackAnalysisInput,
   TrackAnalysisReport,
   ClipProcessingInput,
@@ -51,6 +54,100 @@ export class AudioDspService {
     const isOrig = track.type === 'original' || name.includes('оригинал') || name.includes('музыка') || name.includes('эффект');
     if (isOrig) return false;
     return true;
+  }
+
+  /**
+   * 1.0 ПОДСТРОЙКА ГРОМКОСТИ ПО САМОМУ ВЫСОКОМУ ПИКУ (-9 dBFS)
+   * Самый первый этап предподготовки: линейно подгоняет самый высокий пик к -9 dBFS
+   * без динамического сжатия и без поднятия шумов из небытия.
+   */
+  public static async applyPeakAdjustmentAsync(
+    tracks: AudioTrack[],
+    config?: PrepProcessingConfig['peakAdjustment'],
+    targetTrackId?: string,
+    targetSegmentId?: string
+  ): Promise<DspProcessResult> {
+    const targetPeakDb = config?.targetPeakDb ?? -9.0;
+    const detailedLogs: string[] = [];
+    detailedLogs.push(`[DSP: Подстройка громкости по пику] Старт обработки`);
+    detailedLogs.push(`Целевой максимум пика: ${targetPeakDb.toFixed(1)} dBFS`);
+
+    let affectedSegmentsCount = 0;
+    const updatedTracks: AudioTrack[] = [];
+
+    for (const track of tracks) {
+      if (!AudioDspService.isDubActorTrack(track) || track.isProcessingEnabled === false) {
+        updatedTracks.push(track);
+        continue;
+      }
+      if (targetTrackId && track.id !== targetTrackId) {
+        updatedTracks.push(track);
+        continue;
+      }
+
+      detailedLogs.push(`Обработка дорожки: ${track.name} (${track.id})`);
+
+      const updatedSegments: AudioSegment[] = [];
+      for (const seg of track.segments) {
+        if (targetSegmentId && seg.id !== targetSegmentId) {
+          updatedSegments.push(seg);
+          continue;
+        }
+
+        if (!seg.filePath || seg.filePath.startsWith('blob:') || seg.filePath.startsWith('data:')) {
+          updatedSegments.push(seg);
+          continue;
+        }
+
+        try {
+          const outPath = createPrefixedAudioPath('peak9', seg.filePath);
+          let stats: PeakAdjustmentStats | null = null;
+
+          if (isTauriAvailable()) {
+            stats = await invoke<PeakAdjustmentStats>('adjust_peak_audio', {
+              inputPath: seg.filePath,
+              outputPath: outPath,
+              targetPeakDb,
+            });
+          }
+
+          if (stats) {
+            detailedLogs.push(
+              `Сегмент "${seg.id}": исходный пик ${stats.initialPeakDb.toFixed(1)} dBFS -> приведён к ${stats.finalPeakDb.toFixed(1)} dBFS (гейн: ${stats.gainAppliedDb >= 0 ? '+' : ''}${stats.gainAppliedDb.toFixed(2)} dB)`
+            );
+            affectedSegmentsCount++;
+            updatedSegments.push({
+              ...seg,
+              filePath: outPath,
+              backupFilePath: seg.filePath,
+              processedEffectName: 'Peak Adj (-9dB)',
+              gain: 1.0,
+            });
+            invalidateFileUrl(seg.filePath);
+            invalidateFileUrl(outPath);
+          } else {
+            updatedSegments.push(seg);
+          }
+        } catch (e) {
+          detailedLogs.push(`⚠️ Ошибка пиковой подстройки: ${e}`);
+          updatedSegments.push(seg);
+        }
+      }
+
+      updatedTracks.push({ ...track, segments: updatedSegments });
+    }
+
+    const logSummary = affectedSegmentsCount > 0
+      ? `Подстройка по пику (-9 dBFS) завершена. Обработано сегментов: ${affectedSegmentsCount}.`
+      : `Нет сегментов для пиковой подстройки.`;
+
+    return {
+      updatedTracks,
+      affectedSegmentsCount,
+      stats: {},
+      logSummary,
+      detailedLogs,
+    };
   }
 
   /**

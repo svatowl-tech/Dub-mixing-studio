@@ -913,8 +913,7 @@ export const SingleTrackStudioModal: React.FC = () => {
                         value={denoiseModel}
                         onChange={(val) => setDenoiseModel(val)}
                         builtInOptions={[
-                          { id: 'spectral_gate', name: 'Спектральный гейт (AFFTDN - DSP)' },
-                          { id: 'deep_noise', name: 'Deep Denoise (RNNoise DSP)' }
+                          { id: 'spectral_gate', name: 'Спектральный гейт (AFFTDN - DSP)' }
                         ]}
                       />
                     </div>
@@ -961,8 +960,7 @@ export const SingleTrackStudioModal: React.FC = () => {
                         value={dereverbModel}
                         onChange={(val) => setDereverbModel(val)}
                         builtInOptions={[
-                          { id: 'rt_dereverb_v2', name: 'RT_Dereverb v2 (DSP спектральное вычитание)' },
-                          { id: 'room_cleaner_neural', name: 'Neural Room Cleaner (Резонансы DSP)' }
+                          { id: 'rt_dereverb_v2', name: 'RT_Dereverb v2 (DSP спектральное вычитание)' }
                         ]}
                       />
                     </div>
