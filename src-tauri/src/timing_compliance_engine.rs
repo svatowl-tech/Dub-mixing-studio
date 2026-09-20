@@ -108,9 +108,9 @@ pub struct SubtitleAuditInput {
 
 /// Интервальная структура речи для Sweep-Line сканирования
 #[derive(Debug, Clone, Copy)]
-struct SpeechSpan {
-    start_ms: u64,
-    end_ms: u64,
+pub struct SpeechSpan {
+    pub start_ms: u64,
+    pub end_ms: u64,
 }
 
 /// Тип события для Sweep-Line сканирования

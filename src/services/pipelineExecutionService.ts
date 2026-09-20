@@ -1777,6 +1777,67 @@ export class PipelineExecutionService {
           return;
         }
 
+        if (stepId === 'conflictDetection') {
+          const origTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
+          console.group(`[Pipeline] ▶ Phase 2: Conflict Detection & Overlap Auto-Fix`);
+          setStepExecution(prev => ({
+            ...prev,
+            [stepId]: {
+              ...prev[stepId],
+              progress: 30,
+              log: 'Поиск наездов реплик и устранение коллизий между дорожками...'
+            }
+          }));
+
+          const issues = TimingAlignmentService.validateAllTracksTiming(
+            project.tracks,
+            origTrack,
+            project.subtitles || [],
+            activePreset.type,
+            activePreset.phase2
+          );
+
+          const overlapIssues = issues.filter(i => i.type === 'overlap');
+          let updatedTracks = project.tracks;
+          let fixedCount = 0;
+
+          if (activePreset.phase2.conflictDetection?.autoFixOverlaps && overlapIssues.length > 0) {
+            updatedTracks = TimingAlignmentService.autoFixAllIssues(overlapIssues, project.tracks);
+            fixedCount = overlapIssues.length;
+            onUpdateProject({ tracks: updatedTracks });
+            await playbackEngine.updateTracks(updatedTracks);
+          }
+
+          setTimingIssues(issues);
+
+          const logMsg = overlapIssues.length > 0
+            ? (activePreset.phase2.conflictDetection?.autoFixOverlaps
+                ? `Предотвращение наездов: обнаружено и автоматически устранено ${fixedCount} наездов дорожек друг на друга.`
+                : `Обнаружено ${overlapIssues.length} наездов реплик друг на друга. Требуется ручная проверка.`)
+            : `Коллизий не обнаружено: дорожки синхронизированы и не мешают друг другу.`;
+
+          console.log(`[ConflictDetection] Summary: ${logMsg}`);
+          console.groupEnd();
+
+          setStepExecution(prev => ({
+            ...prev,
+            [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
+          }));
+
+          addAuditLogs([{
+            id: `audit-conflict-${Date.now()}`,
+            timestamp: Date.now(),
+            stageName: '2. Тайминг',
+            stepId: 'conflictDetection',
+            status: overlapIssues.length > 0 && !activePreset.phase2.conflictDetection?.autoFixOverlaps ? 'warning' as const : 'success' as const,
+            title: 'Предотвращение наездов дорожек (Коллизии)',
+            message: logMsg
+          }]);
+
+          showToast(logMsg);
+          return;
+        }
+
         if (stepId === 'subtitleCompliance') {
           const origTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
           console.group(`[Pipeline] ▶ Phase 2: Subtitle Timing & Reading Speed Compliance`);

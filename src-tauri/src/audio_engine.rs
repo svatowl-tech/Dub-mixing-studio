@@ -346,6 +346,7 @@ impl NativeAudioPlayer {
 // --- REAL-TIME RUST DSP EFFECTS ENGINE ---
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub enum BiquadType {
     LowPass,
     HighPass,
@@ -458,7 +459,9 @@ pub struct TrackDspEngine {
     hp_r: BiquadFilter,
     lp_l: BiquadFilter,
     lp_r: BiquadFilter,
+    #[allow(dead_code)]
     eq_bands_l: Vec<BiquadFilter>,
+    #[allow(dead_code)]
     eq_bands_r: Vec<BiquadFilter>,
     deesser_bp: BiquadFilter,
     deesser_env: f32,

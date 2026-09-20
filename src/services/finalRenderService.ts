@@ -475,13 +475,18 @@ export class FinalRenderService {
    */
   public static applyMasteringLimiter(
     tracks: AudioTrack[],
-    config: FinalMixConfig
+    config: FinalMixConfig,
+    projectOrVocalBus?: Project | number
   ): {
     updatedTracks: AudioTrack[];
     appliedGainAdjustmentDb: number;
     ceilingDb: number;
     logs: MixingAuditEntry[];
   } {
+    const vocalBusGain = typeof projectOrVocalBus === 'number' 
+      ? projectOrVocalBus 
+      : (projectOrVocalBus?.vocalBusVolume ?? 1.0);
+
     const mastering = config.masteringLimiter || {
       enabled: true,
       truePeakCeilingDb: -1.0,
@@ -597,7 +602,7 @@ export class FinalRenderService {
       if (isOriginal) return track;
 
       const updatedSegments = track.segments.map(seg => {
-        const segGain = (seg.gain !== undefined ? seg.gain : 1.0) * gainFactor;
+        const segGain = (seg.gain !== undefined ? seg.gain : 1.0) * gainFactor * vocalBusGain;
         
         // 4x simulated inter-sample oversampled peak estimation
         const maxPeak = (seg.waveform && seg.waveform.length > 0) ? Math.max(...seg.waveform) * 1.08 : 0.8;
@@ -907,24 +912,30 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
     const api = typeof window !== 'undefined' ? (window as any).electronAPI : null;
     if (api && api.exportAudio) {
       try {
-        const exportTracks = project.tracks.map(t => ({
-          id: t.id,
-          name: t.name,
-          volume: t.volume,
-          isMuted: t.isMuted,
-          isSolo: t.isSolo,
-          segments: t.segments.map(s => ({
-            id: s.id || `seg-${Date.now()}-${Math.random()}`,
-            filePath: toNativeLocalPath(s.filePath),
-            startTime: s.startTime,
-            duration: s.duration,
-            fileOffset: s.fileOffset || 0,
-            fileDuration: s.fileDuration || s.duration,
-            gain: s.gain,
-            panning: s.panning,
-            playbackRate: s.playbackRate,
-          })).filter(s => s.filePath !== '')
-        }));
+        const vocalBusMultiplier = project.vocalBusVolume ?? 1.0;
+        const exportTracks = project.tracks.map(t => {
+          const isOrig = t.type === 'original' || t.name.toLowerCase().includes('оригинал') || t.name.toLowerCase().includes('original') || t.name.toLowerCase().includes('reference') || t.name.toLowerCase().includes('звуки');
+          const effectiveVolume = isOrig ? t.volume : t.volume * vocalBusMultiplier;
+          const effectiveMuted = isOrig ? t.isMuted : (t.isMuted || !!project.vocalBusMuted);
+          return {
+            id: t.id,
+            name: t.name,
+            volume: effectiveVolume,
+            isMuted: effectiveMuted,
+            isSolo: t.isSolo,
+            segments: t.segments.map(s => ({
+              id: s.id || `seg-${Date.now()}-${Math.random()}`,
+              filePath: toNativeLocalPath(s.filePath),
+              startTime: s.startTime,
+              duration: s.duration,
+              fileOffset: s.fileOffset || 0,
+              fileDuration: s.fileDuration || s.duration,
+              gain: s.gain,
+              panning: s.panning,
+              playbackRate: s.playbackRate,
+            })).filter(s => s.filePath !== '')
+          };
+        });
 
         const res = await api.exportAudio({
           projectJson: JSON.stringify({

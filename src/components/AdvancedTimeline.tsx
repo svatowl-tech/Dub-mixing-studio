@@ -13,7 +13,15 @@ import {
   ZoomIn,
   ZoomOut,
   Magnet,
-  Activity
+  Activity,
+  Sliders,
+  Volume2,
+  VolumeX,
+  AlertTriangle,
+  Wand2,
+  Search,
+  Headphones,
+  RotateCcw
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Project, AudioTrack, AudioSegment } from '../types';
@@ -299,6 +307,9 @@ export const AdvancedTimeline = ({
   recordingStartTime,
   onOpenProcessing,
   onUpdateMasterVolume,
+  onUpdateVocalBusVolume,
+  onUpdateVocalBusMuted,
+  onOpenVocalBusSettings,
   currentTimeRef
 }: { 
   project: Project, 
@@ -337,6 +348,9 @@ export const AdvancedTimeline = ({
   recordingStartTime?: number,
   onOpenProcessing?: (id: string) => void,
   onUpdateMasterVolume?: (vol: number) => void,
+  onUpdateVocalBusVolume?: (vol: number) => void,
+  onUpdateVocalBusMuted?: (muted: boolean) => void,
+  onOpenVocalBusSettings?: () => void,
   currentTimeRef: React.MutableRefObject<number>
 }) => {
   const handleSeek = (time: number, autoScroll: boolean = true) => {
@@ -410,6 +424,25 @@ export const AdvancedTimeline = ({
       return 0;
     });
   }, [project.tracks]);
+
+  // Vocal tracks (all dubbing/speech tracks excluding original reference)
+  const vocalTracks = React.useMemo(() => {
+    return sortedTracks.filter(t => {
+      const name = (t.name || '').toLowerCase();
+      return t.type !== 'original' && !name.includes('оригинал') && !name.includes('original') && !name.includes('reference') && !name.includes('звуки');
+    });
+  }, [sortedTracks]);
+
+  // Aggregated vocal segments for visual rendering in the Vocal Bus Lane
+  const allVocalSegments = React.useMemo(() => {
+    const list: Array<{ seg: AudioSegment; track: AudioTrack }> = [];
+    vocalTracks.forEach(t => {
+      t.segments.forEach(s => {
+        list.push({ seg: s, track: t });
+      });
+    });
+    return list.sort((a, b) => a.seg.startTime - b.seg.startTime);
+  }, [vocalTracks]);
 
   const zoomRef = useRef(zoom);
   const sortedTracksRef = useRef(sortedTracks);
@@ -755,6 +788,124 @@ export const AdvancedTimeline = ({
         )}
       </div>
 
+      {/* Interactive Pipeline Pause Banners */}
+      {project.pipelineState === 'paused_conflicts' && (
+        <div className="bg-rose-950/90 border-b border-rose-500/40 px-5 py-2.5 flex items-center justify-between z-50 shrink-0 animate-in fade-in">
+          <div className="flex items-center gap-3 min-w-0">
+            <span className="p-1.5 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-400 shrink-0 animate-pulse">
+              <AlertTriangle className="w-4 h-4" />
+            </span>
+            <div className="min-w-0">
+              <div className="text-[11px] font-black uppercase tracking-wider text-rose-200 flex items-center gap-2">
+                <span>Пауза конвейера: Наезды реплик</span>
+                <span className="px-1.5 py-0.2 rounded bg-rose-500/30 text-rose-300 font-mono text-[10px]">
+                  {project.pipelinePauseInfo?.conflictCount ?? allVocalSegments.filter(s => s.seg.timingWarning === 'overlap').length} конфликтов
+                </span>
+              </div>
+              <p className="text-[10px] text-zinc-300 truncate">
+                Реплики с коллизиями подсвечены красным на таймлайне. Подвиньте их вручную или используйте авто-фикс.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {allVocalSegments.some(s => s.seg.timingWarning === 'overlap') && (
+              <button
+                onClick={() => {
+                  const firstConflict = allVocalSegments.find(s => s.seg.timingWarning === 'overlap');
+                  if (firstConflict) handleSeek(firstConflict.seg.startTime, true);
+                }}
+                className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-white/10 text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer"
+                title="Перемотать к первому наезду"
+              >
+                <Search className="w-3 h-3" />
+                <span>К наезду</span>
+              </button>
+            )}
+            <button
+              onClick={() => window.dispatchEvent(new CustomEvent('pipeline_autofix_overlaps'))}
+              className="px-2.5 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer active:scale-95"
+              title="Автоматически раздвинуть наезжающие сегменты"
+            >
+              <Wand2 className="w-3 h-3" />
+              <span>Авто-фикс</span>
+            </button>
+            <button
+              onClick={() => window.dispatchEvent(new CustomEvent('pipeline_resume_conflicts'))}
+              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-black flex items-center gap-1.5 transition-all shadow-md shadow-emerald-950/40 cursor-pointer active:scale-95"
+            >
+              <Play className="w-3.5 h-3.5 fill-white" />
+              <span>Продолжить конвейер</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {project.pipelineState === 'paused_loudness_balance' && (
+        <div className="bg-indigo-950/90 border-b border-indigo-500/40 px-5 py-2 flex items-center justify-between z-50 shrink-0 animate-in fade-in">
+          <div className="flex items-center gap-3 min-w-0">
+            <span className="p-1.5 rounded-lg bg-indigo-500/20 border border-indigo-500/40 text-indigo-400 shrink-0 animate-pulse">
+              <Headphones className="w-4 h-4" />
+            </span>
+            <div className="min-w-0">
+              <div className="text-[11px] font-black uppercase tracking-wider text-indigo-200">
+                Пауза конвейера: Контроль баланса громкости голосов к оригиналу
+              </div>
+              <p className="text-[10px] text-zinc-300 truncate">
+                Сведение завершено. Прослушайте с начала и подстройте уровень мастер-шины вокала перед мастерингом.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 shrink-0">
+            <button
+              onClick={() => {
+                handleSeek(0, true);
+                if (!isPlaying) onPlayPause();
+              }}
+              className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-white/10 text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer active:scale-95"
+              title="Перемотать на 0:00 и включить воспроизведение"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span>Слушать с 0:00</span>
+            </button>
+
+            {/* Быстрый регулятор вокальной шины прямо на таймлайне */}
+            <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-zinc-900/90 border border-indigo-500/30">
+              <Volume2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+              <div className="flex flex-col">
+                <div className="flex justify-between items-center text-[9px] font-mono leading-none mb-1">
+                  <span className="text-zinc-400">Шина вокала:</span>
+                  <span className="text-indigo-300 font-bold ml-1">
+                    {Math.round((project.vocalBusVolume ?? 1.0) * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={1.5}
+                  step={0.01}
+                  value={project.vocalBusVolume ?? 1.0}
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value);
+                    onUpdateVocalBusVolume?.(val);
+                  }}
+                  className="w-24 h-1 bg-zinc-800 rounded appearance-none cursor-pointer accent-indigo-500"
+                />
+              </div>
+            </div>
+
+            <button
+              onClick={() => window.dispatchEvent(new CustomEvent('pipeline_resume_render'))}
+              className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-indigo-600 to-emerald-600 hover:from-indigo-500 hover:to-emerald-500 text-white text-[11px] font-black flex items-center gap-1.5 transition-all shadow-md shadow-indigo-950/40 cursor-pointer active:scale-95"
+            >
+              <Play className="w-3.5 h-3.5 fill-white" />
+              <span>Продолжить конвейер (Мастеринг)</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 flex overflow-hidden relative min-h-0">
         {/* Track Headers Column */}
         <div className="w-64 border-r border-zinc-800 bg-zinc-950 flex flex-col z-40 relative min-h-0">
@@ -797,12 +948,80 @@ export const AdvancedTimeline = ({
               </button>
             )}
 
-            {/* Master Track Header */}
-            <div className="w-full h-[95px] border-t border-zinc-700 bg-zinc-900 p-4 pt-4 flex flex-col gap-3 relative shrink-0">
+            {/* Vocal Bus Track Header (Мастер-шина вокала) */}
+            <div className="w-full h-[95px] border-t border-indigo-900/60 bg-gradient-to-r from-indigo-950/40 via-zinc-900 to-zinc-900 p-3 pt-3 flex flex-col justify-between relative shrink-0">
                <div className="flex items-center justify-between">
-                 <span className="text-[10px] font-black uppercase tracking-widest text-emerald-400">Master</span>
+                 <div className="flex items-center gap-1.5 min-w-0">
+                   <span className="px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                     BUS
+                   </span>
+                   <span className="text-[10px] font-black uppercase tracking-wider text-indigo-300 truncate" title="Мастер-шина всех голосов">
+                     Шина вокала
+                   </span>
+                 </div>
+                 <div className="flex items-center gap-1">
+                   <button
+                     type="button"
+                     onClick={() => onUpdateVocalBusMuted?.(!project.vocalBusMuted)}
+                     className={cn(
+                       "w-5 h-5 rounded text-[9px] font-black transition-colors flex items-center justify-center cursor-pointer",
+                       project.vocalBusMuted
+                         ? "bg-rose-500 text-white shadow-sm shadow-rose-900/50"
+                         : "bg-zinc-800 text-zinc-400 hover:text-zinc-200"
+                     )}
+                     title={project.vocalBusMuted ? "Включить шину вокала (Unmute)" : "Заглушить шину вокала (Mute)"}
+                   >
+                     M
+                   </button>
+                   {onOpenVocalBusSettings && (
+                     <button
+                       type="button"
+                       onClick={onOpenVocalBusSettings}
+                       className="p-1 rounded text-zinc-400 hover:text-indigo-300 hover:bg-indigo-950/50 transition-colors cursor-pointer"
+                       title="Открыть настройки мастер-шины вокала (DSP / VST рэк)"
+                     >
+                       <Sliders size={12} />
+                     </button>
+                   )}
+                 </div>
                </div>
-               <div className="flex-1 flex flex-col justify-end gap-2">
+               <div className="flex flex-col gap-1">
+                 <div className="flex items-center justify-between text-[8px] font-mono text-zinc-400">
+                   <span className="text-zinc-500">Громкость голосов:</span>
+                   <span className="text-indigo-300 font-bold">
+                     {Math.round((project.vocalBusVolume ?? 1.0) * 100)}%
+                     <span className="text-zinc-500 ml-1">
+                       ({((project.vocalBusVolume ?? 1.0) >= 1.0 ? '+' : '') + (20 * Math.log10(Math.max(0.001, project.vocalBusVolume ?? 1.0))).toFixed(1)} dB)
+                     </span>
+                   </span>
+                 </div>
+                 <div className="flex items-center gap-2">
+                   <input 
+                     type="range" min={0} max={1.5} step={0.01}
+                     value={project.vocalBusVolume ?? 1.0}
+                     onChange={(e) => onUpdateVocalBusVolume?.(parseFloat(e.target.value))} 
+                     className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
+                     title="Регулятор общей громкости всех реплик перед мастерингом"
+                   />
+                 </div>
+                 <VUMeter stream={null} />
+               </div>
+            </div>
+
+            {/* Master Track Header */}
+            <div className="w-full h-[95px] border-t border-zinc-700 bg-zinc-900 p-3 pt-3 flex flex-col justify-between relative shrink-0">
+               <div className="flex items-center justify-between">
+                 <div className="flex items-center gap-1.5">
+                   <span className="px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                     OUT
+                   </span>
+                   <span className="text-[10px] font-black uppercase tracking-widest text-emerald-400">Master</span>
+                 </div>
+                 <span className="text-[8px] font-mono text-zinc-500">
+                   {Math.round((project.masterVolume ?? 1.0) * 100)}%
+                 </span>
+               </div>
+               <div className="flex flex-col gap-1">
                  <div className="flex items-center gap-2">
                    <input 
                      type="range" min={0} max={1.5} step={0.01}
@@ -810,9 +1029,6 @@ export const AdvancedTimeline = ({
                      onChange={(e) => onUpdateMasterVolume?.(parseFloat(e.target.value))} 
                      className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-500" 
                    />
-                   <span className="text-[8px] font-mono text-zinc-600 w-8 text-right">
-                     {Math.round((project.masterVolume ?? 1.0) * 100)}%
-                   </span>
                  </div>
                  <VUMeter stream={null} />
                </div>
@@ -986,8 +1202,82 @@ export const AdvancedTimeline = ({
               {/* Spacer for Add Track button alignment */}
               {onAddTrack && <div className="h-10 border-b border-white/5 bg-zinc-900/10" />}
               
-              {/* Spacer for Master Track alignment */}
-              <div className="h-[95px] border-t border-zinc-700 bg-zinc-900/30" />
+              {/* Vocal Bus Track Lane (Мастер-шина вокала) */}
+              <div 
+                className="h-[95px] border-t border-indigo-900/50 bg-gradient-to-b from-indigo-950/20 via-zinc-900/30 to-zinc-900/40 relative overflow-hidden select-none pointer-events-none"
+                style={{ width: `${duration * zoom}px` }}
+              >
+                {/* Background Grid Accent */}
+                <div className="absolute inset-0 opacity-15 bg-[linear-gradient(to_right,#818cf815_1px,transparent_1px)]" style={{ backgroundSize: `${zoom}px 100%` }} />
+                
+                {/* Vocal Bus Lane Sticky Label */}
+                <div className="sticky left-2 top-2 z-10 inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-indigo-950/90 border border-indigo-500/40 backdrop-blur-xs text-[9px] font-bold text-indigo-300 shadow-md">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+                  <span>Шина вокала • Суммарная огибающая реплик</span>
+                  <span className="text-[8px] font-mono text-indigo-400/80 ml-1">
+                    ({Math.round((project.vocalBusVolume ?? 1.0) * 100)}%)
+                  </span>
+                </div>
+
+                {/* Aggregated Vocal Segments Visual Representation */}
+                {allVocalSegments.map(({ seg, track }) => {
+                  const left = seg.startTime * zoom;
+                  const width = Math.max(12, seg.duration * zoom);
+                  const effectiveGain = (seg.gain ?? 1.0) * track.volume * (project.vocalBusVolume ?? 1.0);
+                  const isMuted = project.vocalBusMuted || track.isMuted;
+
+                  if (timelineVisibleRange && (seg.startTime > timelineVisibleRange.end || (seg.startTime + seg.duration) < timelineVisibleRange.start)) {
+                    return null;
+                  }
+
+                  return (
+                    <div
+                      key={`vocal-bus-seg-${track.id}-${seg.id}`}
+                      className={cn(
+                        "absolute top-6 bottom-2 rounded border transition-opacity overflow-hidden flex flex-col justify-between p-1 shadow-sm",
+                        isMuted 
+                          ? "bg-zinc-800/40 border-zinc-700/50 opacity-40" 
+                          : "bg-gradient-to-r from-indigo-900/60 via-purple-900/50 to-indigo-900/60 border-indigo-400/40 shadow-indigo-950/50"
+                      )}
+                      style={{ left: `${left}px`, width: `${width}px` }}
+                    >
+                      <div className="flex items-center justify-between text-[8px] font-mono leading-none text-indigo-200 truncate">
+                        <span className="truncate font-semibold px-1 py-0.5 rounded bg-indigo-950/80 border border-indigo-400/30">
+                          {track.name}
+                        </span>
+                        {width > 60 && (
+                          <span className="text-zinc-400 text-[7px] ml-1">
+                            {effectiveGain > 0 ? (20 * Math.log10(Math.max(0.001, effectiveGain))).toFixed(1) : '-inf'} dB
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="w-full h-3.5 relative flex items-center">
+                        <div 
+                          className="w-full h-1.5 rounded-full bg-gradient-to-r from-indigo-400/70 to-purple-300/70 transition-transform origin-left"
+                          style={{
+                            transform: `scaleY(${Math.min(2.5, Math.max(0.4, effectiveGain))})`
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Master Track Lane (Мастер-выход) */}
+              <div 
+                className="h-[95px] border-t border-zinc-700 bg-zinc-900/40 relative overflow-hidden select-none pointer-events-none"
+                style={{ width: `${duration * zoom}px` }}
+              >
+                <div className="sticky left-2 top-2 z-10 inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-950/90 border border-emerald-500/40 backdrop-blur-xs text-[9px] font-bold text-emerald-300 shadow-md">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  <span>Мастер-выход • Финальный микс (Голоса + Оригинал)</span>
+                  <span className="text-[8px] font-mono text-emerald-400/80 ml-1">
+                    ({Math.round((project.masterVolume ?? 1.0) * 100)}%)
+                  </span>
+                </div>
+              </div>
             </div>
 
             {/* Playhead */}

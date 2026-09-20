@@ -97,6 +97,23 @@ export class MixingService {
     let dialogueCount = 0;
     let physicsCount = 0;
 
+    if (!config || !config.enabled || config.bypass) {
+      return {
+        updatedTracks: tracks,
+        dialogueCount: 0,
+        physicsCount: 0,
+        logs: [{
+          id: `gm-bypass-${Date.now()}`,
+          timestamp: Date.now(),
+          stageName: '3. Сведение',
+          stepId: 'gainMatching',
+          status: 'info',
+          title: 'Выравнивание громкости реплик и фоновых звуков пропущено',
+          message: 'Шаг выравнивания отключен в настройках пресета (в закадре реплики и звуки физики не выравниваются).'
+        }]
+      };
+    }
+
     const targetDialogueDb = config.targetDialogueLufs ?? -16.0;
     const physicsOffsetDb = config.physicsOffsetDb ?? -10.0;
     const targetPhysicsDb = targetDialogueDb + physicsOffsetDb; // e.g. -16 + (-10) = -26 dBFS / LUFS
@@ -380,11 +397,28 @@ export class MixingService {
     const logs: MixingAuditEntry[] = [];
     let duckedIntervalsCount = 0;
 
+    if (!config || !config.enabled || config.bypass || mixingType === MixingType.VOICEOVER) {
+      return {
+        updatedTracks: tracks,
+        duckedIntervalsCount: 0,
+        appliedDuckingDb: 0,
+        logs: [{
+          id: `duck-bypass-${Date.now()}`,
+          timestamp: Date.now(),
+          stageName: '3. Сведение',
+          stepId: 'ducking',
+          status: 'info',
+          title: 'Автодакинг отключен',
+          message: mixingType === MixingType.VOICEOVER
+            ? 'Для закадра автодакинг фонового звука отключен (оригинал звучит без приглушений под репликами).'
+            : 'Шаг автодакинга отключен в настройках пресета.'
+        }]
+      };
+    }
+
     // Определение целевой глубины дакинга по правилам сведения
     let targetDuckingDb = config.duckingDb ?? -16.0;
-    if (mixingType === MixingType.VOICEOVER) {
-      targetDuckingDb = config.voiceoverDuckingDb ?? -16.0;
-    } else if (mixingType === MixingType.RECAST) {
+    if (mixingType === MixingType.RECAST) {
       targetDuckingDb = config.recastDuckingDb ?? -24.0;
     } else if (mixingType === MixingType.DUBBING || mixingType === MixingType.REDUB) {
       targetDuckingDb = config.dubbingDuckingDb ?? -96.0; // Полный Mute
@@ -464,9 +498,8 @@ export class MixingService {
         if (!isOrig && !isMe) continue;
 
         const trackType: TargetTrackType = isOrig ? 'originalDialogue' : 'musicAndEffects';
-        const dspMode: DuckingMode = mixingType === MixingType.VOICEOVER ? 'voiceover'
-          : (mixingType === MixingType.RECAST ? 'recast' 
-          : (mixingType === MixingType.DUBBING || mixingType === MixingType.REDUB ? 'dubbing' : 'custom'));
+        const dspMode: DuckingMode = mixingType === MixingType.RECAST ? 'recast' 
+          : (mixingType === MixingType.DUBBING || mixingType === MixingType.REDUB ? 'dubbing' : 'custom');
 
         const dspConfig: DspSidechainConfig = {
           mode: dspMode,

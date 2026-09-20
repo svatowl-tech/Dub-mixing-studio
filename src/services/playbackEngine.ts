@@ -120,6 +120,7 @@ export class PlaybackEngine {
   private referenceGain: GainNode | null = null;
   private dubbingGain: GainNode | null = null;
   private dubbingDelay: DelayNode | null = null;
+  private masterGain: GainNode | null = null;
   private boundVideoElement: HTMLMediaElement | null = null;
   private boundReferenceElement: HTMLMediaElement | null = null;
   private audioOffsetMs = 0; 
@@ -414,17 +415,22 @@ export class PlaybackEngine {
         }
       }
 
-      // Initialize Dubbing Bus
+      // Initialize Master Bus (Мастер-выход)
+      this.masterGain = this.audioContext.createGain();
+      this.masterGain.gain.value = 1.0;
+      this.masterGain.connect(this.audioContext.destination);
+
+      // Initialize Dubbing Bus (Мастер-шина вокала)
       this.dubbingGain = this.audioContext.createGain();
       this.dubbingDelay = this.audioContext.createDelay(4.0); // Allow up to 4s compensation
       this.dubbingGain.connect(this.dubbingDelay);
-      this.dubbingDelay.connect(this.audioContext.destination);
+      this.dubbingDelay.connect(this.masterGain);
 
-      // Initialize Original/Video Bus
+      // Initialize Original/Video Bus (Шина оригинального звука)
       this.videoGain = this.audioContext.createGain();
       this.videoDelay = this.audioContext.createDelay(4.0);
       this.videoGain.connect(this.videoDelay);
-      this.videoDelay.connect(this.audioContext.destination);
+      this.videoDelay.connect(this.masterGain);
 
       // Reference track uses its own gain but same delay line as video
       this.referenceGain = this.audioContext.createGain();
@@ -432,6 +438,34 @@ export class PlaybackEngine {
       this.referenceGain.connect(this.videoDelay); 
     }
     return this.audioContext;
+  }
+
+  /**
+   * Sets the volume and mute status of the Vocal Master Bus (Мастер-шина вокала).
+   */
+  public setVocalBusVolume(volume: number, isMuted: boolean = false) {
+    if (this.dubbingGain && this.audioContext) {
+      const targetGain = isMuted ? 0 : Math.max(0, volume);
+      try {
+        this.dubbingGain.gain.setTargetAtTime(targetGain, this.audioContext.currentTime, 0.02);
+      } catch (_) {
+        this.dubbingGain.gain.value = targetGain;
+      }
+    }
+  }
+
+  /**
+   * Sets the volume of the Master Mix (Мастер-выход).
+   */
+  public setMasterVolume(volume: number) {
+    if (this.masterGain && this.audioContext) {
+      const targetGain = Math.max(0, volume);
+      try {
+        this.masterGain.gain.setTargetAtTime(targetGain, this.audioContext.currentTime, 0.02);
+      } catch (_) {
+        this.masterGain.gain.value = targetGain;
+      }
+    }
   }
 
   public getCurrentTime(): number {

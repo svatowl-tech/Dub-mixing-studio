@@ -2,8 +2,8 @@ import { MixingPreset } from '../types';
 import { DEFAULT_MIXING_PRESETS } from '../lib/defaultPresets';
 import { invoke as rawInvoke } from '@tauri-apps/api/core';
 
-const GLOBAL_SETTINGS_KEY = 'dubstudio_global_step_settings_v1';
-const GLOBAL_SETTINGS_FILE_NAME = 'dubstudio_global_step_settings.json';
+const GLOBAL_SETTINGS_KEY = 'dubstudio_global_step_settings_v3';
+const GLOBAL_SETTINGS_FILE_NAME = 'dubstudio_global_step_settings_v3.json';
 
 export interface GlobalStepSettingsPayload {
   version: number;
@@ -30,7 +30,7 @@ export class GlobalStepSettingsService {
       const raw = localStorage.getItem(GLOBAL_SETTINGS_KEY);
       if (raw) {
         const parsed: GlobalStepSettingsPayload = JSON.parse(raw);
-        if (parsed && Array.isArray(parsed.presets) && parsed.presets.length > 0) {
+        if (parsed && Array.isArray(parsed.presets) && parsed.presets.length > 0 && (parsed.version || 0) >= 3) {
           this.cachedSettings = parsed;
           return parsed;
         }
@@ -41,7 +41,7 @@ export class GlobalStepSettingsService {
 
     // Default payload from factory presets
     const defaultPayload: GlobalStepSettingsPayload = {
-      version: 1,
+      version: 3,
       updatedAt: Date.now(),
       presets: JSON.parse(JSON.stringify(DEFAULT_MIXING_PRESETS)),
       activePresetId: 'preset-voiceover'
@@ -59,7 +59,7 @@ export class GlobalStepSettingsService {
         const fileRes = await window.electronAPI.readTextFile(GLOBAL_SETTINGS_FILE_NAME);
         if (fileRes.success && fileRes.data) {
           const parsed: GlobalStepSettingsPayload = JSON.parse(fileRes.data);
-          if (parsed && Array.isArray(parsed.presets) && parsed.presets.length > 0) {
+          if (parsed && Array.isArray(parsed.presets) && parsed.presets.length > 0 && (parsed.version || 0) >= 2) {
             this.cachedSettings = parsed;
             try {
               localStorage.setItem(GLOBAL_SETTINGS_KEY, JSON.stringify(parsed));
@@ -81,7 +81,7 @@ export class GlobalStepSettingsService {
   public static async saveGlobalSettings(presets: MixingPreset[], activePresetId?: string): Promise<boolean> {
     try {
       const payload: GlobalStepSettingsPayload = {
-        version: 1,
+        version: 2,
         updatedAt: Date.now(),
         presets: JSON.parse(JSON.stringify(presets)),
         activePresetId: activePresetId || 'preset-voiceover'
@@ -132,6 +132,22 @@ export class GlobalStepSettingsService {
       if (!saved) return JSON.parse(JSON.stringify(factoryPreset));
 
       // Deep merge saved step configurations on top of factory presets
+      const isVoiceover = factoryPreset.type === 'voiceover';
+      const mergedPhase3 = { ...factoryPreset.phase3, ...saved.phase3 };
+      if (isVoiceover) {
+        mergedPhase3.gainMatching = { ...mergedPhase3.gainMatching, enabled: false, bypass: true };
+        mergedPhase3.ducking = { ...mergedPhase3.ducking, enabled: false, bypass: true };
+        mergedPhase3.autoFxAnalysis = { ...mergedPhase3.autoFxAnalysis, enabled: false, bypass: true };
+      }
+
+      let mergedPhase3Order = saved.phase3Order || factoryPreset.phase3Order;
+      if (isVoiceover && mergedPhase3Order) {
+        mergedPhase3Order = mergedPhase3Order.filter((k: string) => k !== 'gainMatching' && k !== 'ducking' && k !== 'autoFxAnalysis');
+        if (!mergedPhase3Order.includes('vocalBusProcessing')) {
+          mergedPhase3Order.push('vocalBusProcessing');
+        }
+      }
+
       return {
         ...factoryPreset,
         ...saved,
@@ -139,11 +155,11 @@ export class GlobalStepSettingsService {
         description: factoryPreset.description,
         phase1: { ...factoryPreset.phase1, ...saved.phase1 },
         phase2: { ...factoryPreset.phase2, ...saved.phase2 },
-        phase3: { ...factoryPreset.phase3, ...saved.phase3 },
+        phase3: mergedPhase3,
         phase4: { ...factoryPreset.phase4, ...saved.phase4 },
         phase1Order: saved.phase1Order || factoryPreset.phase1Order,
         phase2Order: saved.phase2Order || factoryPreset.phase2Order,
-        phase3Order: saved.phase3Order || factoryPreset.phase3Order,
+        phase3Order: mergedPhase3Order,
         phase4Order: saved.phase4Order || factoryPreset.phase4Order,
       };
     });

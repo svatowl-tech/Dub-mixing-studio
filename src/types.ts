@@ -110,9 +110,18 @@ export interface Project {
   uiState?: ProjectUIState;
   originalTrackSettings?: OriginalTrackSettings;
   masterVolume?: number;
+  vocalBusVolume?: number; // Уровень мастер-шины вокала (0..1.5, по умолчанию 1.0)
+  vocalBusMuted?: boolean; // Mute мастер-шины вокала
+  vocalBusSolo?: boolean; // Solo мастер-шины вокала
   activePresetId?: string; // Активный ID пресета сведения
   customPresets?: MixingPreset[]; // Пользовательские пресеты сведения
   mixingType?: MixingType;
+  pipelineState?: 'idle' | 'running' | 'paused_conflicts' | 'paused_loudness_balance' | 'completed';
+  pipelinePauseInfo?: {
+    type: 'conflicts' | 'loudness_balance';
+    message: string;
+    conflictCount?: number;
+  };
 }
 
 export interface AudioTrack {

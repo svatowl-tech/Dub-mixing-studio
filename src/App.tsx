@@ -2970,6 +2970,15 @@ export default function App() {
                   onOpenProcessing={setProcessingTrackId}
                   onUpdateMasterVolume={(vol) => {
                     setProject(prev => prev ? { ...prev, masterVolume: vol } : prev);
+                    playbackEngine.setMasterVolume(vol);
+                  }}
+                  onUpdateVocalBusVolume={(vol) => {
+                    setProject(prev => prev ? { ...prev, vocalBusVolume: vol } : prev);
+                    playbackEngine.setVocalBusVolume(vol, project?.vocalBusMuted);
+                  }}
+                  onUpdateVocalBusMuted={(muted) => {
+                    setProject(prev => prev ? { ...prev, vocalBusMuted: muted } : prev);
+                    playbackEngine.setVocalBusVolume(project?.vocalBusVolume ?? 1.0, muted);
                   }}
                   currentTimeRef={currentTimeRef}
                 />

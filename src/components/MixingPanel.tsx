@@ -42,7 +42,9 @@ import {
   Download,
   ShieldAlert,
   ShieldCheck,
-  Copy
+  Copy,
+  Headphones,
+  Pause
 } from 'lucide-react';
 import { 
   Project, 
@@ -75,7 +77,8 @@ import {
   DEFAULT_PHASE1_ORDER,
   DEFAULT_PHASE2_ORDER,
   DEFAULT_PHASE3_ORDER,
-  DEFAULT_PHASE4_ORDER
+  DEFAULT_PHASE4_ORDER,
+  VOICEOVER_PHASE3_ORDER
 } from '../lib/defaultPresets';
 import { cn, getGlobalAudioSettings, invalidateFileUrl, createPrefixedAudioPath } from '../lib/utils';
 import { AudioSeparatorService } from '../services/audioSeparatorService';
@@ -296,6 +299,11 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   };
 
   const handleRunGainMatchingStep = async (notify = true) => {
+    const isVoiceover = (project?.mixingType || activePreset.type) === MixingType.VOICEOVER;
+    if (isVoiceover) {
+      if (notify) showToast('В закадре выравнивание громкости реплик и фоновых звуков отключено.');
+      return;
+    }
     if (!project || !project.tracks || project.tracks.length === 0) {
       if (notify) showToast('В проекте нет дорожек для выравнивания');
       return;
@@ -322,6 +330,11 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   };
 
   const handleRunDuckingStep = async (notify = true) => {
+    const isVoiceover = (project?.mixingType || activePreset.type) === MixingType.VOICEOVER;
+    if (isVoiceover) {
+      if (notify) showToast('В закадре автодакинг фонового звука отключен.');
+      return;
+    }
     if (!project || !project.tracks || project.tracks.length === 0) {
       if (notify) showToast('В проекте нет дорожек для автодакинга');
       return;
@@ -406,50 +419,75 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       showToast('В проекте нет дорожек для сведения');
       return;
     }
+    const isVoiceover = (project?.mixingType || activePreset.type) === MixingType.VOICEOVER;
     setIsExecutingPhase3Step('all');
     try {
-      showToast('Запуск полного сведения (Этап 3)...');
       let currentTracks = project.tracks;
       const allLogs: MixingAuditEntry[] = [];
 
-      // Step 1: Gain matching
-      const gmRes = await MixingService.matchLoudnessBySubtitles(
-        currentTracks,
-        project.subtitles || [],
-        activePreset.phase3.gainMatching
-      );
-      currentTracks = gmRes.updatedTracks;
-      allLogs.push(...gmRes.logs);
+      if (isVoiceover) {
+        showToast('Запуск сведения для закадра (мастер-шина вокала)...');
+        // В закадре выравнивание громкости реплик, фоновые звуки и автодакинг отключены!
+        const busRes = await MixingService.applyMasterVocalBusChain(
+          currentTracks,
+          activePreset.phase3.vocalBusProcessing
+        );
+        currentTracks = busRes.updatedTracks;
+        allLogs.push(...busRes.logs);
+        addAuditLogs(allLogs);
+        onUpdateProject({ tracks: currentTracks });
+        playbackEngine.updateTracks(currentTracks).catch(console.error);
+        showToast('Этап 3: Мастер-шина вокала для закадра успешно применена!');
+        return;
+      }
 
-      // Step 2: Auto-ducking
-      const duckRes = await MixingService.applyAutoDucking(
-        currentTracks,
-        project.mixingType || MixingType.DUBBING,
-        activePreset.phase3.ducking
-      );
-      currentTracks = duckRes.updatedTracks;
-      allLogs.push(...duckRes.logs);
+      showToast('Запуск полного сведения (Этап 3)...');
+      // Step 1: Gain matching (только дубляж / рекаст)
+      if (activePreset.phase3.gainMatching?.enabled && !activePreset.phase3.gainMatching?.bypass) {
+        const gmRes = await MixingService.matchLoudnessBySubtitles(
+          currentTracks,
+          project.subtitles || [],
+          activePreset.phase3.gainMatching
+        );
+        currentTracks = gmRes.updatedTracks;
+        allLogs.push(...gmRes.logs);
+      }
 
-      // Step 3: Auto-FX
-      const fxRes = await MixingService.detectAndApplyOriginalEffects(
-        currentTracks,
-        activePreset.phase3.autoFxAnalysis
-      );
-      currentTracks = fxRes.updatedTracks;
-      allLogs.push(...fxRes.logs);
+      // Step 2: Auto-ducking (только дубляж / рекаст)
+      if (activePreset.phase3.ducking?.enabled && !activePreset.phase3.ducking?.bypass) {
+        const duckRes = await MixingService.applyAutoDucking(
+          currentTracks,
+          project.mixingType || MixingType.DUBBING,
+          activePreset.phase3.ducking
+        );
+        currentTracks = duckRes.updatedTracks;
+        allLogs.push(...duckRes.logs);
+      }
+
+      // Step 3: Auto-FX (только дубляж / рекаст)
+      if (activePreset.phase3.autoFxAnalysis?.enabled && !activePreset.phase3.autoFxAnalysis?.bypass) {
+        const fxRes = await MixingService.detectAndApplyOriginalEffects(
+          currentTracks,
+          activePreset.phase3.autoFxAnalysis
+        );
+        currentTracks = fxRes.updatedTracks;
+        allLogs.push(...fxRes.logs);
+      }
 
       // Step 4: Master Vocal Bus
-      const busRes = await MixingService.applyMasterVocalBusChain(
-        currentTracks,
-        activePreset.phase3.vocalBusProcessing
-      );
-      currentTracks = busRes.updatedTracks;
-      allLogs.push(...busRes.logs);
+      if (activePreset.phase3.vocalBusProcessing?.enabled && !activePreset.phase3.vocalBusProcessing?.bypass) {
+        const busRes = await MixingService.applyMasterVocalBusChain(
+          currentTracks,
+          activePreset.phase3.vocalBusProcessing
+        );
+        currentTracks = busRes.updatedTracks;
+        allLogs.push(...busRes.logs);
+      }
 
       addAuditLogs(allLogs);
       onUpdateProject({ tracks: currentTracks });
       playbackEngine.updateTracks(currentTracks).catch(console.error);
-      showToast('Этап 3: Все 4 шага сведения успешно применены к проекту!');
+      showToast('Этап 3: Сведение успешно применено к проекту!');
     } catch (e: any) {
       console.error(e);
       showToast(`Ошибка сведения: ${e.message}`);
@@ -505,7 +543,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       showToast('В проекте нет дорожек для мастеринга');
       return;
     }
-    const res = FinalRenderService.applyMasteringLimiter(project.tracks, activePreset.phase4);
+    const res = FinalRenderService.applyMasteringLimiter(project.tracks, activePreset.phase4, project.vocalBusVolume ?? 1.0);
     onUpdateProject({ tracks: res.updatedTracks });
     playbackEngine.updateTracks(res.updatedTracks).catch(console.error);
     addAuditLogs(res.logs);
@@ -2790,7 +2828,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         }
 
         // 2.2 Выравнивание фраз по оригиналу и субтитрам
-        if (!activePreset.phase2.smartAlign?.bypass) {
+        if (activePreset.phase2.smartAlign?.enabled && !activePreset.phase2.smartAlign?.bypass) {
           setProcessingStep('Этап 2: Синхронизация старта фраз с оригинальным голосом и субтитрами...');
           setIsAligningPhrases(true);
           const originalTrack = TimingAlignmentService.findOriginalVoiceTrack(currentTracks);
@@ -2821,92 +2859,263 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           playbackEngine.updateTracks(currentTracks).catch(console.error);
           await new Promise(r => setTimeout(r, 300));
         }
+
+        // 2.3 Детекция коллизий и наездов дорожек друг на друга (Conflict Detection)
+        setProcessingStep('Этап 2: Детекция наездов и коллизий реплик...');
+        const origTrack = TimingAlignmentService.findOriginalVoiceTrack(currentTracks);
+        const issues = TimingAlignmentService.validateAllTracksTiming(
+          currentTracks,
+          origTrack,
+          project.subtitles || [],
+          activePreset.type,
+          activePreset.phase2
+        );
+        const overlapIssues = issues.filter(i => i.type === 'overlap');
+
+        if (overlapIssues.length > 0) {
+          // Размечаем наезды на сегментах дорожек для яркого визуального выделения на таймлайне
+          const overlapSegIds = new Set(overlapIssues.map(i => i.segmentId).filter(Boolean));
+          currentTracks = currentTracks.map(t => ({
+            ...t,
+            segments: t.segments.map(s => ({
+              ...s,
+              timingWarning: overlapSegIds.has(s.id) ? 'overlap' : (s.timingWarning === 'overlap' ? undefined : s.timingWarning),
+              timingWarningDetail: overlapIssues.find(i => i.segmentId === s.id)?.description
+            }))
+          }));
+
+          onUpdateProject({ 
+            tracks: currentTracks,
+            pipelineState: 'paused_conflicts',
+            pipelinePauseInfo: {
+              type: 'conflicts',
+              message: `Обнаружены наезды реплик друг на друга (${overlapIssues.length} шт.). Конвейер приостановлен для ручной правки на таймлайне.`,
+              conflictCount: overlapIssues.length
+            }
+          });
+          playbackEngine.updateTracks(currentTracks).catch(console.error);
+          setTimingIssues(issues);
+          setIsProcessing(false);
+          setActiveTab('timing');
+          showToast(`⚠️ Обнаружены наезды реплик (${overlapIssues.length} шт.). Конвейер приостановлен для ручной правки на таймлайне.`);
+          return; // ПАУЗА 1: Ждем правок пользователя
+        }
+
+        setTimingIssues(issues);
       }
 
-      // ==========================================
-      // СТАДИЯ 3: СВЕДЕНИЕ (Mixing & Effects)
-      // ==========================================
-      setActiveTab('mixing');
-      setProcessingProgress(55);
-      setProcessingStep('Этап 3/4: Сведение баланса, автодакинг, анализ эффектов и вокальная шина...');
-      await new Promise(r => setTimeout(r, 500));
+      // Если наездов нет — сразу переходим к этапу 3
+      await runPhase3Mixing(currentTracks);
 
+    } catch (err: any) {
+      console.error('Pipeline error:', err);
+      showToast(`Ошибка в конвейере сведения: ${err.message || err}`);
+      setIsProcessing(false);
+      setIsExecutingPhase3Step(null);
+      setIsSplittingSilence(false);
+      setIsAligningPhrases(false);
+    }
+  };
+
+  // Автоматическое устранение наездов (быстрый фикс при паузе)
+  const handleAutoFixOverlaps = () => {
+    if (!project || !project.tracks) return;
+    const origTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
+    const issues = TimingAlignmentService.validateAllTracksTiming(
+      project.tracks,
+      origTrack,
+      project.subtitles || [],
+      activePreset.type,
+      activePreset.phase2
+    );
+    const overlapIssues = issues.filter(i => i.type === 'overlap');
+    if (overlapIssues.length === 0) {
+      showToast('Наезды не обнаружены');
+      return;
+    }
+    const fixedTracks = TimingAlignmentService.autoFixAllIssues(overlapIssues, project.tracks);
+    const cleanTracks = fixedTracks.map(t => ({
+      ...t,
+      segments: t.segments.map(s => ({
+        ...s,
+        timingWarning: s.timingWarning === 'overlap' ? undefined : s.timingWarning
+      }))
+    }));
+    onUpdateProject({ 
+      tracks: cleanTracks,
+      pipelinePauseInfo: {
+        type: 'conflicts',
+        message: 'Наезды устранены автоматически. Вы можете продолжить конвейер.',
+        conflictCount: 0
+      }
+    });
+    playbackEngine.updateTracks(cleanTracks).catch(console.error);
+    setTimingIssues([]);
+    showToast('⚡ Все наезды успешно раздвинуты автоматически!');
+  };
+
+  // Возобновление конвейера после ручной правки наездов (Переход к Этапу 3)
+  const handleResumeFromConflicts = async () => {
+    if (!project || !project.tracks || project.tracks.length === 0) return;
+    setIsProcessing(true);
+    setProcessingStep('Проверка тайминга после ручной правки...');
+
+    const origTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
+    const issues = TimingAlignmentService.validateAllTracksTiming(
+      project.tracks,
+      origTrack,
+      project.subtitles || [],
+      activePreset.type,
+      activePreset.phase2
+    );
+    const overlapIssues = issues.filter(i => i.type === 'overlap');
+    const overlapSegIds = new Set(overlapIssues.map(i => i.segmentId).filter(Boolean));
+
+    const updatedTracks = project.tracks.map(t => ({
+      ...t,
+      segments: t.segments.map(s => ({
+        ...s,
+        timingWarning: overlapSegIds.has(s.id) ? 'overlap' : (s.timingWarning === 'overlap' ? undefined : s.timingWarning),
+        timingWarningDetail: overlapIssues.find(i => i.segmentId === s.id)?.description
+      }))
+    }));
+
+    onUpdateProject({ tracks: updatedTracks });
+    playbackEngine.updateTracks(updatedTracks).catch(console.error);
+    setTimingIssues(issues);
+
+    if (overlapIssues.length > 0) {
+      showToast(`Осталось наездов: ${overlapIssues.length}. Переходим к этапу сведения.`);
+    } else {
+      showToast('Все наезды устранены! Переходим к сведению.');
+    }
+
+    await runPhase3Mixing(updatedTracks);
+  };
+
+  // Выполнение Стадии 3: Сведение и эффекты вокальной мастер-шины
+  const runPhase3Mixing = async (tracksToMix: AudioTrack[]) => {
+    const isVoiceover = (project?.mixingType || activePreset.type) === MixingType.VOICEOVER;
+    setIsProcessing(true);
+    setActiveTab('mixing');
+    setProcessingProgress(55);
+    setProcessingStep(isVoiceover
+      ? 'Этап 3/4: Обработка вокальной мастер-шины (эквалайзер, de-esser, сатурация, компрессор)...'
+      : 'Этап 3/4: Сведение баланса, автодакинг, анализ эффектов и вокальная шина...');
+    await new Promise(r => setTimeout(r, 500));
+
+    let currentTracks = tracksToMix;
+
+    try {
       if (activePreset.phase3.enabled) {
-        // 3.1 Gain Matching
-        if (!activePreset.phase3.gainMatching?.bypass) {
-          setProcessingStep('Этап 3: Выравнивание громкости смысловых фраз и звуков физики...');
-          setIsExecutingPhase3Step('gainMatching');
-          const res = await MixingService.matchLoudnessBySubtitles(
-            currentTracks,
-            project.subtitles || [],
-            activePreset.phase3.gainMatching
-          );
-          currentTracks = res.updatedTracks;
-          addAuditLogs(res.logs);
-          onUpdateProject({ tracks: currentTracks });
-          playbackEngine.updateTracks(currentTracks).catch(console.error);
-          setIsExecutingPhase3Step(null);
-          await new Promise(r => setTimeout(r, 300));
+        // В закадре выравнивание громкости реплик, фоновых звуков и автодакинг НЕ выполняются!
+        if (!isVoiceover) {
+          // 3.1 Gain Matching (только для дубляжа / рекаста)
+          if (activePreset.phase3.gainMatching?.enabled && !activePreset.phase3.gainMatching?.bypass) {
+            setProcessingStep('Этап 3: Выравнивание громкости смысловых фраз и звуков физики...');
+            setIsExecutingPhase3Step('gainMatching');
+            const res = await MixingService.matchLoudnessBySubtitles(
+              currentTracks,
+              project?.subtitles || [],
+              activePreset.phase3.gainMatching
+            );
+            currentTracks = res.updatedTracks;
+            addAuditLogs(res.logs);
+            onUpdateProject({ tracks: currentTracks });
+            playbackEngine.updateTracks(currentTracks).catch(console.error);
+            setIsExecutingPhase3Step(null);
+            await new Promise(r => setTimeout(r, 300));
+          }
+
+          // 3.2 Ducking (только для дубляжа / рекаста)
+          if (activePreset.phase3.ducking?.enabled && !activePreset.phase3.ducking?.bypass) {
+            setProcessingStep('Этап 3: Автодакинг оригинального голоса (опенинги/эндинги сохранены)...');
+            setIsExecutingPhase3Step('ducking');
+            const res = await MixingService.applyAutoDucking(
+              currentTracks,
+              project?.mixingType || MixingType.DUBBING,
+              activePreset.phase3.ducking
+            );
+            currentTracks = res.updatedTracks;
+            addAuditLogs(res.logs);
+            onUpdateProject({ tracks: currentTracks });
+            playbackEngine.updateTracks(currentTracks).catch(console.error);
+            setIsExecutingPhase3Step(null);
+            await new Promise(r => setTimeout(r, 300));
+          }
+
+          // 3.3 Auto FX Analysis (только для дубляжа / рекаста)
+          if (activePreset.phase3.autoFxAnalysis?.enabled && !activePreset.phase3.autoFxAnalysis?.bypass) {
+            setProcessingStep('Этап 3: Анализ пространственных эффектов и фильтров оригинала...');
+            setIsExecutingPhase3Step('autoFxAnalysis');
+            const res = await MixingService.detectAndApplyOriginalEffects(
+              currentTracks,
+              activePreset.phase3.autoFxAnalysis
+            );
+            currentTracks = res.updatedTracks;
+            addAuditLogs(res.logs);
+            onUpdateProject({ tracks: currentTracks });
+            playbackEngine.updateTracks(currentTracks).catch(console.error);
+            setIsExecutingPhase3Step(null);
+            await new Promise(r => setTimeout(r, 300));
+          }
         }
 
-        // 3.2 Ducking
-        if (!activePreset.phase3.ducking?.bypass) {
-          setProcessingStep('Этап 3: Автодакинг оригинального голоса (опенинги/эндинги сохранены)...');
-          setIsExecutingPhase3Step('ducking');
-          const res = await MixingService.applyAutoDucking(
-            currentTracks,
-            project.mixingType || MixingType.DUBBING,
-            activePreset.phase3.ducking
-          );
-          currentTracks = res.updatedTracks;
-          addAuditLogs(res.logs);
-          onUpdateProject({ tracks: currentTracks });
-          playbackEngine.updateTracks(currentTracks).catch(console.error);
-          setIsExecutingPhase3Step(null);
-          await new Promise(r => setTimeout(r, 300));
-        }
-
-        // 3.3 Auto FX Analysis
-        if (!activePreset.phase3.autoFxAnalysis?.bypass) {
-          setProcessingStep('Этап 3: Анализ пространственных эффектов и фильтров оригинала...');
-          setIsExecutingPhase3Step('autoFxAnalysis');
-          const res = await MixingService.detectAndApplyOriginalEffects(
-            currentTracks,
-            activePreset.phase3.autoFxAnalysis
-          );
-          currentTracks = res.updatedTracks;
-          addAuditLogs(res.logs);
-          onUpdateProject({ tracks: currentTracks });
-          playbackEngine.updateTracks(currentTracks).catch(console.error);
-          setIsExecutingPhase3Step(null);
-          await new Promise(r => setTimeout(r, 300));
-        }
-
-        // 3.4 Master Vocal Bus Chain
-        if (!activePreset.phase3.vocalBusProcessing?.bypass) {
+        // 3.4 Master Vocal Bus Chain (выполняется всегда, включая закадр)
+        if (activePreset.phase3.vocalBusProcessing?.enabled && !activePreset.phase3.vocalBusProcessing?.bypass) {
           setProcessingStep('Этап 3: Мастер-шина вокала (эквалайзер, de-esser, сатурация, компрессор, лимитер)...');
           setIsExecutingPhase3Step('vocalBusProcessing');
           const res = await MixingService.applyMasterVocalBusChain(
             currentTracks,
             activePreset.phase3.vocalBusProcessing
           );
+          currentTracks = res.updatedTracks;
           addAuditLogs(res.logs);
+          onUpdateProject({ tracks: currentTracks });
+          playbackEngine.updateTracks(currentTracks).catch(console.error);
           setIsExecutingPhase3Step(null);
           await new Promise(r => setTimeout(r, 300));
         }
       }
 
       // ==========================================
-      // СТАДИЯ 4: ФИНАЛ И РЕНДЕР (Final Mix & Render)
+      // ПАУЗА 2: КОНТРОЛЬ БАЛАНСА ГРОМКОСТИ ПЕРЕД НАЛОЖЕНИЕМ НА ВИДЕО
       // ==========================================
+      onUpdateProject({
+        tracks: currentTracks,
+        pipelineState: 'paused_loudness_balance',
+        pipelinePauseInfo: {
+          type: 'loudness_balance',
+          message: 'Сведение завершено. Прослушайте микс от начала, выровняйте общую громкость шиной вокала или настройте отдельные дорожки перед наложением на видео.'
+        }
+      });
+      setIsProcessing(false);
       setActiveTab('render');
-      setProcessingProgress(78);
-      setProcessingStep('Этап 4/4: Анализ качества (QA), мастеринг под оригинал и финальный рендер...');
-      await new Promise(r => setTimeout(r, 500));
+      showToast('🎧 Сведение завершено! Конвейер приостановлен для контроля громкости реплик к дорожке оригинал.');
+
+    } catch (err: any) {
+      console.error('Phase 3 error:', err);
+      showToast(`Ошибка на этапе сведения: ${err.message || err}`);
+      setIsProcessing(false);
+      setIsExecutingPhase3Step(null);
+    }
+  };
+
+  // Возобновление конвейера: Этап 4 (Мастеринг и финальное наложение на видео)
+  const handleResumeToFinalRender = async () => {
+    if (!project || !project.tracks || project.tracks.length === 0) return;
+    setIsProcessing(true);
+    setActiveTab('render');
+    setProcessingProgress(75);
+    setProcessingStep('Этап 4/4: Анализ качества (QA), мастеринг под оригинал и финальный рендер...');
+    await new Promise(r => setTimeout(r, 500));
+
+    try {
+      let currentTracks = project.tracks;
 
       // 4.1 QA Control
       const updatedProject = { ...project, tracks: currentTracks };
-      if (activePreset.phase4.enabled && !activePreset.phase4.qualityControl?.bypass) {
+      if (activePreset.phase4.enabled && activePreset.phase4.qualityControl?.enabled && !activePreset.phase4.qualityControl?.bypass) {
         setProcessingStep('Этап 4: Контроль качества (QA): поиск клиппинга, наездов и пропусков...');
         const qaRes = FinalRenderService.runQualityControlAnalysis(updatedProject, activePreset.phase4);
         setQaIssues(qaRes.issues);
@@ -2916,10 +3125,10 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         await new Promise(r => setTimeout(r, 300));
       }
 
-      // 4.2 Mastering Limiter
-      if (activePreset.phase4.enabled && !activePreset.phase4.masteringLimiter?.bypass) {
+      // 4.2 Mastering Limiter (с учетом выставленной пользователем вокальной шины vocalBusVolume)
+      if (activePreset.phase4.enabled && activePreset.phase4.masteringLimiter?.enabled && !activePreset.phase4.masteringLimiter?.bypass) {
         setProcessingStep('Этап 4: Мастеринг: подгонка микса под референсный уровень оригинала (True-Peak Limiter)...');
-        const masterRes = FinalRenderService.applyMasteringLimiter(currentTracks, activePreset.phase4);
+        const masterRes = FinalRenderService.applyMasteringLimiter(currentTracks, activePreset.phase4, project?.vocalBusVolume ?? 1.0);
         currentTracks = masterRes.updatedTracks;
         addAuditLogs(masterRes.logs);
         onUpdateProject({ tracks: currentTracks });
@@ -2929,8 +3138,8 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
       // 4.3 Финальный рендер и сборка медиа
       setProcessingProgress(90);
-      setProcessingStep('Этап 4: Генерация аудиостэмов, видеоряда и субтитров надписей...');
-      
+      setProcessingStep('Этап 4: Генерация аудиостэмов, видеоряда и сшивание дорожек в видео...');
+
       const finalProjectToRender = { ...project, tracks: currentTracks };
       const renderRes = await FinalRenderService.executeFinalRender(
         finalProjectToRender,
@@ -2947,7 +3156,12 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       setProcessingProgress(100);
       setProcessingStep('Конвейер сведения успешно завершен!');
       showToast('🎉 Конвейер сведения успешно завершил все 4 этапа! Серия готова к просмотру и экспорту.');
-      
+
+      onUpdateProject({
+        pipelineState: 'completed',
+        pipelinePauseInfo: undefined
+      });
+
       addAuditLogs([{
         id: `pipeline-done-${Date.now()}`,
         timestamp: Date.now(),
@@ -2959,15 +3173,36 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       }]);
 
     } catch (err: any) {
-      console.error('Pipeline error:', err);
-      showToast(`Ошибка в конвейере сведения: ${err.message || err}`);
+      console.error('Pipeline final render error:', err);
+      showToast(`Ошибка в финальном рендере: ${err.message || err}`);
     } finally {
       setIsProcessing(false);
       setIsExecutingPhase3Step(null);
-      setIsSplittingSilence(false);
-      setIsAligningPhrases(false);
     }
   };
+
+  // Sync timeline banner buttons with pipeline handlers
+  useEffect(() => {
+    const handleResumeConflictsEvt = () => {
+      handleResumeFromConflicts();
+    };
+    const handleAutoFixEvt = () => {
+      handleAutoFixOverlaps();
+    };
+    const handleResumeRenderEvt = () => {
+      handleResumeToFinalRender();
+    };
+
+    window.addEventListener('pipeline_resume_conflicts', handleResumeConflictsEvt);
+    window.addEventListener('pipeline_autofix_overlaps', handleAutoFixEvt);
+    window.addEventListener('pipeline_resume_render', handleResumeRenderEvt);
+
+    return () => {
+      window.removeEventListener('pipeline_resume_conflicts', handleResumeConflictsEvt);
+      window.removeEventListener('pipeline_autofix_overlaps', handleAutoFixEvt);
+      window.removeEventListener('pipeline_resume_render', handleResumeRenderEvt);
+    };
+  }, [project, activePreset]);
 
   // Safe updates for nested configurations
   const updatePhase1 = (updates: Partial<PrepProcessingConfig>) => {
@@ -3358,11 +3593,129 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                   />
                 </div>
               </div>
+            ) : project?.pipelineState === 'paused_conflicts' ? (
+              <div className="w-full bg-rose-950/40 border border-rose-500/40 rounded-xl p-3 flex flex-col gap-2.5 shadow-lg animate-in fade-in">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 flex-shrink-0 mt-0.5 animate-pulse" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[11px] font-black uppercase text-rose-200 tracking-wider flex items-center justify-between">
+                      <span>Конвейер на паузе: Наезды реплик</span>
+                      <span className="text-[10px] text-rose-400 font-mono font-bold">
+                        {project.pipelinePauseInfo?.conflictCount ?? timingIssues.filter(i => i.type === 'overlap').length} наездов
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-zinc-300 mt-0.5 leading-snug">
+                      Реплики подсвечены красным на таймлайне. Поправьте нарезку/сдвиг вручную или нажмите авто-исправление.
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 pt-0.5">
+                  <button 
+                    onClick={handleResumeFromConflicts}
+                    className="flex-1 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white rounded-lg py-2 px-2.5 text-[11px] font-black transition-all flex items-center justify-center gap-1.5 shadow-md shadow-emerald-900/30 cursor-pointer"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-white" />
+                    <span>Продолжить конвейер</span>
+                  </button>
+                  <button 
+                    onClick={handleAutoFixOverlaps}
+                    className="bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-amber-300 border border-amber-500/30 rounded-lg py-2 px-2.5 text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer"
+                    title="Автоматически раздвинуть наезды"
+                  >
+                    <Wand2 className="w-3 h-3" />
+                    <span>Авто-фикс</span>
+                  </button>
+                  {timingIssues.some(i => i.type === 'overlap') && (
+                    <button 
+                      onClick={() => {
+                        const firstOverlap = timingIssues.find(i => i.type === 'overlap');
+                        if (firstOverlap) handleSeek(firstOverlap.timestamp);
+                      }}
+                      className="bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-200 border border-white/10 rounded-lg py-2 px-2 text-[10px] font-bold transition-all cursor-pointer"
+                      title="Перейти к первому наезду"
+                    >
+                      <Search className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : project?.pipelineState === 'paused_loudness_balance' ? (
+              <div className="w-full bg-indigo-950/40 border border-indigo-500/40 rounded-xl p-3 flex flex-col gap-2.5 shadow-lg animate-in fade-in">
+                <div className="flex items-start gap-2">
+                  <Headphones className="w-4 h-4 text-indigo-400 flex-shrink-0 mt-0.5 animate-pulse" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[11px] font-black uppercase text-indigo-200 tracking-wider">
+                      Конвейер на паузе: Контроль баланса
+                    </div>
+                    <div className="text-[10px] text-zinc-300 mt-0.5 leading-snug">
+                      Эффекты применены. Прослушайте с 0:00 и подстройте общую шину вокала перед финальным мастерингом к оригиналу.
+                    </div>
+                  </div>
+                </div>
+
+                {/* Плеер предпрослушивания */}
+                <div className="flex items-center gap-1.5 bg-zinc-950/80 p-1.5 rounded-lg border border-white/5">
+                  <button 
+                    onClick={() => {
+                      handleSeek(0);
+                      playbackEngine.seek(0, project.tracks);
+                      playbackEngine.play(project.tracks, 0);
+                    }}
+                    className="flex-1 bg-indigo-600/80 hover:bg-indigo-500 text-white rounded py-1.5 px-2 text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Слушать с 0:00</span>
+                  </button>
+                  <button 
+                    onClick={() => playbackEngine.stop()}
+                    className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded py-1.5 px-2.5 text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer"
+                  >
+                    <Pause className="w-3 h-3" />
+                    <span>Стоп</span>
+                  </button>
+                </div>
+
+                {/* Ручная регулировка вокальной шины */}
+                <div className="p-2 rounded bg-zinc-950/90 border border-indigo-500/30 space-y-1">
+                  <div className="flex items-center justify-between text-[9px] font-mono">
+                    <span className="text-zinc-300 font-bold flex items-center gap-1">
+                      <Volume2 className="w-3 h-3 text-indigo-400" />
+                      Мастер-шина вокала:
+                    </span>
+                    <span className="text-indigo-300 font-bold">
+                      {Math.round((project?.vocalBusVolume ?? 1.0) * 100)}%
+                      <span className="text-zinc-500 ml-1">
+                        ({((project?.vocalBusVolume ?? 1.0) >= 1.0 ? '+' : '') + (20 * Math.log10(Math.max(0.001, project?.vocalBusVolume ?? 1.0))).toFixed(1)} dB)
+                      </span>
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min={0} max={1.5} step={0.01}
+                    value={project?.vocalBusVolume ?? 1.0}
+                    onChange={(e) => {
+                      const vol = parseFloat(e.target.value);
+                      onUpdateProject({ vocalBusVolume: vol });
+                      playbackEngine.setVocalBusVolume(vol, project?.vocalBusMuted);
+                    }}
+                    className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                    title="Ручное выравнивание совокупной громкости всех реплик перед мастерингом к оригиналу"
+                  />
+                </div>
+
+                <button 
+                  onClick={handleResumeToFinalRender}
+                  className="w-full bg-gradient-to-r from-indigo-600 to-emerald-600 hover:from-indigo-500 hover:to-emerald-500 active:scale-[0.98] text-white rounded-xl py-2 px-3 text-[11px] font-black transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20 uppercase tracking-wider cursor-pointer"
+                >
+                  <Play className="w-3.5 h-3.5 fill-white" />
+                  <span>Продолжить конвейер (Мастеринг и видео)</span>
+                </button>
+              </div>
             ) : (
               <button 
                 onClick={handleStartMixing}
                 disabled={!project}
-                className="w-full bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] disabled:opacity-50 text-white rounded-xl py-2.5 px-4 text-xs font-black transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20 uppercase tracking-wider"
+                className="w-full bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] disabled:opacity-50 text-white rounded-xl py-2.5 px-4 text-xs font-black transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20 uppercase tracking-wider cursor-pointer"
               >
                 <Play className="w-4 h-4 fill-white" />
                 Запустить конвейер сведения
@@ -5586,72 +5939,98 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                   <div className="space-y-4">
                     {/* Кнопка добавления VST-шага для Этапа 3 */}
                     {/* Панель быстрых действий и добавления VST для Этапа 3 */}
-                    <div className="flex flex-wrap items-center justify-between gap-2 bg-gradient-to-r from-indigo-950/40 via-zinc-900/60 to-zinc-900/40 p-3 rounded-xl border border-indigo-500/20 shadow-lg">
-                      <div className="flex flex-col">
-                        <span className="text-[11px] font-black uppercase tracking-wider text-indigo-300 flex items-center gap-1.5">
-                          <Flame className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-                          Сведение 3-го этапа (Audition Standard)
-                        </span>
-                        <span className="text-[9px] text-zinc-400">
-                          Реплики vs Физика (-10 dB) • Автодакинг (-15..-18 dB) • ИИ-эффекты • 8-слотовый Мастер-рэк
-                        </span>
-                      </div>
-                      
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setIsAuditLogOpen(true)}
-                          className="px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-zinc-200 hover:text-white rounded-lg text-[10px] font-bold flex items-center gap-1.5 transition-all shadow cursor-pointer active:scale-95"
-                          title="Открыть детальный журнал логов всех шагов сведения"
-                        >
-                          <FileText className="w-3.5 h-3.5 text-amber-400" />
-                          <span>Журнал аудита ({auditLogs.length})</span>
-                        </button>
+                    {(() => {
+                      const isVoiceover = (project?.mixingType || activePreset.type) === MixingType.VOICEOVER;
+                      return (
+                        <>
+                          <div className="flex flex-wrap items-center justify-between gap-2 bg-gradient-to-r from-indigo-950/40 via-zinc-900/60 to-zinc-900/40 p-3 rounded-xl border border-indigo-500/20 shadow-lg">
+                            <div className="flex flex-col">
+                              <span className="text-[11px] font-black uppercase tracking-wider text-indigo-300 flex items-center gap-1.5">
+                                <Flame className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+                                {isVoiceover ? 'Сведение 3-го этапа (Закадр: Вокальная мастер-шина)' : 'Сведение 3-го этапа (Audition Standard)'}
+                              </span>
+                              <span className="text-[9px] text-zinc-400">
+                                {isVoiceover 
+                                  ? 'В закадре выравнивание реплик, фоновые звуки и автодакинг отключены • Обработка только через мастер-шину вокала'
+                                  : 'Реплики vs Физика (-10 dB) • Автодакинг (-15..-18 dB) • ИИ-эффекты • 8-слотовый Мастер-рэк'}
+                              </span>
+                            </div>
+                            
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setIsAuditLogOpen(true)}
+                                className="px-2.5 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-white/10 text-zinc-200 hover:text-white rounded-lg text-[10px] font-bold flex items-center gap-1.5 transition-all shadow cursor-pointer active:scale-95"
+                                title="Открыть детальный журнал логов всех шагов сведения"
+                              >
+                                <FileText className="w-3.5 h-3.5 text-amber-400" />
+                                <span>Журнал аудита ({auditLogs.length})</span>
+                              </button>
 
-                        <button
-                          type="button"
-                          onClick={handleRunAllPhase3}
-                          disabled={isExecutingPhase3Step !== null}
-                          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 border border-indigo-400/30 text-white rounded-lg text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-lg shadow-indigo-600/30 cursor-pointer disabled:opacity-50"
-                        >
-                          <Wand2 className="w-3.5 h-3.5 text-indigo-200" />
-                          <span>Выполнить все шаги</span>
-                        </button>
+                              <button
+                                type="button"
+                                onClick={handleRunAllPhase3}
+                                disabled={isExecutingPhase3Step !== null}
+                                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 border border-indigo-400/30 text-white rounded-lg text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-lg shadow-indigo-600/30 cursor-pointer disabled:opacity-50"
+                              >
+                                <Wand2 className="w-3.5 h-3.5 text-indigo-200" />
+                                <span>{isVoiceover ? 'Применить мастер-шину' : 'Выполнить все шаги'}</span>
+                              </button>
 
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const vstId = 'vstStep_' + Date.now();
-                            const newVstStep = {
-                              id: vstId,
-                              name: `VST Цепочка #${(activePreset.phase3Order?.filter(k => k.startsWith('vstStep_')).length || 0) + 1}`,
-                              bypass: false,
-                              plugins: []
-                            };
-                            const updatedOrder = [...(activePreset.phase3Order || DEFAULT_PHASE3_ORDER), vstId];
-                            const updatedVstSteps = {
-                              ...(activePreset.phase3.vstSteps || {}),
-                              [vstId]: newVstStep
-                            };
-                            setActivePreset({
-                              ...activePreset,
-                              phase3Order: updatedOrder,
-                              phase3: {
-                                ...activePreset.phase3,
-                                vstSteps: updatedVstSteps
-                              }
-                            });
-                            showToast('VST-шаг добавлен! Вы можете перетащить его в любое место.');
-                          }}
-                          className="px-2 py-1.5 bg-zinc-800 hover:bg-zinc-750 active:scale-95 border border-white/10 text-zinc-300 hover:text-white rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer"
-                        >
-                          <Plus className="w-3 h-3 text-indigo-400" />
-                          <span>+ VST</span>
-                        </button>
-                      </div>
-                    </div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const vstId = 'vstStep_' + Date.now();
+                                  const newVstStep = {
+                                    id: vstId,
+                                    name: `VST Цепочка #${(activePreset.phase3Order?.filter(k => k.startsWith('vstStep_')).length || 0) + 1}`,
+                                    bypass: false,
+                                    plugins: []
+                                  };
+                                  const updatedOrder = [...(activePreset.phase3Order || (isVoiceover ? VOICEOVER_PHASE3_ORDER : DEFAULT_PHASE3_ORDER)), vstId];
+                                  const updatedVstSteps = {
+                                    ...(activePreset.phase3.vstSteps || {}),
+                                    [vstId]: newVstStep
+                                  };
+                                  setActivePreset({
+                                    ...activePreset,
+                                    phase3Order: updatedOrder,
+                                    phase3: {
+                                      ...activePreset.phase3,
+                                      vstSteps: updatedVstSteps
+                                    }
+                                  });
+                                  showToast('VST-шаг добавлен! Вы можете перетащить его в любое место.');
+                                }}
+                                className="px-2 py-1.5 bg-zinc-800 hover:bg-zinc-750 active:scale-95 border border-white/10 text-zinc-300 hover:text-white rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer"
+                              >
+                                <Plus className="w-3 h-3 text-indigo-400" />
+                                <span>+ VST</span>
+                              </button>
+                            </div>
+                          </div>
 
-                    {(activePreset.phase3Order || DEFAULT_PHASE3_ORDER).map((stepKey, index) => {
+                          {isVoiceover && (
+                            <div className="p-2.5 rounded-xl bg-indigo-950/30 border border-indigo-500/20 flex items-start gap-2.5 text-xs">
+                              <Sparkles className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
+                              <div className="space-y-0.5 text-[11px]">
+                                <div className="font-bold text-indigo-200">Специфика закадрового сведения</div>
+                                <div className="text-zinc-400 leading-relaxed text-[10px]">
+                                  В закадре выравнивание громкости реплик, фоновые звуки и автодакинг исключены. Реплики уже выровнены и очищены на этапе 1 (Volume Leveler / нормализация) и укладываются поверх оригинального звука через мастер-рэк вокала. Баланс громкости голосов к оригиналу контролируется перед финальным мастерингом.
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
+
+                    {(activePreset.phase3Order || ((project?.mixingType || activePreset.type) === MixingType.VOICEOVER ? VOICEOVER_PHASE3_ORDER : DEFAULT_PHASE3_ORDER))
+                      .filter(stepKey => {
+                        const isVoiceover = (project?.mixingType || activePreset.type) === MixingType.VOICEOVER;
+                        return !isVoiceover || (stepKey !== "gainMatching" && stepKey !== "ducking" && stepKey !== "autoFxAnalysis");
+                      })
+                      .map((stepKey, index) => {
                       let stepElement: React.ReactNode = null;
                       let stepName = "";
                       let stepIcon = <Tv className="w-3.5 h-3.5 text-indigo-400" />;
@@ -5897,6 +6276,30 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 </div>
                               </div>
                             )}
+
+                            {/* Ручная подстройка громкости шины вокала перед мастерингом */}
+                            <div className="p-2 rounded bg-zinc-950/70 border border-indigo-500/20 space-y-1">
+                              <div className="flex items-center justify-between text-[9px] font-mono">
+                                <span className="text-zinc-400">Громкость шины вокала:</span>
+                                <span className="text-indigo-300 font-bold">
+                                  {Math.round((project?.vocalBusVolume ?? 1.0) * 100)}%
+                                  <span className="text-zinc-500 ml-1">
+                                    ({((project?.vocalBusVolume ?? 1.0) >= 1.0 ? '+' : '') + (20 * Math.log10(Math.max(0.001, project?.vocalBusVolume ?? 1.0))).toFixed(1)} dB)
+                                  </span>
+                                </span>
+                              </div>
+                              <input 
+                                type="range" min={0} max={1.5} step={0.01}
+                                value={project?.vocalBusVolume ?? 1.0}
+                                onChange={(e) => {
+                                  const vol = parseFloat(e.target.value);
+                                  onUpdateProject({ vocalBusVolume: vol });
+                                  playbackEngine.setVocalBusVolume(vol, project?.vocalBusMuted);
+                                }}
+                                className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                                title="Ручное выравнивание совокупной громкости всех реплик перед мастерингом к оригиналу"
+                              />
+                            </div>
 
                             <div className="flex items-center gap-2 pt-1">
                               <button
