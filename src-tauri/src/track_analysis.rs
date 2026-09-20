@@ -606,7 +606,6 @@ pub fn analyze_voice_tracks(
                 let mut count_speech = 0usize;
                 let mut count_quiet = 0usize;
                 let mut count_noise = 0usize;
-                let mut count_silence = 0usize;
 
                 for f in &step_frames {
                     total_rms_lin += 10.0f32.powf(f.rms_db / 20.0);
@@ -618,7 +617,7 @@ pub fn analyze_voice_tracks(
                         WaveformClassification::Speech => count_speech += 1,
                         WaveformClassification::QuietFragment => count_quiet += 1,
                         WaveformClassification::Noise => count_noise += 1,
-                        WaveformClassification::Silence => count_silence += 1,
+                        WaveformClassification::Silence => {},
                     }
                 }
 
@@ -658,8 +657,8 @@ pub fn analyze_voice_tracks(
         }
 
         reports.push(TrackAnalysisReport {
-            track_id: track.id,
-            track_name: track.name,
+            track_id: track.id.clone(),
+            track_name: track.name.clone(),
             segments,
             spectral_state,
             analysis_timestamp: now,
