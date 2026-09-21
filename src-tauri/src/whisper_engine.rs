@@ -352,14 +352,14 @@ pub fn resolve_model_path(model_type_or_path: Option<&str>) -> Result<PathBuf, S
 
     if let Ok(appdata) = std::env::var("APPDATA") {
         search_paths.push(
-            PathBuf::from(appdata)
+            PathBuf::from(&appdata)
                 .join("com.dubmixingstudio.desktop")
                 .join("models")
                 .join("whisper")
                 .join(default_name),
         );
         search_paths.push(
-            PathBuf::from(appdata)
+            PathBuf::from(&appdata)
                 .join("com.dubmixingstudio.desktop")
                 .join("models")
                 .join(default_name),

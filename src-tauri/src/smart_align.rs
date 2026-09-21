@@ -677,6 +677,13 @@ fn find_best_wsola_offset(
     best_offset
 }
 
+/// Стандартное растяжение WSOLA без маски гласных
+pub fn wsola_time_stretch(samples: &[f32], target_ratio: f64, sample_rate: u32) -> Vec<f32> {
+    let vowel_mask = vec![true; samples.len()];
+    let (stretched, _) = wsola_time_stretch_vowel_selective(samples, &vowel_mask, target_ratio, sample_rate, 10.0);
+    stretched
+}
+
 /// Ресинтез WSOLA с адаптивным сохранением пауз/вдохов и лимитом 0.85x..1.18x
 pub fn wsola_time_stretch_vowel_selective(
     samples: &[f32],

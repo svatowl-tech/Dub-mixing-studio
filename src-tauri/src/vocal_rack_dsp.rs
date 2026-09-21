@@ -16,8 +16,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri::{command, State};
-use vst::plugin::Plugin;
-
 use crate::logger::log_info;
 use crate::vst_host::SharedVstHostState;
 
