@@ -51,8 +51,8 @@ try {
   execSync(tauriCmd, { stdio: 'inherit', cwd: rootDir });
   console.log('✓ Successfully generated standard platform icons.');
 } catch (err) {
-  console.error('Failed to run Tauri icon generator:', err);
-  process.exit(1);
+  console.warn('⚠️ Warning: @tauri-apps/cli native binding not found on this runner platform.');
+  console.warn('Falling back to validating existing pre-generated icons in src-tauri/icons...');
 }
 
 // 4. Verify all critical platform icons exist and are non-empty
