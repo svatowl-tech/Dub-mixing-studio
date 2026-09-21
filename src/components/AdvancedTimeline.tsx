@@ -1,5 +1,7 @@
 import React, { useRef, useState, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useTimelineData } from '../contexts/TimelineContext';
+import { playbackEngine } from '../services/playbackEngine';
 import { 
   Play, 
   Pause, 
@@ -23,7 +25,7 @@ import {
   Headphones,
   RotateCcw
 } from 'lucide-react';
-import { cn } from '../lib/utils';
+import { cn, isTauriAvailable } from '../lib/utils';
 import { Project, AudioTrack, AudioSegment } from '../types';
 import TrackHeader from './TrackHeader';
 import TimelineCanvas from './TimelineCanvas';
@@ -505,12 +507,22 @@ export const AdvancedTimeline = ({
     return { time: closestTime, snapped };
   }, [isSnapEnabled, zoom, getSnapPoints]);
 
+  const [masterStream, setMasterStream] = useState<MediaStream | null>(null);
+  const [vocalBusStream, setVocalBusStream] = useState<MediaStream | null>(null);
+
+  useEffect(() => {
+    if (isPlaying) {
+      setMasterStream(playbackEngine.getMasterStream());
+      setVocalBusStream(playbackEngine.getVocalBusStream());
+    }
+  }, [isPlaying]);
+
   useEffect(() => {
     return () => {
       // Upon unmounting the timeline, we ensure any long running backend operations 
-      // triggered by this session are halted.
-      if (window.electronAPI && window.electronAPI.forceStopAll) {
-         window.electronAPI.forceStopAll().catch(() => {});
+      // triggered by this session are halted via native Tauri invocation.
+      if (isTauriAvailable()) {
+        invoke('force_stop_all').catch(console.error);
       }
     };
   }, []);
@@ -1004,7 +1016,7 @@ export const AdvancedTimeline = ({
                      title="Регулятор общей громкости всех реплик перед мастерингом"
                    />
                  </div>
-                 <VUMeter stream={null} />
+                 <VUMeter busType="vocal_bus" stream={vocalBusStream} />
                </div>
             </div>
 
@@ -1030,7 +1042,7 @@ export const AdvancedTimeline = ({
                      className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-500" 
                    />
                  </div>
-                 <VUMeter stream={null} />
+                 <VUMeter busType="master" stream={masterStream} />
                </div>
             </div>
           </div>
@@ -1040,7 +1052,7 @@ export const AdvancedTimeline = ({
         <div 
           ref={timelineRef}
           onDoubleClick={handleDoubleClick}
-          className="flex-1 overflow-auto relative min-h-0 min-w-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] bg-repeat"
+          className="flex-1 overflow-auto relative min-h-0 min-w-0 bg-zinc-950 bg-[radial-gradient(ellipse_80%_80%_at_50%_-20%,rgba(120,119,198,0.06),rgba(255,255,255,0))] [background-image:linear-gradient(to_right,rgba(255,255,255,0.03)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.03)_1px,transparent_1px)] [background-size:24px_24px]"
           onMouseDown={(e) => {
             if (e.button === 0) {
               const rect = e.currentTarget.getBoundingClientRect();

@@ -298,6 +298,14 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     setAuditLogs(prev => [...prev, ...newLogs]);
   };
 
+  // Синхронизация параметров и Bypass мастер-шины вокала в реальном времени с аудио-движком
+  useEffect(() => {
+    const bus = activePreset.phase3.vocalBusProcessing;
+    if (bus?.nativeRack) {
+      playbackEngine.setVocalBusDspConfig(bus.nativeRack, bus.bypass);
+    }
+  }, [activePreset.phase3.vocalBusProcessing]);
+
   const handleRunGainMatchingStep = async (notify = true) => {
     const isVoiceover = (project?.mixingType || activePreset.type) === MixingType.VOICEOVER;
     if (isVoiceover) {
@@ -559,8 +567,8 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         ...track,
         segments: track.segments.map(seg => {
           if (seg.id === issue.segmentId) {
-            const currentVol = seg.volume !== undefined ? seg.volume : 1.0;
-            return { ...seg, volume: Math.max(0.1, Math.round(currentVol * 0.7 * 100) / 100) };
+            const currentGain = seg.gain !== undefined ? seg.gain : 1.0;
+            return { ...seg, gain: Math.max(0.1, Math.round(currentGain * 0.7 * 100) / 100) };
           }
           return seg;
         })
@@ -898,7 +906,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
               : track.segments;
 
             for (const seg of segsToProcess) {
-              const inputPath = seg.audioUrl || seg.filePath;
+              const inputPath = (seg as any).audioUrl || seg.filePath;
               if (inputPath && !inputPath.startsWith('blob:') && !inputPath.startsWith('data:')) {
                 try {
                   await invoke('match_eq_profile', {
@@ -1094,7 +1102,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
         const res = await AudioDspService.applyDenoise(
           project.tracks,
-          { ...activePreset.phase1.denoise, model: modelName },
+          { ...activePreset.phase1.denoise, model: modelName as any },
           selectedSegment?.trackId,
           selectedSegment?.segment?.id
         );
@@ -1462,7 +1470,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
         modelToUse,
         project?.projectPath || '',
         useGpuForSeparator,
-        Boolean(activePreset.phase1.sourceSeparation.denoise),
+        Boolean((activePreset.phase1.sourceSeparation as any).denoise),
         (prog) => {
           setSeparatorProgress(prog);
         }
@@ -2995,7 +3003,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
       ...t,
       segments: t.segments.map(s => ({
         ...s,
-        timingWarning: overlapSegIds.has(s.id) ? 'overlap' : (s.timingWarning === 'overlap' ? undefined : s.timingWarning),
+        timingWarning: (overlapSegIds.has(s.id) ? 'overlap' : (s.timingWarning === 'overlap' ? undefined : s.timingWarning)) as any,
         timingWarningDetail: overlapIssues.find(i => i.segmentId === s.id)?.description
       }))
     }));
@@ -3894,7 +3902,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                       let handleBypassToggle = () => {};
 
                       if (stepKey === "peakAdjustment") {
-                        stepName = "1.0 Подстройка по пику (-9 dBFS)";
+                        stepName = "1.1 Подстройка по пику (-9 dBFS)";
                         stepDesc = "Первичная регулировка макс. пика без компрессии и подъема шума";
                         stepIcon = <Volume2 className="w-3.5 h-3.5 text-cyan-400" />;
                         stepBypass = activePreset.phase1.peakAdjustment?.bypass ?? false;
@@ -3942,8 +3950,8 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                       }
 
                       if (stepKey === "normalization") {
-                        stepName = "Нормализация и Апвард";
-                        stepDesc = "Выравнивание тихих фраз без шума";
+                        stepName = "Нормализация и Апвард (Финал предобработки)";
+                        stepDesc = "Финальное выравнивание LUFS и тихих фраз очищенного сигнала";
                         stepIcon = <Volume2 className="w-3.5 h-3.5 text-indigo-400" />;
                         stepBypass = activePreset.phase1.normalization.bypass;
                         handleBypassToggle = () => updatePhase1({
@@ -5657,14 +5665,14 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
                             <div className="p-2 bg-zinc-950/60 rounded-lg border border-white/5 text-[10px] text-zinc-400 space-y-0.5">
                               <span className="font-bold text-zinc-300 block">
-                                {project?.mixingType === 'RECAST' ? 'Правило Рекаста' :
-                                 project?.mixingType === 'REDUB' ? 'Правило Редаба' :
-                                 project?.mixingType === 'DUBBING' ? 'Правило Дубляжа' : 'Правило Закадра'}:
+                                {project?.mixingType === MixingType.RECAST ? 'Правило Рекаста' :
+                                 project?.mixingType === MixingType.REDUB ? 'Правило Редаба' :
+                                 project?.mixingType === MixingType.DUBBING ? 'Правило Дубляжа' : 'Правило Закадра'}:
                               </span>
                               <span>
-                                {project?.mixingType === 'RECAST' || project?.mixingType === 'REDUB' 
+                                {project?.mixingType === MixingType.RECAST || project?.mixingType === MixingType.REDUB 
                                   ? 'Фраза дабера не должна быть меньше саба. Охи-вздохи озвучиваются.' 
-                                  : project?.mixingType === 'DUBBING'
+                                  : project?.mixingType === MixingType.DUBBING
                                   ? 'Полный липсинг артикуляции губ и смысловых пауз (WSOLA Pitch-Neutral).'
                                   : 'Длительность не критична, главное — точное совпадение старта фразы.'}
                               </span>
@@ -5709,9 +5717,9 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                             <label className="flex items-center gap-1.5 cursor-pointer">
                               <input 
                                 type="checkbox" 
-                                checked={activePreset.phase2.conflictDetection?.flagShortPhrases ?? true}
+                                checked={activePreset.phase2.conflictDetection?.detectShortPhrases ?? true}
                                 onChange={(e) => updatePhase2({ 
-                                  conflictDetection: { ...activePreset.phase2.conflictDetection, flagShortPhrases: e.target.checked } 
+                                  conflictDetection: { ...activePreset.phase2.conflictDetection, detectShortPhrases: e.target.checked } 
                                 })}
                                 className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
                               />
@@ -5810,9 +5818,9 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                             <label className="flex items-center gap-1.5 cursor-pointer">
                               <input
                                 type="checkbox"
-                                checked={activePreset.phase2.conflictDetection?.flagShortPhrases ?? true}
+                                checked={activePreset.phase2.conflictDetection?.detectShortPhrases ?? true}
                                 onChange={(e) => updatePhase2({
-                                  conflictDetection: { ...activePreset.phase2.conflictDetection, flagShortPhrases: e.target.checked }
+                                  conflictDetection: { ...activePreset.phase2.conflictDetection, detectShortPhrases: e.target.checked }
                                 })}
                                 className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
                               />
@@ -5821,9 +5829,9 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                             <label className="flex items-center gap-1.5 cursor-pointer">
                               <input
                                 type="checkbox"
-                                checked={activePreset.phase2.conflictDetection?.autoResolveOverlaps ?? false}
+                                checked={activePreset.phase2.conflictDetection?.autoFixOverlaps ?? false}
                                 onChange={(e) => updatePhase2({
-                                  conflictDetection: { ...activePreset.phase2.conflictDetection, autoResolveOverlaps: e.target.checked }
+                                  conflictDetection: { ...activePreset.phase2.conflictDetection, autoFixOverlaps: e.target.checked }
                                 })}
                                 className="rounded border-zinc-700 bg-zinc-800 text-indigo-600 focus:ring-0"
                               />
@@ -5886,12 +5894,12 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                             issue.type === 'overlap' && "bg-rose-600 text-white",
                                             issue.type === 'too_short' && "bg-amber-600 text-black",
                                             issue.type === 'desync' && "bg-orange-600 text-white",
-                                            issue.type === 'missing_phrase' && "bg-zinc-700 text-zinc-300"
+                                            issue.type === 'missing' && "bg-zinc-700 text-zinc-300"
                                           )}>
                                             {issue.type === 'overlap' && 'Наезд'}
                                             {issue.type === 'too_short' && 'Короче саба'}
                                             {issue.type === 'desync' && 'Рассинхрон'}
-                                            {issue.type === 'missing_phrase' && 'Пропуск'}
+                                            {issue.type === 'missing' && 'Пропуск'}
                                           </span>
                                           <button
                                             type="button"
@@ -6117,25 +6125,25 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                               <div className="flex items-center justify-between text-zinc-300">
                                 <span className="font-semibold text-amber-300">Физика (крики, кряхтения):</span>
                                 <span className="text-amber-400 font-mono font-bold">
-                                  {activePreset.phase3.gainMatching.physicsVolumeOffsetDb ?? -10} dB от реплик
+                                  {activePreset.phase3.gainMatching.physicsOffsetDb ?? -10} dB от реплик
                                 </span>
                               </div>
                             </div>
 
                             <div className="flex justify-between text-[10px] font-mono text-zinc-400">
                               <span>Смещение громкости физики</span>
-                              <span>{activePreset.phase3.gainMatching.physicsVolumeOffsetDb ?? -10} dB</span>
+                              <span>{activePreset.phase3.gainMatching.physicsOffsetDb ?? -10} dB</span>
                             </div>
                             <input 
                               type="range" 
                               min="-20" 
                               max="-3" 
                               step="0.5"
-                              value={activePreset.phase3.gainMatching.physicsVolumeOffsetDb ?? -10}
+                              value={activePreset.phase3.gainMatching.physicsOffsetDb ?? -10}
                               onChange={(e) => updatePhase3({
                                 gainMatching: { 
                                   ...activePreset.phase3.gainMatching, 
-                                  physicsVolumeOffsetDb: parseFloat(e.target.value) 
+                                  physicsOffsetDb: parseFloat(e.target.value) 
                                 }
                               })}
                               className="w-full accent-indigo-500 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
@@ -6244,8 +6252,8 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                 <span>ТВ / Радио / Телефон</span>
                                 <Check className="w-3 h-3" />
                               </div>
-                              <div className={cn("p-1.5 rounded border flex items-center justify-between", activePreset.phase3.autoFxAnalysis.detectDistanceEq ? "bg-indigo-950/30 border-indigo-500/30 text-indigo-200" : "bg-zinc-950 border-white/5 text-zinc-500")}>
-                                <span>Дистанция сцены (EQ)</span>
+                              <div className={cn("p-1.5 rounded border flex items-center justify-between", activePreset.phase3.autoFxAnalysis.detectDelay ? "bg-indigo-950/30 border-indigo-500/30 text-indigo-200" : "bg-zinc-950 border-white/5 text-zinc-500")}>
+                                <span>Дистанция сцены / Эхо</span>
                                 <Check className="w-3 h-3" />
                               </div>
                             </div>
@@ -6692,25 +6700,27 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                         handleBypassToggle = () => updatePhase4({
                           masteringLimiter: {
                             ...(activePreset.phase4.masteringLimiter || {
+                              enabled: true,
                               bypass: false,
-                              standard: 'youtube_web',
+                              loudnessStandard: 'youtube_web',
                               targetIntegratedLufs: -14.0,
                               truePeakCeilingDb: -1.0,
                               oversampling: '4x',
                               dither: 'tpdf_24bit',
-                              stereoWidthPercent: 100
+                              stereoWidth: 100
                             }),
                             bypass: !stepBypass
                           }
                         });
                         const limiter = activePreset.phase4.masteringLimiter || {
+                          enabled: true,
                           bypass: false,
-                          standard: 'youtube_web',
+                          loudnessStandard: 'youtube_web',
                           targetIntegratedLufs: -14.0,
                           truePeakCeilingDb: -1.0,
                           oversampling: '4x',
                           dither: 'tpdf_24bit',
-                          stereoWidthPercent: 100
+                          stereoWidth: 100
                         };
                         stepElement = (
                           <div className="space-y-3 text-xs">
@@ -6718,7 +6728,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                               <div className="space-y-1">
                                 <label className="text-[10px] text-zinc-500 uppercase font-black">Стандарт громкости</label>
                                 <select 
-                                  value={limiter.standard || (limiter as any).loudnessStandard || 'original_match'}
+                                  value={limiter.loudnessStandard || 'original_match'}
                                   onChange={(e) => {
                                     const std = e.target.value as any;
                                     let lufs = limiter.targetIntegratedLufs;
@@ -6749,15 +6759,15 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                     else if (std === 'broadcast_ebu' || std === 'ebu_r128') { lufs = -23.0; ceil = -1.0; }
                                     else if (std === 'podcast_stream' || std === 'streaming_podcast') { lufs = -16.0; ceil = -1.0; }
                                     updatePhase4({
-                                      masteringLimiter: { ...limiter, standard: std, loudnessStandard: std, targetIntegratedLufs: lufs, truePeakCeilingDb: ceil }
+                                      masteringLimiter: { ...limiter, loudnessStandard: std, targetIntegratedLufs: lufs, truePeakCeilingDb: ceil }
                                     });
                                   }}
                                   className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-medium"
                                 >
                                   <option value="original_match">🎯 Под уровень оригинала (Референсный баланс)</option>
                                   <option value="youtube_web">YouTube / Web (-14 LUFS, -1 dBTP)</option>
-                                  <option value="broadcast_ebu">EBU R128 ТВ (-23 LUFS, -1 dBTP)</option>
-                                  <option value="podcast_stream">Подкаст / Стриминг (-16 LUFS)</option>
+                                  <option value="ebu_r128">EBU R128 ТВ (-23 LUFS, -1 dBTP)</option>
+                                  <option value="streaming_podcast">Подкаст / Стриминг (-16 LUFS)</option>
                                   <option value="custom">Пользовательский</option>
                                 </select>
                               </div>
@@ -6833,15 +6843,15 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                               <div className="space-y-1">
                                 <div className="flex justify-between items-center">
                                   <label className="text-[10px] text-zinc-500 uppercase font-black">Ширина стереобазы</label>
-                                  <span className="text-[10px] font-mono text-zinc-400">{limiter.stereoWidthPercent}%</span>
+                                  <span className="text-[10px] font-mono text-zinc-400">{limiter.stereoWidth}%</span>
                                 </div>
                                 <input 
-                                  type="range"
-                                  min="50"
-                                  max="150"
-                                  value={limiter.stereoWidthPercent}
+                                  type="range" 
+                                  min="50" 
+                                  max="150" 
+                                  value={limiter.stereoWidth}
                                   onChange={(e) => updatePhase4({
-                                    masteringLimiter: { ...limiter, stereoWidthPercent: parseInt(e.target.value) || 100 }
+                                    masteringLimiter: { ...limiter, stereoWidth: parseInt(e.target.value) || 100 }
                                   })}
                                   className="w-full accent-indigo-500 cursor-pointer"
                                 />
@@ -6867,23 +6877,25 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                         handleBypassToggle = () => updatePhase4({
                           stemExport: {
                             ...(activePreset.phase4.stemExport || {
+                              enabled: true,
                               bypass: false,
                               exportFullMix: true,
                               exportCleanVoice: true,
                               exportMAndE: true,
                               exportPerRoleStems: false,
-                              audioFormat: 'wav24_48'
+                              audioFormat: 'wav_24bit_48k'
                             }),
                             bypass: !stepBypass
                           }
                         });
                         const stems = activePreset.phase4.stemExport || {
+                          enabled: true,
                           bypass: false,
                           exportFullMix: true,
                           exportCleanVoice: true,
                           exportMAndE: true,
                           exportPerRoleStems: false,
-                          audioFormat: 'wav24_48'
+                          audioFormat: 'wav_24bit_48k'
                         };
                         stepElement = (
                           <div className="space-y-3 text-xs">
@@ -7221,9 +7233,9 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                               <div className="space-y-1">
                                 <label className="text-[10px] text-zinc-500 uppercase font-black block">Пресет скорости</label>
                                 <select 
-                                  value={renderConfig.encodingPreset || 'medium'}
+                                  value={renderConfig.preset || 'medium'}
                                   onChange={(e) => updatePhase4({
-                                    renderSettings: { ...renderConfig, encodingPreset: e.target.value as any }
+                                    renderSettings: { ...renderConfig, preset: e.target.value as any }
                                   })}
                                   className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300"
                                 >

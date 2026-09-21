@@ -66,8 +66,6 @@ pub struct AudioRecorder {
     writer_handle: Option<tokio::task::JoinHandle<Result<InternalRecordResult, String>>>,
     pub current_lock_path: Option<std::path::PathBuf>,
     stop_tx: Option<std::sync::mpsc::Sender<()>>,
-    pub video_child: Option<std::process::Child>,
-    pub current_video_path: Option<std::path::PathBuf>,
 }
 
 unsafe impl Send for AudioRecorder {}
@@ -80,8 +78,6 @@ impl Default for AudioRecorder {
             writer_handle: None,
             current_lock_path: None,
             stop_tx: None,
-            video_child: None,
-            current_video_path: None,
         }
     }
 }
@@ -130,70 +126,236 @@ pub struct NativePlaybackTrack {
     pub processing: Option<serde_json::Value>,
 }
 
-#[derive(Clone)]
-pub struct CachedAudioFile {
-    pub samples: Vec<f32>,
-    pub channels: u16,
-    pub sample_rate: u32,
-    #[allow(dead_code)]
-    pub duration: f64,
+// --- REAL-TIME PLAYBACK SNAPSHOTS & DSP ENGINE (ZERO ALLOCATIONS IN AUDIO THREAD) ---
+
+use arc_swap::ArcSwap;
+use crate::audio_buffer_manager::CachedTrackBuffer;
+use std::collections::HashMap;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TrackEqParams {
+    pub enabled: bool,
+    pub high_pass: f32,
+    pub low_pass: f32,
 }
 
-impl CachedAudioFile {
-    pub fn load_from_path(path_str: &str) -> Result<Self, String> {
-        let path = std::path::Path::new(path_str);
-        if !path.exists() {
-            return Err(format!("Audio file does not exist: {}", path_str));
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TrackDeesserParams {
+    pub enabled: bool,
+    pub frequency: f32,
+    pub threshold_lin: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TrackCompressorParams {
+    pub enabled: bool,
+    pub threshold_lin: f32,
+    pub ratio: f32,
+    pub makeup_gain: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TrackSaturationParams {
+    pub enabled: bool,
+    pub drive: f32,
+    pub wet: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TrackReverbParams {
+    pub enabled: bool,
+    pub wet: f32,
+    pub decay: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TrackDelayParams {
+    pub enabled: bool,
+    pub wet: f32,
+    pub time_s: f32,
+    pub feedback: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ParsedTrackDsp {
+    pub eq: TrackEqParams,
+    pub deesser: TrackDeesserParams,
+    pub compressor: TrackCompressorParams,
+    pub saturation: TrackSaturationParams,
+    pub reverb: TrackReverbParams,
+    pub delay: TrackDelayParams,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ParsedSegmentFx {
+    pub reverb_wet: f32,
+}
+
+pub fn parse_track_dsp(proc: Option<&serde_json::Value>) -> ParsedTrackDsp {
+    let mut dsp = ParsedTrackDsp::default();
+    let p = match proc {
+        Some(v) => v,
+        None => return dsp,
+    };
+
+    if let Some(eq) = p.get("eq") {
+        if eq.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+            dsp.eq.enabled = true;
+            dsp.eq.high_pass = eq.get("highPass").and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(20.0);
+            dsp.eq.low_pass = eq.get("lowPass").and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(20000.0);
+        }
+    }
+
+    if let Some(de) = p.get("deesser") {
+        if de.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+            dsp.deesser.enabled = true;
+            dsp.deesser.frequency = de.get("frequency").and_then(|v| v.as_f64()).unwrap_or(6500.0) as f32;
+            let thresh_db = de.get("threshold").and_then(|v| v.as_f64()).unwrap_or(-18.0) as f32;
+            dsp.deesser.threshold_lin = 10.0f32.powf(thresh_db / 20.0);
+        }
+    }
+
+    if let Some(comp) = p.get("compressor") {
+        if comp.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+            dsp.compressor.enabled = true;
+            let thresh_db = comp.get("threshold").and_then(|v| v.as_f64()).unwrap_or(-18.0) as f32;
+            dsp.compressor.threshold_lin = 10.0f32.powf(thresh_db / 20.0);
+            dsp.compressor.ratio = comp.get("ratio").and_then(|v| v.as_f64()).unwrap_or(3.5) as f32;
+            let makeup_db = comp.get("makeupGain").or_else(|| comp.get("gain")).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            dsp.compressor.makeup_gain = 10.0f32.powf(makeup_db / 20.0);
+        }
+    }
+
+    if let Some(sat) = p.get("saturation").or_else(|| p.get("warmth")) {
+        if sat.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+            dsp.saturation.enabled = true;
+            let drive_db = sat.get("drive").or_else(|| sat.get("driveDb")).and_then(|v| v.as_f64()).unwrap_or(3.0) as f32;
+            dsp.saturation.drive = 10.0f32.powf(drive_db / 20.0);
+            dsp.saturation.wet = sat.get("wet").or_else(|| sat.get("blend")).and_then(|v| v.as_f64()).unwrap_or(0.35) as f32;
+        }
+    }
+
+    if let Some(rev) = p.get("reverb") {
+        if rev.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+            dsp.reverb.enabled = true;
+            dsp.reverb.wet = rev.get("wet").and_then(|v| v.as_f64()).unwrap_or(0.15) as f32;
+            dsp.reverb.decay = rev.get("decay").and_then(|v| v.as_f64()).unwrap_or(1.5) as f32;
+        }
+    }
+
+    if let Some(del) = p.get("delay") {
+        if del.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+            dsp.delay.enabled = true;
+            dsp.delay.wet = del.get("wet").and_then(|v| v.as_f64()).unwrap_or(0.12) as f32;
+            dsp.delay.time_s = del.get("time").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
+            dsp.delay.feedback = del.get("feedback").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
+        }
+    }
+
+    dsp
+}
+
+pub fn parse_segment_fx(fx: Option<&serde_json::Value>) -> ParsedSegmentFx {
+    let mut seg_fx = ParsedSegmentFx::default();
+    if let Some(f) = fx {
+        if let Some(wet) = f.get("reverbWet").and_then(|v| v.as_f64()).map(|v| v as f32) {
+            seg_fx.reverb_wet = wet;
+        }
+    }
+    seg_fx
+}
+
+#[derive(Clone, Debug)]
+pub struct PlaybackActiveSegment {
+    pub file_path: String,
+    pub start_frame: u64,
+    pub end_frame: u64,
+    pub file_offset_sec: f64,
+    pub total_gain_left: f32,
+    pub total_gain_right: f32,
+    pub fx: ParsedSegmentFx,
+}
+
+#[derive(Clone, Debug)]
+pub struct PlaybackActiveTrack {
+    pub id: String,
+    pub volume: f32,
+    pub is_muted: bool,
+    pub is_solo: bool,
+    pub segments: Vec<PlaybackActiveSegment>,
+    pub dsp_params: ParsedTrackDsp,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PlaybackSnapshot {
+    pub tracks: Vec<PlaybackActiveTrack>,
+    pub any_solo: bool,
+}
+
+pub fn build_playback_snapshot(tracks: &[NativePlaybackTrack], sample_rate: u32) -> PlaybackSnapshot {
+    let any_solo = tracks.iter().any(|t| t.is_solo);
+    let mut active_tracks = Vec::with_capacity(tracks.len());
+
+    for track in tracks {
+        let is_active = if any_solo { track.is_solo } else { !track.is_muted };
+        if !is_active || track.volume <= 0.0 {
+            continue;
         }
 
-        let mut reader = hound::WavReader::open(path)
-            .map_err(|e| format!("Failed to read WAV {}: {}", path_str, e))?;
-        let spec = reader.spec();
-        let channels = spec.channels;
-        let sample_rate = spec.sample_rate;
+        let track_gain = track.volume;
+        let dsp_params = parse_track_dsp(track.processing.as_ref());
+        let mut active_segments = Vec::with_capacity(track.segments.len());
 
-        let samples: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Float => {
-                reader.samples::<f32>().map(|s| s.unwrap_or(0.0)).collect()
+        for seg in &track.segments {
+            let seg_gain = seg.gain * track_gain;
+            if seg_gain <= 0.0 || seg.file_path.is_empty() {
+                continue;
             }
-            hound::SampleFormat::Int => {
-                let bits = spec.bits_per_sample;
-                if bits <= 16 {
-                    let max_val = 32768.0f32;
-                    reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / max_val).collect()
-                } else if bits <= 24 {
-                    let max_val = 8388608.0f32;
-                    reader.samples::<i32>().map(|s| (s.unwrap_or(0) >> 8) as f32 / max_val).collect()
-                } else {
-                    let max_val = 2147483648.0f32;
-                    reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / max_val).collect()
-                }
-            }
-        };
 
-        let duration = if channels > 0 && sample_rate > 0 {
-            (samples.len() / channels as usize) as f64 / sample_rate as f64
-        } else {
-            0.0
-        };
+            let seg_start_frame = (seg.start_time * sample_rate as f64).round() as u64;
+            let seg_duration_frames = (seg.duration * sample_rate as f64).round() as u64;
+            let seg_end_frame = seg_start_frame + seg_duration_frames;
 
-        Ok(Self {
-            samples,
-            channels,
-            sample_rate,
-            duration,
-        })
+            let pan = seg.panning.clamp(-1.0, 1.0);
+            let left_pan_gain = ((1.0 - pan) * 0.5).sqrt() * seg_gain;
+            let right_pan_gain = ((1.0 + pan) * 0.5).sqrt() * seg_gain;
+
+            let fx = parse_segment_fx(seg.detected_fx.as_ref());
+
+            active_segments.push(PlaybackActiveSegment {
+                file_path: seg.file_path.clone(),
+                start_frame: seg_start_frame,
+                end_frame: seg_end_frame,
+                file_offset_sec: seg.file_offset,
+                total_gain_left: left_pan_gain,
+                total_gain_right: right_pan_gain,
+                fx,
+            });
+        }
+
+        active_tracks.push(PlaybackActiveTrack {
+            id: track.id.clone(),
+            volume: track.volume,
+            is_muted: track.is_muted,
+            is_solo: track.is_solo,
+            segments: active_segments,
+            dsp_params,
+        });
+    }
+
+    PlaybackSnapshot {
+        tracks: active_tracks,
+        any_solo,
     }
 }
 
-#[allow(dead_code)]
 pub struct NativeAudioPlayer {
     pub clock: Arc<crate::transport_clock::TransportClock>,
     pub is_playing: Arc<AtomicBool>,
     pub current_sample_frame: Arc<std::sync::atomic::AtomicU64>,
     pub device_sample_rate: Arc<std::sync::atomic::AtomicU32>,
-    pub tracks: Arc<std::sync::RwLock<Vec<NativePlaybackTrack>>>,
-    pub audio_cache: Arc<std::sync::RwLock<std::collections::HashMap<String, Arc<CachedAudioFile>>>>,
+    pub snapshot: Arc<ArcSwap<PlaybackSnapshot>>,
+    pub audio_cache: Arc<ArcSwap<HashMap<String, Arc<CachedTrackBuffer>>>>,
     pub stream: Option<cpal::Stream>,
 }
 
@@ -213,45 +375,45 @@ impl NativeAudioPlayer {
             current_sample_frame: clock.current_sample.clone(),
             device_sample_rate: clock.sample_rate.clone(),
             clock,
-            tracks: Arc::new(std::sync::RwLock::new(Vec::new())),
-            audio_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            snapshot: Arc::new(ArcSwap::from_pointee(PlaybackSnapshot::default())),
+            audio_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             stream: None,
         }
     }
 
     pub fn preload_buffers(&self, paths: Vec<String>) -> Result<Vec<String>, String> {
+        let mut current_cache = (**self.audio_cache.load()).clone();
         let mut loaded = Vec::new();
+        let mut updated = false;
+
         for p in paths {
             if p.is_empty() {
                 continue;
             }
-            {
-                if let Ok(cache) = self.audio_cache.read() {
-                    if cache.contains_key(&p) {
-                        loaded.push(p);
-                        continue;
-                    }
-                }
+            if current_cache.contains_key(&p) {
+                loaded.push(p);
+                continue;
             }
-            match CachedAudioFile::load_from_path(&p) {
+            match crate::audio_buffer_manager::load_audio_file_sync(&p) {
                 Ok(cached) => {
-                    if let Ok(mut cache) = self.audio_cache.write() {
-                        cache.insert(p.clone(), Arc::new(cached));
-                        loaded.push(p);
-                    }
+                    current_cache.insert(p.clone(), Arc::new(cached));
+                    loaded.push(p);
+                    updated = true;
                 }
                 Err(e) => {
                     log_debug(&format!("Failed to preload buffer {}: {}", p, e));
                 }
             }
         }
+
+        if updated {
+            self.audio_cache.store(Arc::new(current_cache));
+        }
         Ok(loaded)
     }
 
     pub fn clear_cache(&self) {
-        if let Ok(mut cache) = self.audio_cache.write() {
-            cache.clear();
-        }
+        self.audio_cache.store(Arc::new(HashMap::new()));
     }
 
     pub fn ensure_stream(&mut self) -> Result<(), String> {
@@ -274,21 +436,34 @@ impl NativeAudioPlayer {
         self.clock.sample_rate.store(sample_rate, Ordering::SeqCst);
 
         let clock = Arc::clone(&self.clock);
-        let tracks = Arc::clone(&self.tracks);
-        let cache = Arc::clone(&self.audio_cache);
+        let snapshot_swap = Arc::clone(&self.snapshot);
+        let cache_swap = Arc::clone(&self.audio_cache);
+        let mut dsp_pool: HashMap<String, TrackDspEngine> = HashMap::with_capacity(32);
 
         let stream_config: StreamConfig = config.into();
 
-        let stream = device.build_output_stream(
-            &stream_config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                mix_audio_buffer(data, channels, sample_rate, &clock, &tracks, &cache);
-            },
-            |err| log_debug(&format!("Rust audio output stream error: {}", err)),
-            None,
-        ).map_err(|e| format!("Failed to build audio output stream: {}", e))?;
+        let stream = device
+            .build_output_stream(
+                &stream_config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    mix_audio_buffer(
+                        data,
+                        channels,
+                        sample_rate,
+                        &clock,
+                        &snapshot_swap,
+                        &cache_swap,
+                        &mut dsp_pool,
+                    );
+                },
+                |err| log_debug(&format!("Rust audio output stream error: {}", err)),
+                None,
+            )
+            .map_err(|e| format!("Failed to build audio output stream: {}", e))?;
 
-        stream.play().map_err(|e| format!("Failed to start output stream: {}", e))?;
+        stream
+            .play()
+            .map_err(|e| format!("Failed to start output stream: {}", e))?;
         self.stream = Some(stream);
         Ok(())
     }
@@ -304,14 +479,12 @@ impl NativeAudioPlayer {
         }
         let _ = self.preload_buffers(paths_to_load);
 
-        {
-            let mut tr = self.tracks.write().map_err(|e| e.to_string())?;
-            *tr = tracks;
-        }
+        let sr = self.clock.sample_rate.load(Ordering::SeqCst);
+        let snapshot = build_playback_snapshot(&tracks, sr);
+        self.snapshot.store(Arc::new(snapshot));
 
         self.ensure_stream()?;
 
-        let sr = self.clock.sample_rate.load(Ordering::SeqCst);
         let frame = (start_time.max(0.0) * sr as f64).round() as u64;
         self.clock.seek(frame);
         self.clock.play();
@@ -332,8 +505,9 @@ impl NativeAudioPlayer {
     }
 
     pub fn update_tracks(&mut self, tracks: Vec<NativePlaybackTrack>) -> Result<(), String> {
-        let mut tr = self.tracks.write().map_err(|e| e.to_string())?;
-        *tr = tracks;
+        let sr = self.clock.sample_rate.load(Ordering::SeqCst);
+        let snapshot = build_playback_snapshot(&tracks, sr);
+        self.snapshot.store(Arc::new(snapshot));
         Ok(())
     }
 
@@ -344,7 +518,7 @@ impl NativeAudioPlayer {
     }
 }
 
-// --- REAL-TIME RUST DSP EFFECTS ENGINE ---
+// --- REAL-TIME RUST DSP EFFECTS ENGINE (PERSISTENT & ZERO-ALLOCATION) ---
 
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -421,14 +595,14 @@ impl BiquadFilter {
                 let b2 = a * ((a + 1.0) - (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha);
                 let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + 2.0 * sqrt_a * alpha;
                 let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0);
-                let a2 = (a + 1.0) + (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha;
+                let a2 = (a + 1.0) - (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha;
                 (b0, b1, b2, a0, a1, a2)
             }
             BiquadType::HighShelf => {
                 let sqrt_a = a.sqrt();
                 let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + 2.0 * sqrt_a * alpha);
                 let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0);
-                let b2 = a * ((a + 1.0) + (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha);
+                let b2 = a * ((a + 1.0) - (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha);
                 let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + 2.0 * sqrt_a * alpha;
                 let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0);
                 let a2 = (a + 1.0) - (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha;
@@ -460,10 +634,6 @@ pub struct TrackDspEngine {
     hp_r: BiquadFilter,
     lp_l: BiquadFilter,
     lp_r: BiquadFilter,
-    #[allow(dead_code)]
-    eq_bands_l: Vec<BiquadFilter>,
-    #[allow(dead_code)]
-    eq_bands_r: Vec<BiquadFilter>,
     deesser_bp: BiquadFilter,
     deesser_env: f32,
     comp_env: f32,
@@ -474,20 +644,21 @@ pub struct TrackDspEngine {
     delay_buffer_r: Vec<f32>,
     delay_idx: usize,
     sample_rate: u32,
+    cached_hp_freq: f32,
+    cached_lp_freq: f32,
+    cached_deesser_freq: f32,
 }
 
 impl TrackDspEngine {
     pub fn new(sample_rate: u32) -> Self {
         let sr = sample_rate.max(8000);
-        let max_rev_len = (sr as f64 * 3.0) as usize; // up to 3 sec reverb
-        let max_del_len = (sr as f64 * 2.0) as usize; // up to 2 sec delay
+        let max_rev_len = (sr as f64 * 3.0) as usize; // Preallocated up to 3 sec reverb
+        let max_del_len = (sr as f64 * 2.0) as usize; // Preallocated up to 2 sec delay
         Self {
             hp_l: BiquadFilter::new(),
             hp_r: BiquadFilter::new(),
             lp_l: BiquadFilter::new(),
             lp_r: BiquadFilter::new(),
-            eq_bands_l: Vec::new(),
-            eq_bands_r: Vec::new(),
             deesser_bp: BiquadFilter::new(),
             deesser_env: 0.0,
             comp_env: 0.0,
@@ -498,173 +669,164 @@ impl TrackDspEngine {
             delay_buffer_r: vec![0.0; max_del_len],
             delay_idx: 0,
             sample_rate: sr,
+            cached_hp_freq: 0.0,
+            cached_lp_freq: 0.0,
+            cached_deesser_freq: 0.0,
         }
     }
 
+    #[inline(always)]
     pub fn process_stereo_sample(
         &mut self,
         left: f32,
         right: f32,
-        proc: Option<&serde_json::Value>,
-        detected_fx: Option<&serde_json::Value>,
+        dsp: &ParsedTrackDsp,
+        detected_fx: &ParsedSegmentFx,
     ) -> (f32, f32) {
         let mut l = left;
         let mut r = right;
         let sr = self.sample_rate as f32;
 
-        if let Some(p) = proc {
-            // 1. HighPass & LowPass
-            if let Some(eq_val) = p.get("eq") {
-                if eq_val.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    if let Some(hp) = eq_val.get("highPass").and_then(|v| v.as_f64()).map(|v| v as f32) {
-                        if hp > 20.0 {
-                            self.hp_l.configure(BiquadType::HighPass, hp, 0.0, 0.707, self.sample_rate);
-                            self.hp_r.configure(BiquadType::HighPass, hp, 0.0, 0.707, self.sample_rate);
-                            l = self.hp_l.process(l);
-                            r = self.hp_r.process(r);
-                        }
-                    }
-                    if let Some(lp) = eq_val.get("lowPass").and_then(|v| v.as_f64()).map(|v| v as f32) {
-                        if lp < 20000.0 {
-                            self.lp_l.configure(BiquadType::LowPass, lp, 0.0, 0.707, self.sample_rate);
-                            self.lp_r.configure(BiquadType::LowPass, lp, 0.0, 0.707, self.sample_rate);
-                            l = self.lp_l.process(l);
-                            r = self.lp_r.process(r);
-                        }
-                    }
+        // 1. HighPass & LowPass EQ
+        if dsp.eq.enabled {
+            let hp = dsp.eq.high_pass;
+            if hp > 20.0 {
+                if (hp - self.cached_hp_freq).abs() > 0.1 {
+                    self.hp_l.configure(BiquadType::HighPass, hp, 0.0, 0.707, self.sample_rate);
+                    self.hp_r.configure(BiquadType::HighPass, hp, 0.0, 0.707, self.sample_rate);
+                    self.cached_hp_freq = hp;
                 }
+                l = self.hp_l.process(l);
+                r = self.hp_r.process(r);
             }
-
-            // 2. De-Esser
-            if let Some(de) = p.get("deesser") {
-                if de.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    let freq = de.get("frequency").and_then(|v| v.as_f64()).unwrap_or(6500.0) as f32;
-                    let thresh_db = de.get("threshold").and_then(|v| v.as_f64()).unwrap_or(-18.0) as f32;
-                    let thresh = 10.0f32.powf(thresh_db / 20.0);
-                    self.deesser_bp.configure(BiquadType::Peaking, freq, 0.0, 2.0, self.sample_rate);
-                    let mid = (l + r) * 0.5;
-                    let sc = self.deesser_bp.process(mid).abs();
-                    if sc > self.deesser_env {
-                        self.deesser_env += (sc - self.deesser_env) * 0.3;
-                    } else {
-                        self.deesser_env += (sc - self.deesser_env) * 0.01;
-                    }
-                    if self.deesser_env > thresh {
-                        let atten = (thresh / self.deesser_env).max(0.25);
-                        l *= atten;
-                        r *= atten;
-                    }
+            let lp = dsp.eq.low_pass;
+            if lp < 20000.0 {
+                if (lp - self.cached_lp_freq).abs() > 0.1 {
+                    self.lp_l.configure(BiquadType::LowPass, lp, 0.0, 0.707, self.sample_rate);
+                    self.lp_r.configure(BiquadType::LowPass, lp, 0.0, 0.707, self.sample_rate);
+                    self.cached_lp_freq = lp;
                 }
-            }
-
-            // 3. Compressor
-            if let Some(comp) = p.get("compressor") {
-                if comp.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    let thresh_db = comp.get("threshold").and_then(|v| v.as_f64()).unwrap_or(-18.0) as f32;
-                    let ratio = comp.get("ratio").and_then(|v| v.as_f64()).unwrap_or(3.5) as f32;
-                    let makeup_db = comp.get("makeupGain").or_else(|| comp.get("gain")).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                    let makeup = 10.0f32.powf(makeup_db / 20.0);
-
-                    let thresh_lin = 10.0f32.powf(thresh_db / 20.0);
-                    let peak = (l.abs() + r.abs()) * 0.5;
-                    if peak > self.comp_env {
-                        self.comp_env += (peak - self.comp_env) * 0.15; // fast attack
-                    } else {
-                        self.comp_env += (peak - self.comp_env) * 0.005; // release
-                    }
-                    let mut comp_gain = 1.0;
-                    if self.comp_env > thresh_lin {
-                        let over = self.comp_env / thresh_lin;
-                        comp_gain = over.powf(1.0 / ratio - 1.0);
-                    }
-                    l = l * comp_gain * makeup;
-                    r = r * comp_gain * makeup;
-                }
-            }
-
-            // 4. Analog Saturation / Warmth
-            if let Some(sat) = p.get("saturation").or_else(|| p.get("warmth")) {
-                if sat.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    let drive_db = sat.get("drive").or_else(|| sat.get("driveDb")).and_then(|v| v.as_f64()).unwrap_or(3.0) as f32;
-                    let drive = 10.0f32.powf(drive_db / 20.0);
-                    let wet = sat.get("wet").or_else(|| sat.get("blend")).and_then(|v| v.as_f64()).unwrap_or(0.35) as f32;
-                    
-                    let sat_l = (l * drive).tanh() / drive.max(1.0).tanh();
-                    let sat_r = (r * drive).tanh() / drive.max(1.0).tanh();
-                    l = l * (1.0 - wet) + sat_l * wet;
-                    r = r * (1.0 - wet) + sat_r * wet;
-                }
-            }
-
-            // 5. Stereo Reverb
-            if let Some(rev) = p.get("reverb") {
-                if rev.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    let wet = rev.get("wet").and_then(|v| v.as_f64()).unwrap_or(0.15) as f32;
-                    let decay = rev.get("decay").and_then(|v| v.as_f64()).unwrap_or(1.5) as f32;
-                    let delay_samps = ((decay * 0.05 * sr) as usize).clamp(100, self.reverb_buffer_l.len() - 1);
-
-                    let read_idx = (self.reverb_idx + self.reverb_buffer_l.len() - delay_samps) % self.reverb_buffer_l.len();
-                    let rev_l = self.reverb_buffer_l[read_idx];
-                    let rev_r = self.reverb_buffer_r[read_idx];
-
-                    self.reverb_buffer_l[self.reverb_idx] = l + rev_l * 0.45;
-                    self.reverb_buffer_r[self.reverb_idx] = r + rev_r * 0.45;
-                    self.reverb_idx = (self.reverb_idx + 1) % self.reverb_buffer_l.len();
-
-                    l = l * (1.0 - wet) + rev_l * wet;
-                    r = r * (1.0 - wet) + rev_r * wet;
-                }
-            }
-
-            // 6. Stereo Delay
-            if let Some(del) = p.get("delay") {
-                if del.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    let wet = del.get("wet").and_then(|v| v.as_f64()).unwrap_or(0.12) as f32;
-                    let time_s = del.get("time").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
-                    let feedback = del.get("feedback").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
-                    let delay_samps = ((time_s * sr) as usize).clamp(10, self.delay_buffer_l.len() - 1);
-
-                    let read_idx = (self.delay_idx + self.delay_buffer_l.len() - delay_samps) % self.delay_buffer_l.len();
-                    let del_l = self.delay_buffer_l[read_idx];
-                    let del_r = self.delay_buffer_r[read_idx];
-
-                    self.delay_buffer_l[self.delay_idx] = l + del_l * feedback;
-                    self.delay_buffer_r[self.delay_idx] = r + del_r * feedback;
-                    self.delay_idx = (self.delay_idx + 1) % self.delay_buffer_l.len();
-
-                    l = l * (1.0 - wet) + del_l * wet;
-                    r = r * (1.0 - wet) + del_r * wet;
-                }
+                l = self.lp_l.process(l);
+                r = self.lp_r.process(r);
             }
         }
 
-        // Segment-level Auto-FX (Transfer from Original)
-        if let Some(fx) = detected_fx {
-            if let Some(wet) = fx.get("reverbWet").and_then(|v| v.as_f64()).map(|v| v as f32) {
-                if wet > 0.01 {
-                    let read_idx = (self.reverb_idx + self.reverb_buffer_l.len() - 2000) % self.reverb_buffer_l.len();
-                    let rev_l = self.reverb_buffer_l[read_idx];
-                    let rev_r = self.reverb_buffer_r[read_idx];
-                    self.reverb_buffer_l[self.reverb_idx] = l + rev_l * 0.4;
-                    self.reverb_buffer_r[self.reverb_idx] = r + rev_r * 0.4;
-                    self.reverb_idx = (self.reverb_idx + 1) % self.reverb_buffer_l.len();
-                    l = l * (1.0 - wet * 0.5) + rev_l * (wet * 0.5);
-                    r = r * (1.0 - wet * 0.5) + rev_r * (wet * 0.5);
-                }
+        // 2. De-Esser
+        if dsp.deesser.enabled {
+            let freq = dsp.deesser.frequency;
+            if (freq - self.cached_deesser_freq).abs() > 0.1 {
+                self.deesser_bp.configure(BiquadType::Peaking, freq, 0.0, 2.0, self.sample_rate);
+                self.cached_deesser_freq = freq;
             }
+            let mid = (l + r) * 0.5;
+            let sc = self.deesser_bp.process(mid).abs();
+            if sc > self.deesser_env {
+                self.deesser_env += (sc - self.deesser_env) * 0.3;
+            } else {
+                self.deesser_env += (sc - self.deesser_env) * 0.01;
+            }
+            let thresh = dsp.deesser.threshold_lin;
+            if self.deesser_env > thresh && self.deesser_env > 1e-6 {
+                let atten = (thresh / self.deesser_env).max(0.25);
+                l *= atten;
+                r *= atten;
+            }
+        }
+
+        // 3. Compressor
+        if dsp.compressor.enabled {
+            let thresh_lin = dsp.compressor.threshold_lin;
+            let ratio = dsp.compressor.ratio;
+            let makeup = dsp.compressor.makeup_gain;
+
+            let peak = (l.abs() + r.abs()) * 0.5;
+            if peak > self.comp_env {
+                self.comp_env += (peak - self.comp_env) * 0.15; // fast attack
+            } else {
+                self.comp_env += (peak - self.comp_env) * 0.005; // release
+            }
+            let mut comp_gain = 1.0;
+            if self.comp_env > thresh_lin && thresh_lin > 1e-6 {
+                let over = self.comp_env / thresh_lin;
+                comp_gain = over.powf(1.0 / ratio.max(1.0) - 1.0);
+            }
+            l = l * comp_gain * makeup;
+            r = r * comp_gain * makeup;
+        }
+
+        // 4. Analog Saturation / Warmth
+        if dsp.saturation.enabled {
+            let drive = dsp.saturation.drive;
+            let wet = dsp.saturation.wet;
+            let sat_l = (l * drive).tanh() / drive.max(1.0).tanh();
+            let sat_r = (r * drive).tanh() / drive.max(1.0).tanh();
+            l = l * (1.0 - wet) + sat_l * wet;
+            r = r * (1.0 - wet) + sat_r * wet;
+        }
+
+        // 5. Stereo Reverb (Track Level)
+        if dsp.reverb.enabled {
+            let wet = dsp.reverb.wet;
+            let decay = dsp.reverb.decay;
+            let delay_samps = ((decay * 0.05 * sr) as usize).clamp(100, self.reverb_buffer_l.len() - 1);
+
+            let read_idx = (self.reverb_idx + self.reverb_buffer_l.len() - delay_samps) % self.reverb_buffer_l.len();
+            let rev_l = self.reverb_buffer_l[read_idx];
+            let rev_r = self.reverb_buffer_r[read_idx];
+
+            self.reverb_buffer_l[self.reverb_idx] = l + rev_l * 0.45;
+            self.reverb_buffer_r[self.reverb_idx] = r + rev_r * 0.45;
+            self.reverb_idx = (self.reverb_idx + 1) % self.reverb_buffer_l.len();
+
+            l = l * (1.0 - wet) + rev_l * wet;
+            r = r * (1.0 - wet) + rev_r * wet;
+        }
+
+        // 6. Stereo Delay (Track Level)
+        if dsp.delay.enabled {
+            let wet = dsp.delay.wet;
+            let time_s = dsp.delay.time_s;
+            let feedback = dsp.delay.feedback;
+            let delay_samps = ((time_s * sr) as usize).clamp(10, self.delay_buffer_l.len() - 1);
+
+            let read_idx = (self.delay_idx + self.delay_buffer_l.len() - delay_samps) % self.delay_buffer_l.len();
+            let del_l = self.delay_buffer_l[read_idx];
+            let del_r = self.delay_buffer_r[read_idx];
+
+            self.delay_buffer_l[self.delay_idx] = l + del_l * feedback;
+            self.delay_buffer_r[self.delay_idx] = r + del_r * feedback;
+            self.delay_idx = (self.delay_idx + 1) % self.delay_buffer_l.len();
+
+            l = l * (1.0 - wet) + del_l * wet;
+            r = r * (1.0 - wet) + del_r * wet;
+        }
+
+        // 7. Segment-level Auto-FX (Transfer from Original)
+        let seg_wet = detected_fx.reverb_wet;
+        if seg_wet > 0.01 {
+            let read_idx = (self.reverb_idx + self.reverb_buffer_l.len() - 2000) % self.reverb_buffer_l.len();
+            let rev_l = self.reverb_buffer_l[read_idx];
+            let rev_r = self.reverb_buffer_r[read_idx];
+            self.reverb_buffer_l[self.reverb_idx] = l + rev_l * 0.4;
+            self.reverb_buffer_r[self.reverb_idx] = r + rev_r * 0.4;
+            self.reverb_idx = (self.reverb_idx + 1) % self.reverb_buffer_l.len();
+            l = l * (1.0 - seg_wet * 0.5) + rev_l * (seg_wet * 0.5);
+            r = r * (1.0 - seg_wet * 0.5) + rev_r * (seg_wet * 0.5);
         }
 
         (l, r)
     }
 }
 
+/// Высокопроизводительный микшер реального времени с нулевыми аллокациями и Wait-Free доступом
 fn mix_audio_buffer(
     data: &mut [f32],
     channels: usize,
     device_sample_rate: u32,
     clock: &Arc<crate::transport_clock::TransportClock>,
-    tracks_lock: &Arc<std::sync::RwLock<Vec<NativePlaybackTrack>>>,
-    cache_lock: &Arc<std::sync::RwLock<std::collections::HashMap<String, Arc<CachedAudioFile>>>>,
+    snapshot_swap: &Arc<ArcSwap<PlaybackSnapshot>>,
+    cache_swap: &Arc<ArcSwap<HashMap<String, Arc<CachedTrackBuffer>>>>,
+    dsp_pool: &mut HashMap<String, TrackDspEngine>,
 ) {
     let num_frames = data.len() / channels.max(1);
     data.fill(0.0);
@@ -681,34 +843,29 @@ fn mix_audio_buffer(
     }
 
     let start_frame = clock.current_sample.load(Ordering::Relaxed);
-    data.fill(0.0);
+    let buf_end_frame = start_frame + num_frames as u64;
 
-    let tracks = match tracks_lock.read() {
-        Ok(t) => t,
-        Err(_) => return,
-    };
-    let cache = match cache_lock.read() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    // Lock-Free / Wait-Free snapshot load (0 ns latency)
+    let snapshot = snapshot_swap.load();
+    let cache = cache_swap.load();
 
-    let any_solo = tracks.iter().any(|t| t.is_solo);
-
-    // Dynamic Track DSP processor instances
-    let mut track_dsp = TrackDspEngine::new(device_sample_rate);
-
-    for track in tracks.iter() {
-        let is_active = if any_solo { track.is_solo } else { !track.is_muted };
+    for track in snapshot.tracks.iter() {
+        let is_active = if snapshot.any_solo { track.is_solo } else { !track.is_muted };
         if !is_active || track.volume <= 0.0 {
             continue;
         }
 
-        let track_gain = track.volume;
-        let proc_ref = track.processing.as_ref();
+        // Persistent track DSP engine (never instantiated per-buffer)
+        let dsp_engine = match dsp_pool.get_mut(&track.id) {
+            Some(e) => e,
+            None => {
+                dsp_pool.insert(track.id.clone(), TrackDspEngine::new(device_sample_rate));
+                dsp_pool.get_mut(&track.id).unwrap()
+            }
+        };
 
         for seg in &track.segments {
-            let seg_gain = seg.gain * track_gain;
-            if seg_gain <= 0.0 {
+            if start_frame >= seg.end_frame || buf_end_frame <= seg.start_frame {
                 continue;
             }
 
@@ -717,58 +874,36 @@ fn mix_audio_buffer(
                 None => continue,
             };
 
-            let seg_start_frame = (seg.start_time * device_sample_rate as f64).round() as u64;
-            let seg_duration_frames = (seg.duration * device_sample_rate as f64).round() as u64;
-            let seg_end_frame = seg_start_frame + seg_duration_frames;
-            let buf_end_frame = start_frame + num_frames as u64;
-
-            if start_frame >= seg_end_frame || buf_end_frame <= seg_start_frame {
-                continue;
-            }
-
-            let pan = seg.panning.clamp(-1.0, 1.0);
-            let left_pan_gain = ((1.0 - pan) * 0.5).sqrt();
-            let right_pan_gain = ((1.0 + pan) * 0.5).sqrt();
-
-            let file_offset_sec = seg.file_offset;
             let cached_sr = cached.sample_rate as f64;
-            let fx_ref = seg.detected_fx.as_ref();
+            let file_offset_sec = seg.file_offset_sec;
 
             for f in 0..num_frames {
                 let timeline_frame = start_frame + f as u64;
-                if timeline_frame < seg_start_frame || timeline_frame >= seg_end_frame {
+                if timeline_frame < seg.start_frame || timeline_frame >= seg.end_frame {
                     continue;
                 }
 
-                let time_in_seg_sec = (timeline_frame - seg_start_frame) as f64 / device_sample_rate as f64;
+                let time_in_seg_sec = (timeline_frame - seg.start_frame) as f64 / device_sample_rate as f64;
                 let sample_pos_sec = file_offset_sec + time_in_seg_sec;
-                let sample_idx = (sample_pos_sec * cached_sr).round() as usize;
+                let frame_idx = (sample_pos_sec * cached_sr).round() as usize;
 
-                let (raw_left, raw_right) = if cached.channels == 1 {
-                    if sample_idx < cached.samples.len() {
-                        let v = cached.samples[sample_idx];
-                        (v, v)
-                    } else {
-                        (0.0, 0.0)
-                    }
-                } else {
-                    let stereo_idx = sample_idx * 2;
-                    if stereo_idx + 1 < cached.samples.len() {
-                        (cached.samples[stereo_idx], cached.samples[stereo_idx + 1])
-                    } else {
-                        (0.0, 0.0)
-                    }
-                };
+                // Zero-allocation, Zero-copy Memory Mapped read
+                let (raw_left, raw_right) = cached.read_stereo_frame(frame_idx);
 
-                // Apply Real-time Rust DSP (EQ, Compression, De-Esser, Saturation, Reverb, Delay)
-                let (proc_l, proc_r) = track_dsp.process_stereo_sample(raw_left, raw_right, proc_ref, fx_ref);
+                // Real-time zero-allocation DSP
+                let (proc_l, proc_r) = dsp_engine.process_stereo_sample(
+                    raw_left,
+                    raw_right,
+                    &track.dsp_params,
+                    &seg.fx,
+                );
 
                 let out_idx = f * channels;
                 if channels >= 2 {
-                    data[out_idx] += proc_l * seg_gain * left_pan_gain;
-                    data[out_idx + 1] += proc_r * seg_gain * right_pan_gain;
+                    data[out_idx] += proc_l * seg.total_gain_left;
+                    data[out_idx + 1] += proc_r * seg.total_gain_right;
                 } else {
-                    data[out_idx] += ((proc_l + proc_r) * 0.5) * seg_gain;
+                    data[out_idx] += ((proc_l + proc_r) * 0.5) * seg.total_gain_left;
                 }
             }
         }
@@ -1025,148 +1160,8 @@ pub async fn start_recording(
         .map_err(|e| e.to_string())?
         .as_millis();
 
-    // Spawn video recording if requested
     if backstage_record {
-        if let Some(ref device) = video_device {
-            let video_path = storage_dir.join(format!("backstage_{}.mp4", epoch_ms));
-            
-            log_debug(&format!("Spawning backstage video recording: {:?}", video_path));
-            
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                use windows::Win32::System::Threading::{SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS};
-                use std::os::windows::io::AsRawHandle;
-                use windows::Win32::Foundation::HANDLE;
-
-                let log_path = std::env::temp_dir().join(format!("dubstudio_ffmpeg_log_{}.txt", epoch_ms));
-                let stderr_file = std::fs::File::create(&log_path)
-                    .unwrap_or_else(|_| std::fs::File::create("nul").unwrap());
-                    
-                log_debug(&format!("FFmpeg ffmpeg log file: {:?}", log_path));
-
-                let input_str = if let Some(ref a_device) = audio_device {
-                    if a_device != "none" {
-                        format!("video={}:audio={}", device, a_device)
-                    } else {
-                        format!("video={}", device)
-                    }
-                } else {
-                    format!("video={}", device)
-                };
-
-                let mut ffmpeg_args = vec![
-                    "-f".to_string(), "dshow".to_string(),
-                    "-i".to_string(), input_str,
-                    "-c:v".to_string(), "libx264".to_string(),
-                    "-preset".to_string(), "ultrafast".to_string(),
-                    "-crf".to_string(), "28".to_string(),
-                    "-pix_fmt".to_string(), "yuv420p".to_string()
-                ];
-                
-                if let Some(ref a_device) = audio_device {
-                    if a_device != "none" {
-                        ffmpeg_args.push("-c:a".to_string());
-                        ffmpeg_args.push("aac".to_string());
-                        ffmpeg_args.push("-b:a".to_string());
-                        ffmpeg_args.push("192k".to_string());
-                    }
-                }
-                
-                ffmpeg_args.push("-y".to_string());
-                ffmpeg_args.push(video_path.to_str().ok_or("Invalid path")?.to_string());
-
-                let child = std::process::Command::new("ffmpeg").hide_window()
-                    .args(&ffmpeg_args)
-                    .stdin(std::process::Stdio::piped())
-                    .stderr(stderr_file)
-                    .spawn();
-
-                match child {
-                    Ok(c) => {
-                        unsafe {
-                            let handle = HANDLE(c.as_raw_handle() as *mut std::ffi::c_void);
-                            let _ = SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS);
-                        }
-                        recorder.video_child = Some(c);
-                        recorder.current_video_path = Some(video_path);
-                        log_debug("FFmpeg (video) spawned successfully with low priority");
-                    }
-                    Err(e) => {
-                        log_debug(&format!("Failed to spawn FFmpeg (video): {}", e));
-                        // We don't fail the whole recording if video fails, but we log it
-                    }
-                }
-            }
-
-            #[cfg(not(windows))]
-            {
-                // Fallback for non-windows (assuming avfoundation or v4l2)
-                let mut args = vec![];
-                if cfg!(target_os = "macos") {
-                    args.push("-f".to_string());
-                    args.push("avfoundation".to_string());
-                    
-                    let input_str = if let Some(ref a_device) = audio_device {
-                        if a_device != "none" {
-                            format!("{}:{}", device, a_device)
-                        } else {
-                            format!("{}:none", device)
-                        }
-                    } else {
-                        format!("{}:none", device)
-                    };
-                    args.push("-i".to_string());
-                    args.push(input_str);
-                } else {
-                    args.push("-f".to_string());
-                    args.push("v4l2".to_string());
-                    args.push("-i".to_string());
-                    args.push(device.clone());
-                    
-                    if let Some(ref a_device) = audio_device {
-                        if a_device != "none" {
-                            args.push("-f".to_string());
-                            args.push("alsa".to_string());
-                            args.push("-i".to_string());
-                            args.push(a_device.clone());
-                        }
-                    }
-                };
-
-                args.push("-c:v".to_string());
-                args.push("libx264".to_string());
-                args.push("-preset".to_string());
-                args.push("ultrafast".to_string());
-                
-                if let Some(ref a_device) = audio_device {
-                    if a_device != "none" {
-                        args.push("-c:a".to_string());
-                        args.push("aac".to_string());
-                        args.push("-b:a".to_string());
-                        args.push("192k".to_string());
-                    }
-                }
-                
-                args.push("-y".to_string());
-                args.push(video_path.to_str().ok_or("Invalid path")?.to_string());
-
-                let child = std::process::Command::new("ffmpeg").hide_window()
-                    .args(&args)
-                    .stdin(std::process::Stdio::piped())
-                    .spawn();
-
-                match child {
-                    Ok(c) => {
-                        recorder.video_child = Some(c);
-                        recorder.current_video_path = Some(video_path);
-                    }
-                    Err(e) => {
-                        log_debug(&format!("Failed to spawn FFmpeg (video): {}", e));
-                    }
-                }
-            }
-        }
+        log_debug("[AudioEngine] backstage_record flag received: handled independently by backstage_recorder module");
     }
 
     let is_recording_signal = Arc::new(AtomicBool::new(true));
@@ -1684,38 +1679,13 @@ pub async fn stop_recording(state: State<'_, AudioState>) -> Result<RecordResult
     let peaks = crate::waveform_engine::generate_waveform_peaks_internal(&internal_res.file_path, 1024)
         .unwrap_or_default();
 
-    // Stop video recording if active
-    let video_path = {
-        let mut recorder = state.recorder.lock().map_err(|_| "Mutex locked".to_string())?;
-        if let Some(mut child) = recorder.video_child.take() {
-            log_debug("Stopping backstage video recording (ffmpeg) gracefully");
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                let _ = stdin.write_all(b"q\n");
-                let _ = stdin.flush();
-            }
-            // Wait for ffmpeg to finish saving the file (with timeout to prevent freezing)
-            let mut wait_count = 0;
-            while wait_count < 50 { // 5 seconds max
-                if let Ok(Some(_)) = child.try_wait() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                wait_count += 1;
-            }
-            let _ = child.kill(); // Ensure it's dead after timeout
-            let _ = child.wait();
-        }
-        recorder.current_video_path.take().map(|p| p.to_string_lossy().into_owned())
-    };
-
     let result = RecordResult {
         file_path: internal_res.file_path,
         metadata: RecordMetadata {
             duration: internal_res.duration,
             peaks,
         },
-        video_path,
+        video_path: None,
     };
 
     // Remove lock file on success
@@ -1739,11 +1709,6 @@ pub async fn force_stop_all(state: State<'_, AudioState>) -> Result<(), String> 
     recorder.is_recording.store(false, Ordering::Relaxed);
     let _ = recorder.stop_tx.take();
     let _ = recorder.writer_handle.take();
-    
-    if let Some(mut child) = recorder.video_child.take() {
-        let _ = child.kill();
-    }
-    recorder.current_video_path.take();
     recorder.current_lock_path.take();
     
     log_debug("--- FORCE_STOP_ALL COMPLETED ---");

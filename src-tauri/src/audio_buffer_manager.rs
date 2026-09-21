@@ -177,6 +177,76 @@ impl CachedTrackBuffer {
             AudioBufferData::PcmFloat { samples, .. } => samples.len() * std::mem::size_of::<f32>(),
         }
     }
+
+    /// Быстрое чтение одного сэмпла (f32) без аллокаций памяти
+    #[inline(always)]
+    pub fn read_sample_f32(&self, sample_idx: usize) -> f32 {
+        match &self.data {
+            AudioBufferData::PcmFloat { samples, .. } => {
+                if sample_idx < samples.len() {
+                    samples[sample_idx]
+                } else {
+                    0.0
+                }
+            }
+            AudioBufferData::MmapWav {
+                mmap,
+                spec,
+                data_offset_bytes,
+                total_frames,
+            } => {
+                let channels = spec.channels as usize;
+                let total_samples = total_frames * channels;
+                if sample_idx >= total_samples {
+                    return 0.0;
+                }
+                let bytes_per_sample = (spec.bits_per_sample / 8) as usize;
+                let byte_idx = data_offset_bytes + sample_idx * bytes_per_sample;
+                if byte_idx + bytes_per_sample > mmap.len() {
+                    return 0.0;
+                }
+                let mmap_slice = &mmap[byte_idx..];
+                match (spec.sample_format, spec.bits_per_sample) {
+                    (SampleFormat::Float, 32) => {
+                        let b = [mmap_slice[0], mmap_slice[1], mmap_slice[2], mmap_slice[3]];
+                        f32::from_le_bytes(b)
+                    }
+                    (SampleFormat::Int, 16) => {
+                        let b = [mmap_slice[0], mmap_slice[1]];
+                        (i16::from_le_bytes(b) as f32) / 32768.0
+                    }
+                    (SampleFormat::Int, 24) => {
+                        let b0 = mmap_slice[0];
+                        let b1 = mmap_slice[1];
+                        let b2 = mmap_slice[2];
+                        let raw_i32 = ((b2 as i8 as i32) << 16) | ((b1 as i32) << 8) | (b0 as i32);
+                        (raw_i32 as f32) / 8388608.0
+                    }
+                    (SampleFormat::Int, 32) => {
+                        let b = [mmap_slice[0], mmap_slice[1], mmap_slice[2], mmap_slice[3]];
+                        (i32::from_le_bytes(b) as f32) / 2147483648.0
+                    }
+                    _ => 0.0,
+                }
+            }
+        }
+    }
+
+    /// Быстрое чтение стерео-фрейма (L, R) без аллокаций памяти
+    #[inline(always)]
+    pub fn read_stereo_frame(&self, frame_idx: usize) -> (f32, f32) {
+        if frame_idx >= self.total_frames {
+            return (0.0, 0.0);
+        }
+        if self.channels == 1 {
+            let s = self.read_sample_f32(frame_idx);
+            (s, s)
+        } else {
+            let s0 = self.read_sample_f32(frame_idx * 2);
+            let s1 = self.read_sample_f32(frame_idx * 2 + 1);
+            (s0, s1)
+        }
+    }
 }
 
 // ============================================================================
@@ -238,6 +308,27 @@ impl AudioBufferCache {
 // ============================================================================
 // ДЕКОДЕРЫ И ЗАГРУЗЧИКИ (WAV ZERO-COPY MMAP И NATIVE SYMPHONIA)
 // ============================================================================
+
+/// Синхронная прямая загрузка аудиофайла (WAV Zero-Copy Mmap или Symphonia)
+pub fn load_audio_file_sync(file_path: &str) -> Result<CachedTrackBuffer, String> {
+    let norm_path_str = normalize_windows_path(file_path);
+    let path = Path::new(&norm_path_str);
+    if !path.exists() {
+        return Err(format!("Audio file does not exist: {}", norm_path_str));
+    }
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    if ext == "wav" {
+        match load_wav_mmap(path) {
+            Ok(b) => Ok(b),
+            Err(err) => {
+                log_debug(&format!("[AudioBufferManager] Mmap WAV fallback to Symphonia: {}", err));
+                load_compressed_symphonia(path)
+            }
+        }
+    } else {
+        load_compressed_symphonia(path)
+    }
+}
 
 /// Быстрая Zero-Copy инициализация WAV файлов через memmap2
 fn load_wav_mmap(file_path: &Path) -> Result<CachedTrackBuffer, String> {

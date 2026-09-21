@@ -2,8 +2,7 @@
 // DUB MIXING STUDIO PRO - TRANSACTIONAL SQLITE PROJECT REPOSITORY (RUST)
 // Высокопроизводительный транзакционный репозиторий проектов на SQLite/SQLx
 // Полная ликвидация дублирующего слоя IndexedDB/LocalStorage.
-// Пакетные транзакции (BEGIN TRANSACTION), поддержка 1000+ клипов за одну операцию,
-// надежный WAL-режим и бесконечный/глубокий дельта-снапшотный Undo/Redo движок.
+// Исключены блокировки мьютекса (Deadlocks) и SQLite Busy Lock при Undo/Redo.
 // ============================================================================
 
 use std::collections::HashSet;
@@ -160,14 +159,32 @@ pub struct ProjectSummary {
 }
 
 // ============================================================================
-// 2. ИНИЦИАЛИЗАЦИЯ И МИГРАЦИЯ ТАБЛИЦ БАЗЫ ДАННЫХ
+// 2. БЕЗОПАСНОЕ ИЗВЛЕЧЕНИЕ ПУЛА БАЗЫ ДАННЫХ (БЕЗ УДЕРЖАНИЯ MutexGuard)
+// ============================================================================
+
+/// Метод получения пула соединений без удержания tokio::sync::MutexGuard
+/// на протяжении транзакции. Клонирует Pool<Sqlite> (дешевый Arc) и немедленно освобождает мьютекс.
+pub async fn get_db_pool(state: &State<'_, AppState>) -> Result<Pool<Sqlite>, String> {
+    let guard = state.db.lock().await;
+    let pool = guard
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "Database not initialized".to_string())?;
+    drop(guard); // Явно освобождаем MutexGuard, чтобы не блокировать параллельные потоки
+    Ok(pool)
+}
+
+// ============================================================================
+// 3. ИНИЦИАЛИЗАЦИЯ И МИГРАЦИЯ ТАБЛИЦ БАЗЫ ДАННЫХ
 // ============================================================================
 
 pub async fn run_project_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
-    // Включение WAL режима и внешних ключей
+    // Включение WAL режима, PRAGMA busy_timeout и внешних ключей
     sqlx::query("PRAGMA journal_mode = WAL;").execute(pool).await?;
+    sqlx::query("PRAGMA busy_timeout = 10000;").execute(pool).await?;
     sqlx::query("PRAGMA synchronous = NORMAL;").execute(pool).await?;
     sqlx::query("PRAGMA foreign_keys = ON;").execute(pool).await?;
+    sqlx::query("PRAGMA temp_store = MEMORY;").execute(pool).await?;
 
     // 1. Таблица проектов
     sqlx::query("
@@ -185,7 +202,6 @@ pub async fn run_project_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Err
         );
     ").execute(pool).await?;
 
-    // Миграции для обновления существующей схемы базы данных:
     let _ = sqlx::query("ALTER TABLE projects ADD COLUMN sample_rate INTEGER NOT NULL DEFAULT 48000;").execute(pool).await;
     let _ = sqlx::query("ALTER TABLE projects ADD COLUMN frame_rate REAL NOT NULL DEFAULT 24.0;").execute(pool).await;
     let _ = sqlx::query("ALTER TABLE projects ADD COLUMN target_lufs REAL NOT NULL DEFAULT -14.0;").execute(pool).await;
@@ -194,7 +210,6 @@ pub async fn run_project_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Err
     let _ = sqlx::query("ALTER TABLE projects ADD COLUMN audio_offset_ms REAL NOT NULL DEFAULT 0.0;").execute(pool).await;
     let _ = sqlx::query("ALTER TABLE projects ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';").execute(pool).await;
     let _ = sqlx::query("ALTER TABLE projects ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}';").execute(pool).await;
-    let _ = sqlx::query("UPDATE projects SET config_json = '{}' WHERE config_json IS NULL;").execute(pool).await;
 
     // 2. Таблица дорожек
     sqlx::query("
@@ -266,7 +281,7 @@ pub async fn run_project_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Err
         );
     ").execute(pool).await?;
 
-    // 6. Таблица снапшотов истории для транзакционного Undo/Redo
+    // 6. Таблицы снапшотов и дельт истории для транзакционного Undo/Redo
     sqlx::query("
         CREATE TABLE IF NOT EXISTS history_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -279,26 +294,42 @@ pub async fn run_project_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Err
         );
     ").execute(pool).await?;
 
-    // Индексы для быстрой фильтрации и джойнов
+    sqlx::query("
+        CREATE TABLE IF NOT EXISTS history_deltas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            action_description TEXT NOT NULL DEFAULT '',
+            undo_patch TEXT NOT NULL DEFAULT '[]',
+            redo_patch TEXT NOT NULL DEFAULT '[]',
+            state_json TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            sequence_index INTEGER NOT NULL DEFAULT 0,
+            is_current BOOLEAN NOT NULL DEFAULT 0
+        );
+    ").execute(pool).await?;
+
+    let _ = sqlx::query("ALTER TABLE history_deltas ADD COLUMN state_json TEXT NOT NULL DEFAULT '{}';").execute(pool).await;
+
+    // Индексы для ускорения работы
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracks_project ON tracks(project_id);").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_clips_track ON audio_clips(track_id);").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_subtitles_project ON subtitles(project_id);").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_history_proj_seq ON history_snapshots(project_id, sequence_index);").execute(pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_history_deltas_proj ON history_deltas(project_id, sequence_index);").execute(pool).await?;
 
-    log_info("Project repository SQLite migrations executed successfully with WAL mode.");
+    log_info("Project repository SQLite migrations executed with WAL mode and busy_timeout=10000.");
     Ok(())
 }
 
 // ============================================================================
-// 3. РЕАЛИЗАЦИЯ ТРАНЗАКЦИОННОГО СОХРАНЕНИЯ, ЧТЕНИЯ И ИСТОРИИ
+// 4. РЕАЛИЗАЦИЯ ТРАНЗАКЦИОННОГО СОХРАНЕНИЯ, ЧТЕНИЯ И ИСТОРИИ
 // ============================================================================
 
-/// Внутреннее атомарное сохранение проекта в транзакции
-async fn execute_save_project_in_tx(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
+/// Сохранение структурных сущностей проекта (проекты, треки, клипы, пресеты, субтитры)
+async fn execute_save_project_body(
+    conn: &mut sqlx::SqliteConnection,
     project: &FullProjectPayload,
-    action_name: &str,
-) -> Result<ProjectSaveResult, sqlx::Error> {
+) -> Result<(), sqlx::Error> {
     let now = Utc::now().to_rfc3339();
     let created_at = if project.created_at.is_empty() {
         now.clone()
@@ -306,7 +337,6 @@ async fn execute_save_project_in_tx(
         project.created_at.clone()
     };
     let updated_at = now.clone();
-
     let meta_str = serde_json::to_string(&project.metadata).unwrap_or_else(|_| "{}".to_string());
 
     // 1. UPSERT Project
@@ -335,7 +365,7 @@ async fn execute_save_project_in_tx(
     .bind(project.audio_offset_ms)
     .bind(&meta_str)
     .bind(&meta_str)
-    .execute(&mut **tx)
+    .execute(&mut *conn)
     .await?;
 
     // 2. Обработка Tracks & Clips
@@ -367,10 +397,9 @@ async fn execute_save_project_in_tx(
         .bind(track.is_muted)
         .bind(track.is_solo)
         .bind(if track.order_index != 0 { track.order_index } else { idx as i64 })
-        .execute(&mut **tx)
+        .execute(&mut *conn)
         .await?;
 
-        // Сохранение аудио-клипов для дорожки
         let mut current_clip_ids = HashSet::new();
         for clip in &track.clips {
             current_clip_ids.insert(clip.id.clone());
@@ -398,14 +427,14 @@ async fn execute_save_project_in_tx(
             .bind(clip.gain_db)
             .bind(clip.is_active)
             .bind(&clip.backstage_video_path)
-            .execute(&mut **tx)
+            .execute(&mut *conn)
             .await?;
         }
 
-        // Удаление устаревших клипов данной дорожки
+        // Удаление удаленных клипов
         let existing_clips = sqlx::query("SELECT id FROM audio_clips WHERE track_id = ?")
             .bind(&track.id)
-            .fetch_all(&mut **tx)
+            .fetch_all(&mut *conn)
             .await?;
 
         for c_row in existing_clips {
@@ -413,12 +442,11 @@ async fn execute_save_project_in_tx(
             if !current_clip_ids.contains(&cid) {
                 sqlx::query("DELETE FROM audio_clips WHERE id = ?")
                     .bind(&cid)
-                    .execute(&mut **tx)
+                    .execute(&mut *conn)
                     .await?;
             }
         }
 
-        // Пресет рэка (если есть)
         if let Some(preset) = &track.rack_preset {
             sqlx::query("
                 INSERT INTO rack_presets (id, track_id, fx_chain_json)
@@ -429,15 +457,15 @@ async fn execute_save_project_in_tx(
             .bind(&preset.id)
             .bind(&track.id)
             .bind(&preset.fx_chain_json)
-            .execute(&mut **tx)
+            .execute(&mut *conn)
             .await?;
         }
     }
 
-    // Удаление удаленных дорожек проекта (каскадно удалятся их клипы и пресеты)
+    // Удаление удаленных дорожек
     let existing_tracks = sqlx::query("SELECT id FROM tracks WHERE project_id = ?")
         .bind(&project.id)
-        .fetch_all(&mut **tx)
+        .fetch_all(&mut *conn)
         .await?;
 
     for t_row in existing_tracks {
@@ -445,12 +473,12 @@ async fn execute_save_project_in_tx(
         if !current_track_ids.contains(&tid) {
             sqlx::query("DELETE FROM tracks WHERE id = ?")
                 .bind(&tid)
-                .execute(&mut **tx)
+                .execute(&mut *conn)
                 .await?;
         }
     }
 
-    // 3. Обработка субтитров
+    // 3. Субтитры
     let mut current_sub_ids = HashSet::new();
     for sub in &project.subtitles {
         current_sub_ids.insert(sub.id.clone());
@@ -474,13 +502,13 @@ async fn execute_save_project_in_tx(
         .bind(sub.start_time_ms)
         .bind(sub.end_time_ms)
         .bind(&sub.matched_clip_id)
-        .execute(&mut **tx)
+        .execute(&mut *conn)
         .await?;
     }
 
     let existing_subs = sqlx::query("SELECT id FROM subtitles WHERE project_id = ?")
         .bind(&project.id)
-        .fetch_all(&mut **tx)
+        .fetch_all(&mut *conn)
         .await?;
 
     for s_row in existing_subs {
@@ -488,44 +516,65 @@ async fn execute_save_project_in_tx(
         if !current_sub_ids.contains(&sid) {
             sqlx::query("DELETE FROM subtitles WHERE id = ?")
                 .bind(&sid)
-                .execute(&mut **tx)
+                .execute(&mut *conn)
                 .await?;
         }
     }
 
-    // 4. Запись дельта-снапшота истории для Undo/Redo
+    Ok(())
+}
+
+/// Запись дельта-снапшота истории проекта с защитой от переполнения стека (лимит 200 шагов)
+async fn record_history_snapshot(
+    conn: &mut sqlx::SqliteConnection,
+    project: &FullProjectPayload,
+    action_name: &str,
+) -> Result<ProjectSaveResult, sqlx::Error> {
+    let now = Utc::now().to_rfc3339();
+
+    // 1. Получаем текущую последовательность
     let current_snap = sqlx::query("
         SELECT sequence_index FROM history_snapshots 
         WHERE project_id = ? AND is_current = 1 
         ORDER BY sequence_index DESC LIMIT 1
     ")
     .bind(&project.id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *conn)
     .await?;
 
     let next_sequence = match current_snap {
         Some(row) => {
             let cur_seq: i64 = row.get("sequence_index");
-            // Очищаем ветку Redo, если пользователь сделал новое действие после Undo
+            // Очищаем ветку Redo при совершении нового действия
             sqlx::query("DELETE FROM history_snapshots WHERE project_id = ? AND sequence_index > ?")
                 .bind(&project.id)
                 .bind(cur_seq)
-                .execute(&mut **tx)
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query("DELETE FROM history_deltas WHERE project_id = ? AND sequence_index > ?")
+                .bind(&project.id)
+                .bind(cur_seq)
+                .execute(&mut *conn)
                 .await?;
             cur_seq + 1
         }
         None => 1,
     };
 
-    // Снимаем флаг is_current с предыдущих
+    // 2. Сбрасываем флаг is_current с предыдущих записей
     sqlx::query("UPDATE history_snapshots SET is_current = 0 WHERE project_id = ?")
         .bind(&project.id)
-        .execute(&mut **tx)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("UPDATE history_deltas SET is_current = 0 WHERE project_id = ?")
+        .bind(&project.id)
+        .execute(&mut *conn)
         .await?;
 
-    // Сериализуем полный текущий проект для снапшота
+    // 3. Сериализуем текущее состояние
     let state_json = serde_json::to_string(project).unwrap_or_else(|_| "{}".to_string());
 
+    // 4. Сохраняем в history_snapshots и history_deltas
     sqlx::query("
         INSERT INTO history_snapshots (
             project_id, action_name, state_json, created_at, sequence_index, is_current
@@ -537,25 +586,48 @@ async fn execute_save_project_in_tx(
     .bind(&state_json)
     .bind(&now)
     .bind(next_sequence)
-    .execute(&mut **tx)
+    .execute(&mut *conn)
     .await?;
 
-    // Ограничиваем историю 50 последними снапшотами
+    sqlx::query("
+        INSERT INTO history_deltas (
+            project_id, action_description, undo_patch, redo_patch, state_json, created_at, sequence_index, is_current
+        )
+        VALUES (?1, ?2, '[]', '[]', ?3, ?4, ?5, 1)
+    ")
+    .bind(&project.id)
+    .bind(action_name)
+    .bind(&state_json)
+    .bind(&now)
+    .bind(next_sequence)
+    .execute(&mut *conn)
+    .await?;
+
+    // 5. Ограничение стека истории: строгий лимит 200 последних снимков
     sqlx::query("
         DELETE FROM history_snapshots 
-        WHERE project_id = ? AND sequence_index < (? - 50)
+        WHERE project_id = ? AND sequence_index < (? - 200)
     ")
     .bind(&project.id)
     .bind(next_sequence)
-    .execute(&mut **tx)
+    .execute(&mut *conn)
+    .await?;
+
+    sqlx::query("
+        DELETE FROM history_deltas 
+        WHERE project_id = ? AND sequence_index < (? - 200)
+    ")
+    .bind(&project.id)
+    .bind(next_sequence)
+    .execute(&mut *conn)
     .await?;
 
     let can_undo = next_sequence > 1;
-    let can_redo = false; // После нового действия redo ветка сброшена
+    let can_redo = false;
 
     Ok(ProjectSaveResult {
         project_id: project.id.clone(),
-        updated_at,
+        updated_at: now,
         can_undo,
         can_redo,
         snapshot_sequence: next_sequence,
@@ -685,30 +757,41 @@ pub async fn execute_load_project(
 }
 
 // ============================================================================
-// 4. TAURI V2 КОМАНДЫ (COMMAND HANDLERS)
+// 5. TAURI V2 КОМАНДЫ (COMMAND HANDLERS)
 // ============================================================================
 
-/// Атомарное сохранение всего проекта в базе с генерацией снапшота
+/// Атомарное сохранение всего проекта в базе с поддержкой BEGIN IMMEDIATE
 #[command]
 pub async fn save_project_atomic(
     state: State<'_, AppState>,
     project: FullProjectPayload,
     action_name: Option<String>,
 ) -> Result<ProjectSaveResult, String> {
-    let mutex = state.db.lock().await;
-    let pool = mutex.as_ref().ok_or("Database not initialized")?;
-
+    let pool = get_db_pool(&state).await?;
     let act_name = action_name.unwrap_or_else(|| "Save Project".to_string());
-    log_debug(&format!("save_project_atomic for '{}' (ID: {}) with {} tracks, {} subs", 
-        project.name, project.id, project.tracks.len(), project.subtitles.len()));
 
-    let mut tx = pool.begin().await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
+    log_debug(&format!(
+        "save_project_atomic for '{}' (ID: {}) with {} tracks, {} subs",
+        project.name, project.id, project.tracks.len(), project.subtitles.len()
+    ));
 
-    let save_res = execute_save_project_in_tx(&mut tx, &project, &act_name)
-        .await
-        .map_err(|e| format!("Atomic save error: {}", e))?;
+    let mut conn = pool.acquire().await.map_err(|e| format!("Failed to acquire connection: {}", e))?;
+    sqlx::query("BEGIN IMMEDIATE;").execute(&mut *conn).await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
 
-    tx.commit().await.map_err(|e| format!("Failed to commit transaction: {}", e))?;
+    if let Err(e) = execute_save_project_body(&mut conn, &project).await {
+        let _ = sqlx::query("ROLLBACK;").execute(&mut *conn).await;
+        return Err(format!("Atomic save error: {}", e));
+    }
+
+    let save_res = match record_history_snapshot(&mut conn, &project, &act_name).await {
+        Ok(res) => res,
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK;").execute(&mut *conn).await;
+            return Err(format!("Failed to record history snapshot: {}", e));
+        }
+    };
+
+    sqlx::query("COMMIT;").execute(&mut *conn).await.map_err(|e| format!("Failed to commit save transaction: {}", e))?;
 
     log_info(&format!("Project '{}' saved atomically to SQLite.", project.name));
     Ok(save_res)
@@ -720,110 +803,149 @@ pub async fn load_project_by_id(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<FullProjectPayload, String> {
-    let mutex = state.db.lock().await;
-    let pool = mutex.as_ref().ok_or("Database not initialized")?;
+    let pool = get_db_pool(&state).await?;
 
     log_debug(&format!("load_project_by_id: {}", project_id));
-    execute_load_project(pool, &project_id)
+    execute_load_project(&pool, &project_id)
         .await
         .map_err(|e| format!("Failed to load project {}: {}", project_id, e))
 }
 
-/// Откат действия (Undo) в рамках проекта
+/// Откат действия (Undo) в рамках проекта с BEGIN IMMEDIATE
 #[command]
 pub async fn undo_project_action(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<FullProjectPayload, String> {
-    let mutex = state.db.lock().await;
-    let pool = mutex.as_ref().ok_or("Database not initialized")?;
+    let pool = get_db_pool(&state).await?;
 
-    let mut tx = pool.begin().await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
+    let mut conn = pool.acquire().await.map_err(|e| format!("Failed to acquire connection: {}", e))?;
+    sqlx::query("BEGIN IMMEDIATE;").execute(&mut *conn).await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
 
-    // Получаем текущую последовательность
+    // 1. Извлекаем текущий указатель
     let current_row = sqlx::query("
         SELECT sequence_index FROM history_snapshots
         WHERE project_id = ? AND is_current = 1
-        LIMIT 1
+        ORDER BY sequence_index DESC LIMIT 1
     ")
     .bind(&project_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|e| e.to_string())?;
 
     let cur_seq: i64 = match current_row {
         Some(r) => r.get("sequence_index"),
-        None => return Err("No current history state found".to_string()),
+        None => {
+            let _ = sqlx::query("ROLLBACK;").execute(&mut *conn).await;
+            return Err("No current history state found".to_string());
+        }
     };
 
     if cur_seq <= 1 {
+        let _ = sqlx::query("ROLLBACK;").execute(&mut *conn).await;
         return Err("Cannot undo: already at the earliest state".to_string());
     }
 
     let target_seq = cur_seq - 1;
 
-    // Ищем предыдущий снапшот
+    // 2. Ищем целевой снимок
     let target_snap = sqlx::query("
         SELECT state_json FROM history_snapshots
         WHERE project_id = ? AND sequence_index = ?
     ")
     .bind(&project_id)
     .bind(target_seq)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|e| e.to_string())?;
 
-    let state_json: String = target_snap
-        .ok_or_else(|| "Target undo snapshot not found".to_string())?
-        .get("state_json");
+    let target_snap = match target_snap {
+        Some(r) => r,
+        None => {
+            sqlx::query("
+                SELECT state_json FROM history_deltas
+                WHERE project_id = ? AND sequence_index = ?
+            ")
+            .bind(&project_id)
+            .bind(target_seq)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Target undo snapshot not found".to_string())?
+        }
+    };
+
+    let state_json: String = target_snap.get("state_json");
 
     let restored_payload: FullProjectPayload = serde_json::from_str(&state_json)
         .map_err(|e| format!("Corrupted snapshot JSON: {}", e))?;
 
-    // Переключаем указатель is_current
+    // 3. Восстанавливаем сущности в базе данных
+    if let Err(e) = execute_save_project_body(&mut conn, &restored_payload).await {
+        let _ = sqlx::query("ROLLBACK;").execute(&mut *conn).await;
+        return Err(format!("Failed to restore project tables during undo: {}", e));
+    }
+
+    // 4. Обновляем указатели
     sqlx::query("UPDATE history_snapshots SET is_current = 0 WHERE project_id = ?")
         .bind(&project_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .map_err(|e| e.to_string())?;
 
     sqlx::query("UPDATE history_snapshots SET is_current = 1 WHERE project_id = ? AND sequence_index = ?")
         .bind(&project_id)
         .bind(target_seq)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .map_err(|e| e.to_string())?;
 
-    tx.commit().await.map_err(|e| format!("Failed to commit undo: {}", e))?;
+    sqlx::query("UPDATE history_deltas SET is_current = 0 WHERE project_id = ?")
+        .bind(&project_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query("UPDATE history_deltas SET is_current = 1 WHERE project_id = ? AND sequence_index = ?")
+        .bind(&project_id)
+        .bind(target_seq)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query("COMMIT;").execute(&mut *conn).await.map_err(|e| format!("Failed to commit undo: {}", e))?;
 
     log_info(&format!("Undo applied successfully for project {}. Restored to seq {}.", project_id, target_seq));
     Ok(restored_payload)
 }
 
-/// Повтор действия (Redo) в рамках проекта
+/// Повтор действия (Redo) в рамках проекта с BEGIN IMMEDIATE
 #[command]
 pub async fn redo_project_action(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<FullProjectPayload, String> {
-    let mutex = state.db.lock().await;
-    let pool = mutex.as_ref().ok_or("Database not initialized")?;
+    let pool = get_db_pool(&state).await?;
 
-    let mut tx = pool.begin().await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
+    let mut conn = pool.acquire().await.map_err(|e| format!("Failed to acquire connection: {}", e))?;
+    sqlx::query("BEGIN IMMEDIATE;").execute(&mut *conn).await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
 
     let current_row = sqlx::query("
         SELECT sequence_index FROM history_snapshots
         WHERE project_id = ? AND is_current = 1
-        LIMIT 1
+        ORDER BY sequence_index DESC LIMIT 1
     ")
     .bind(&project_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|e| e.to_string())?;
 
     let cur_seq: i64 = match current_row {
         Some(r) => r.get("sequence_index"),
-        None => return Err("No current history state found".to_string()),
+        None => {
+            let _ = sqlx::query("ROLLBACK;").execute(&mut *conn).await;
+            return Err("No current history state found".to_string());
+        }
     };
 
     let target_seq = cur_seq + 1;
@@ -834,31 +956,63 @@ pub async fn redo_project_action(
     ")
     .bind(&project_id)
     .bind(target_seq)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|e| e.to_string())?;
 
-    let state_json: String = target_snap
-        .ok_or_else(|| "Cannot redo: already at the newest state".to_string())?
-        .get("state_json");
+    let target_snap = match target_snap {
+        Some(r) => r,
+        None => {
+            sqlx::query("
+                SELECT state_json FROM history_deltas
+                WHERE project_id = ? AND sequence_index = ?
+            ")
+            .bind(&project_id)
+            .bind(target_seq)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Cannot redo: already at the newest state".to_string())?
+        }
+    };
+
+    let state_json: String = target_snap.get("state_json");
 
     let restored_payload: FullProjectPayload = serde_json::from_str(&state_json)
         .map_err(|e| format!("Corrupted snapshot JSON: {}", e))?;
 
+    if let Err(e) = execute_save_project_body(&mut conn, &restored_payload).await {
+        let _ = sqlx::query("ROLLBACK;").execute(&mut *conn).await;
+        return Err(format!("Failed to restore project tables during redo: {}", e));
+    }
+
     sqlx::query("UPDATE history_snapshots SET is_current = 0 WHERE project_id = ?")
         .bind(&project_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .map_err(|e| e.to_string())?;
 
     sqlx::query("UPDATE history_snapshots SET is_current = 1 WHERE project_id = ? AND sequence_index = ?")
         .bind(&project_id)
         .bind(target_seq)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .map_err(|e| e.to_string())?;
 
-    tx.commit().await.map_err(|e| format!("Failed to commit redo: {}", e))?;
+    sqlx::query("UPDATE history_deltas SET is_current = 0 WHERE project_id = ?")
+        .bind(&project_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query("UPDATE history_deltas SET is_current = 1 WHERE project_id = ? AND sequence_index = ?")
+        .bind(&project_id)
+        .bind(target_seq)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query("COMMIT;").execute(&mut *conn).await.map_err(|e| format!("Failed to commit redo: {}", e))?;
 
     log_info(&format!("Redo applied successfully for project {}. Advanced to seq {}.", project_id, target_seq));
     Ok(restored_payload)
@@ -869,8 +1023,7 @@ pub async fn redo_project_action(
 pub async fn list_all_projects(
     state: State<'_, AppState>,
 ) -> Result<Vec<ProjectSummary>, String> {
-    let mutex = state.db.lock().await;
-    let pool = mutex.as_ref().ok_or("Database not initialized")?;
+    let pool = get_db_pool(&state).await?;
 
     let rows = sqlx::query("
         SELECT 
@@ -881,7 +1034,7 @@ pub async fn list_all_projects(
         FROM projects p
         ORDER BY p.updated_at DESC
     ")
-    .fetch_all(pool)
+    .fetch_all(&pool)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -910,12 +1063,11 @@ pub async fn delete_project(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<(), String> {
-    let mutex = state.db.lock().await;
-    let pool = mutex.as_ref().ok_or("Database not initialized")?;
+    let pool = get_db_pool(&state).await?;
 
     sqlx::query("DELETE FROM projects WHERE id = ?")
         .bind(&project_id)
-        .execute(pool)
+        .execute(&pool)
         .await
         .map_err(|e| e.to_string())?;
 

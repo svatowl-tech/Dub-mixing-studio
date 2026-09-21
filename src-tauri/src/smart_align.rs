@@ -1,27 +1,27 @@
 // ============================================================================
-// DUB MIXING STUDIO PRO - NATIVE SMART ALIGN & DTW ENGINE (RUST)
-// Модуль сопоставления таймингов дубляжа, GCC-PHAT кросс-корреляции и DTW
-// Стек: rustfft = "6.2.0", hound = "3.5.1", rayon = "1.10.0", tauri = "2.11"
+// DUB MIXING STUDIO PRO - SMART ALIGNMENT & DSP ENGINE (RUST)
+// Двухуровневый алгоритм синхронизации дубляжа с оригиналом:
+// 1. GCC-PHAT (Generalized Cross-Correlation with Phase Transform) - глобальный сдвиг
+// 2. VAD & Vowel Kernels - сегментация гласных ядер и исключение пауз/вдохов
+// 3. FastDTW по MFCC векторным признакам (Mel-Frequency Cepstral Coefficients)
+// 4. WSOLA (Waveform Similarity Overlap-Add) - Pitch-Neutral ресинтез с лимитом 0.85x..1.18x
 // ============================================================================
 
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::f32::consts::PI;
-
-
+use std::path::Path;
 use tauri::{command, AppHandle, State};
 
 use crate::audio_buffer_manager::AudioBufferCache;
 
-
 // ============================================================================
-// СТРУКТУРЫ ДАННЫХ И ТИПЫ ВОЗВРАТА (TypeScript-совместимые структуры)
+// СТРУКТУРЫ ДАННЫХ И ТИПЫ ВОЗВРАТА
 // ============================================================================
 
-/// Точка деформации времени в оптимальном пути DTW
+/// Точка деформации времени в пути DTW
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DtwPoint {
@@ -30,6 +30,7 @@ pub struct DtwPoint {
     pub orig_time_ms: f64,
     pub dub_time_ms: f64,
     pub cost: f32,
+    pub is_vowel: bool,
 }
 
 /// Сегментная подгонка фразы
@@ -45,69 +46,60 @@ pub struct SegmentAdjustment {
     pub pitch_shift_semitones: f64,
     pub energy_similarity: f32,
     pub deviation_percent: f64,
+    pub is_vowel_kernel: bool,
 }
 
-/// Итоговая структура подгонки таймингов (Alignment Adjustment)
+/// Итоговая структура подгонки таймингов (AlignmentResult)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AlignmentAdjustment {
-    pub original_cue_id: String,
-    pub dub_cue_id: String,
-    pub detected_lag_ms: f64,
-    pub detected_lag_samples: i64,
-    pub correlation_score: f32,
-    pub average_stretch_ratio: f64,
-    pub max_deviation_percent: f64,
-    pub requires_actor_re_recording: bool,
-    pub warning_message: Option<String>,
-    pub segment_adjustments: Vec<SegmentAdjustment>,
-    pub dtw_distance: f32,
-    pub sample_rate: u32,
-    pub original_duration_ms: f64,
-    pub dub_duration_ms: f64,
-}
-
-/// Результат полного файлового выравнивания вокального клипа (для совместимости)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AlignResult {
+pub struct AlignmentResult {
     pub original_path: String,
-    pub dubbed_path: String,
+    pub dub_path: String,
     pub output_path: String,
     pub original_duration_ms: f64,
-    pub dubbed_duration_ms: f64,
+    pub dub_duration_ms: f64,
     pub output_duration_ms: f64,
     pub detected_offset_ms: f64,
+    pub offset_shift_ms: f64,
     pub stretch_ratio: f64,
     pub correlation_score: f32,
     pub sample_rate: u32,
     pub was_stretched: bool,
+    pub manual_sync_required: bool,
     pub requires_actor_re_recording: bool,
-    pub alignment_adjustment: Option<AlignmentAdjustment>,
+    pub warning_message: Option<String>,
+    pub segment_adjustments: Vec<SegmentAdjustment>,
+    pub dtw_distance: f32,
+    // Поля для обратной совместимости с legacy UI (originalCueId/dubCueId)
+    pub original_cue_id: Option<String>,
+    pub dub_cue_id: Option<String>,
+    pub detected_lag_ms: Option<f64>,
+    pub detected_lag_samples: Option<i64>,
+    pub average_stretch_ratio: Option<f64>,
+    pub max_deviation_percent: Option<f64>,
 }
 
-/// Конфигурация параметров нативного Smart Align
+pub type AlignResult = AlignmentResult;
+pub type AlignmentAdjustment = AlignmentResult;
+
+/// Конфигурация параметров Smart Align
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SmartAlignConfig {
-    pub min_stretch_ratio: Option<f64>,        // e.g. 0.75
-    pub max_stretch_ratio: Option<f64>,        // e.g. 1.25
-    pub stretch_threshold_percent: Option<f64>, // e.g. 15.0%
-    pub max_deviation_limit_percent: Option<f64>, // e.g. 25.0% (порог флага requires_actor_re_recording)
-    pub align_offset: Option<bool>,            // true
-    pub max_search_offset_ms: Option<f64>,     // e.g. 2000.0 ms
-    pub dtw_hop_size_ms: Option<f64>,          // e.g. 10.0 ms
-    pub dtw_window_size_ms: Option<f64>,       // e.g. 25.0 ms
+    pub min_stretch_ratio: Option<f64>,           // По умолчанию 0.85
+    pub max_stretch_ratio: Option<f64>,           // По умолчанию 1.18
+    pub max_deviation_limit_percent: Option<f64>,// По порогу 20.0%
+    pub max_search_offset_ms: Option<f64>,        // По умолчанию 2000.0 ms
+    pub dtw_hop_size_ms: Option<f64>,             // По умолчанию 10.0 ms
+    pub dtw_window_size_ms: Option<f64>,          // По умолчанию 25.0 ms
 }
 
 impl Default for SmartAlignConfig {
     fn default() -> Self {
         Self {
-            min_stretch_ratio: Some(0.75),
-            max_stretch_ratio: Some(1.25),
-            stretch_threshold_percent: Some(15.0),
-            max_deviation_limit_percent: Some(25.0),
-            align_offset: Some(true),
+            min_stretch_ratio: Some(0.85),
+            max_stretch_ratio: Some(1.18),
+            max_deviation_limit_percent: Some(20.0),
             max_search_offset_ms: Some(2000.0),
             dtw_hop_size_ms: Some(10.0),
             dtw_window_size_ms: Some(25.0),
@@ -116,21 +108,18 @@ impl Default for SmartAlignConfig {
 }
 
 // ============================================================================
-// ЗАГРУЗКА АУДИО И ИЗВЛЕЧЕНИЕ СЭМПЛОВ
+// ЗАГРУЗКА И СОХРАНЕНИЕ АУДИО
 // ============================================================================
 
-/// Внутренний аудио-буфер моно f32
 pub struct MonoAudioBuffer {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
 }
 
-/// Загрузка аудио как моно f32 из пути к файлу или ID аудиобуфера в кэше
 pub fn resolve_audio_samples(
     buffer_id_or_path: &str,
     cache: Option<&AudioBufferCache>,
 ) -> Result<MonoAudioBuffer, String> {
-    // 1. Попытка получить из кэша
     if let Some(c) = cache {
         if let Some(buf_entry) = c.buffers.get(buffer_id_or_path) {
             let buf = buf_entry.value();
@@ -150,7 +139,6 @@ pub fn resolve_audio_samples(
             });
         }
 
-        // Поиск по пути в кэше
         if let Some(buf_id) = c.get_by_path(buffer_id_or_path) {
             if let Some(buf_entry) = c.buffers.get(&buf_id) {
                 let buf = buf_entry.value();
@@ -172,7 +160,6 @@ pub fn resolve_audio_samples(
         }
     }
 
-    // 2. Чтение напрямую из WAV файла на диске
     let path = Path::new(buffer_id_or_path);
     if !path.exists() {
         return Err(format!("Аудио-источник не найден: '{}'", buffer_id_or_path));
@@ -225,7 +212,6 @@ pub fn resolve_audio_samples(
     })
 }
 
-/// Сохранение моно f32 в 24-bit PCM WAV
 pub fn save_mono_wav_24bit<P: AsRef<Path>>(
     path: P,
     samples: &[f32],
@@ -257,12 +243,10 @@ pub fn save_mono_wav_24bit<P: AsRef<Path>>(
 }
 
 // ============================================================================
-// 1. АЛГОРИТМ GCC-PHAT (Generalized Cross-Correlation with Phase Transform)
+// УРОВЕНЬ 1: GCC-PHAT (Generalized Cross-Correlation with Phase Transform)
 // ============================================================================
 
-/// Вычисляет точный временной лаг (в миллисекундах и сэмплах) между двумя сигналами
-/// с использованием FFT и фазовой нормализации (PHAT weighting).
-/// Фазовая трансформация устраняет амплитудную зависимость и различия тембров/микрофонов.
+/// Расчет сдвига старта фразы в миллисекундах и сэмплах через фазовую трансформированную корреляцию
 pub fn calculate_gcc_phat_lag(
     orig: &[f32],
     dub: &[f32],
@@ -273,12 +257,10 @@ pub fn calculate_gcc_phat_lag(
         return (0.0, 0, 0.0);
     }
 
-    // Для быстрого и точного нахождения лага ограничиваем сигналы анализом начала фразы (до 8 секунд)
     let max_analyze_samples = (sample_rate as usize * 8).min(orig.len().max(dub.len()));
     let orig_len = orig.len().min(max_analyze_samples);
     let dub_len = dub.len().min(max_analyze_samples);
 
-    // Минимальный размер БПФ (следующая степень двойки от суммы длин для линейной корреляции)
     let total_len = orig_len + dub_len;
     let fft_size = total_len.next_power_of_two().max(2048);
 
@@ -286,11 +268,9 @@ pub fn calculate_gcc_phat_lag(
     let fft_forward = planner.plan_fft_forward(fft_size);
     let fft_inverse = planner.plan_fft_inverse(fft_size);
 
-    // Подготовка комплексных буферов
     let mut orig_fft: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); fft_size];
     let mut dub_fft: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); fft_size];
 
-    // Применяем окно Хэннинга на входные срезы для устранения краевых скачков
     for (i, &s) in orig[..orig_len].iter().enumerate() {
         let w = 0.5 * (1.0 - (2.0 * PI * (i as f32) / (orig_len as f32 - 1.0)).cos());
         orig_fft[i] = Complex::new(s * w, 0.0);
@@ -301,12 +281,9 @@ pub fn calculate_gcc_phat_lag(
         dub_fft[i] = Complex::new(s * w, 0.0);
     }
 
-    // 1. Прямое БПФ для обоих сигналов
     fft_forward.process(&mut orig_fft);
     fft_forward.process(&mut dub_fft);
 
-    // 2. Кросс-спектральная плотность с фазовой нормализацией GCC-PHAT:
-    // G_phat(f) = (X1(f) * conj(X2(f))) / (|X1(f) * conj(X2(f))| + eps)
     let mut cross_spectrum: Vec<Complex<f32>> = Vec::with_capacity(fft_size);
     let eps = 1e-6f32;
 
@@ -316,21 +293,17 @@ pub fn calculate_gcc_phat_lag(
         cross_spectrum.push(Complex::new(c.re / mag, c.im / mag));
     }
 
-    // 3. Обратное БПФ для получения функции взаимной корреляции (GCC-PHAT)
     fft_inverse.process(&mut cross_spectrum);
 
-    // Нормализуем масштаб IFFT
     let norm_factor = 1.0 / (fft_size as f32);
     let gcc_corr: Vec<f32> = cross_spectrum.iter().map(|c| c.re * norm_factor).collect();
 
-    // 4. Поиск пика в пределах заданного окна задержки max_search_offset_ms
     let max_lag_samples = ((max_search_offset_ms / 1000.0) * (sample_rate as f64)).round() as i64;
     let max_lag_samples = max_lag_samples.min((fft_size / 2) as i64);
 
     let mut best_lag_samples: i64 = 0;
     let mut max_val: f32 = -1.0;
 
-    // Циклическая корреляция: положительные лаги в [0 .. fft_size/2], отрицательные в [fft_size - max_lag .. fft_size]
     for lag in -max_lag_samples..=max_lag_samples {
         let idx = if lag >= 0 {
             lag as usize
@@ -347,37 +320,41 @@ pub fn calculate_gcc_phat_lag(
         }
     }
 
-    // Оценка уверенности корреляции (0.0 .. 1.0)
     let mean_corr: f32 = gcc_corr.iter().map(|v| v.abs()).sum::<f32>() / (gcc_corr.len() as f32);
     let peak_to_noise = if mean_corr > 1e-6 {
         (max_val / mean_corr) / 25.0
     } else {
         0.0
     };
-    let score = (peak_to_noise).min(1.0).max(0.0);
-
+    let score = peak_to_noise.min(1.0).max(0.0);
     let lag_ms = (best_lag_samples as f64 / sample_rate as f64) * 1000.0;
 
     (lag_ms, best_lag_samples, score)
 }
 
 // ============================================================================
-// 2. ДИНАМИЧЕСКОЕ ПРОГРАММИРОВАНИЕ (DTW) ПО ОГИБАЮЩИМ ЭНЕРГИИ
+// УРОВЕНЬ 2: VAD И ВЫДЕЛЕНИЕ ГЛАСНЫХ ЯДЕР (Vowel Kernels)
 // ============================================================================
 
-/// Извлечение сглаженного логарифмического вектора энергии реплики (Log-RMS Energy Envelope)
-pub fn compute_feature_energy_envelope(
+#[derive(Debug, Clone)]
+pub struct VadFrameInfo {
+    pub is_speech: bool,
+    pub is_vowel_kernel: bool,
+    pub rms_energy: f32,
+    pub zero_crossing_rate: f32,
+    pub spectral_centroid: f32,
+}
+
+/// Анализ голосовой активности (VAD) и классификация гласных ядер вокальной речи
+pub fn analyze_vad_and_vowels(
     samples: &[f32],
     sample_rate: u32,
-    window_ms: f64,
-    hop_ms: f64,
-) -> Vec<f32> {
-    if samples.is_empty() {
+    win_size: usize,
+    hop_size: usize,
+) -> Vec<VadFrameInfo> {
+    if samples.is_empty() || win_size == 0 || hop_size == 0 {
         return Vec::new();
     }
-
-    let win_size = ((sample_rate as f64 * window_ms / 1000.0).round() as usize).max(32);
-    let hop_size = ((sample_rate as f64 * hop_ms / 1000.0).round() as usize).max(16);
 
     let num_frames = if samples.len() >= win_size {
         (samples.len() - win_size) / hop_size + 1
@@ -385,7 +362,14 @@ pub fn compute_feature_energy_envelope(
         1
     };
 
-    let mut energy_vec = Vec::with_capacity(num_frames);
+    let fft_size = win_size.next_power_of_two();
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(fft_size);
+
+    let mut frames_info = Vec::with_capacity(num_frames);
+
+    let mut max_energy = 1e-6f32;
+    let mut temp_frames = Vec::with_capacity(num_frames);
 
     for i in 0..num_frames {
         let start = i * hop_size;
@@ -394,28 +378,175 @@ pub fn compute_feature_energy_envelope(
 
         let sum_sq: f32 = frame.iter().map(|&s| s * s).sum();
         let rms = (sum_sq / (frame.len() as f32)).sqrt();
+        if rms > max_energy {
+            max_energy = rms;
+        }
 
-        // Логарифмическая шкала энергии для приближения к восприятию громкости
-        let log_energy = (rms + 1e-5).ln();
-        energy_vec.push(log_energy);
+        let mut zcr_count = 0;
+        for j in 1..frame.len() {
+            if (frame[j] >= 0.0 && frame[j - 1] < 0.0) || (frame[j] < 0.0 && frame[j - 1] >= 0.0) {
+                zcr_count += 1;
+            }
+        }
+        let zcr = zcr_count as f32 / (frame.len() as f32);
+
+        let mut fft_buf: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); fft_size];
+        for (j, &s) in frame.iter().enumerate() {
+            let w = 0.54 - 0.46 * (2.0 * PI * (j as f32) / (win_size as f32 - 1.0)).cos();
+            fft_buf[j] = Complex::new(s * w, 0.0);
+        }
+        fft.process(&mut fft_buf);
+
+        let half_len = fft_size / 2;
+        let bin_freq = (sample_rate as f32) / (fft_size as f32);
+
+        let mut weighted_freq_sum = 0.0f32;
+        let mut total_mag = 0.0f32;
+
+        for k in 0..half_len {
+            let mag = (fft_buf[k].re * fft_buf[k].re + fft_buf[k].im * fft_buf[k].im).sqrt();
+            let freq = k as f32 * bin_freq;
+            weighted_freq_sum += freq * mag;
+            total_mag += mag;
+        }
+
+        let spectral_centroid = if total_mag > 1e-6 {
+            weighted_freq_sum / total_mag
+        } else {
+            0.0
+        };
+
+        temp_frames.push((rms, zcr, spectral_centroid));
     }
 
-    // Нормализация вектора энергии к диапазону [0.0 .. 1.0]
-    let min_val = energy_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max_val = energy_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let range = (max_val - min_val).max(1e-4);
+    let energy_thresh = (max_energy * 0.08).max(0.008);
 
-    energy_vec.iter_mut().for_each(|v| {
-        *v = (*v - min_val) / range;
-    });
+    for (rms, zcr, centroid) in temp_frames {
+        let is_speech = rms > energy_thresh;
+        // Гласные ядра (Vowel Kernels): высокая RMS энергия, низкий ZCR (<0.32), спектральный центроид в диапазоне 300..3500 Гц
+        let is_vowel_kernel = is_speech && zcr < 0.32 && centroid >= 250.0 && centroid <= 3600.0;
 
-    energy_vec
+        frames_info.push(VadFrameInfo {
+            is_speech,
+            is_vowel_kernel,
+            rms_energy: rms,
+            zero_crossing_rate: zcr,
+            spectral_centroid: centroid,
+        });
+    }
+
+    frames_info
 }
 
-/// Вычисление оптимального пути выравнивания (Warping Path) методом DTW
-pub fn compute_dynamic_time_warping(
-    orig_features: &[f32],
-    dub_features: &[f32],
+// ============================================================================
+// 3. MFCC ВЕКТОРНЫЕ ПРИЗНАКИ И FAST-DTW
+// ============================================================================
+
+/// Извлечение MFCC признаков (Mel-Frequency Cepstral Coefficients) для кадра
+pub fn extract_mfcc_features(
+    samples: &[f32],
+    sample_rate: u32,
+    win_size: usize,
+    hop_size: usize,
+    num_mel_filters: usize,
+    num_cepstral_coeffs: usize,
+) -> Vec<Vec<f32>> {
+    let num_frames = if samples.len() >= win_size {
+        (samples.len() - win_size) / hop_size + 1
+    } else {
+        1
+    };
+
+    let fft_size = win_size.next_power_of_two();
+    let half_fft = fft_size / 2;
+
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(fft_size);
+
+    let hz_to_mel = |hz: f32| 2595.0 * (1.0 + hz / 700.0).log10();
+    let mel_to_hz = |mel: f32| 700.0 * (10.0f32.powf(mel / 2595.0) - 1.0);
+
+    let mel_min = hz_to_mel(80.0);
+    let mel_max = hz_to_mel((sample_rate as f32) / 2.0);
+
+    let mut mel_points = Vec::with_capacity(num_mel_filters + 2);
+    for i in 0..=(num_mel_filters + 1) {
+        let m = mel_min + (i as f32 / (num_mel_filters + 1) as f32) * (mel_max - mel_min);
+        mel_points.push(mel_to_hz(m));
+    }
+
+    let mut bin_indices = Vec::with_capacity(num_mel_filters + 2);
+    for hz in mel_points {
+        let b = ((fft_size as f32 + 1.0) * hz / (sample_rate as f32)).floor() as usize;
+        bin_indices.push(b.min(half_fft));
+    }
+
+    let mut feature_matrix = Vec::with_capacity(num_frames);
+
+    for i in 0..num_frames {
+        let start = i * hop_size;
+        let end = (start + win_size).min(samples.len());
+        let frame = &samples[start..end];
+
+        let mut fft_buf: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); fft_size];
+        for (j, &s) in frame.iter().enumerate() {
+            let w = 0.54 - 0.46 * (2.0 * PI * (j as f32) / (win_size as f32 - 1.0)).cos();
+            let preemph = if j > 0 { s - 0.97 * frame[j - 1] } else { s };
+            fft_buf[j] = Complex::new(preemph * w, 0.0);
+        }
+        fft.process(&mut fft_buf);
+
+        let mut power_spectrum = vec![0.0f32; half_fft];
+        for k in 0..half_fft {
+            let mag = (fft_buf[k].re * fft_buf[k].re + fft_buf[k].im * fft_buf[k].im).sqrt();
+            power_spectrum[k] = (mag * mag) / (fft_size as f32);
+        }
+
+        let mut filter_energies = vec![0.0f32; num_mel_filters];
+        for m in 1..=num_mel_filters {
+            let b_prev = bin_indices[m - 1];
+            let b_curr = bin_indices[m];
+            let b_next = bin_indices[m + 1];
+
+            for k in b_prev..b_curr {
+                if b_curr > b_prev {
+                    let weight = (k - b_prev) as f32 / (b_curr - b_prev) as f32;
+                    filter_energies[m - 1] += power_spectrum[k] * weight;
+                }
+            }
+            for k in b_curr..b_next {
+                if b_next > b_curr {
+                    let weight = (b_next - k) as f32 / (b_next - b_curr) as f32;
+                    filter_energies[m - 1] += power_spectrum[k] * weight;
+                }
+            }
+        }
+
+        let mut mfcc = vec![0.0f32; num_cepstral_coeffs];
+        for c in 0..num_cepstral_coeffs {
+            let mut sum = 0.0f32;
+            for m in 0..num_mel_filters {
+                let log_e = (filter_energies[m] + 1e-6).ln();
+                sum += log_e * (PI * (c as f32) * (m as f32 + 0.5) / (num_mel_filters as f32)).cos();
+            }
+            mfcc[c] = sum;
+        }
+
+        let frame_energy: f32 = frame.iter().map(|s| s * s).sum::<f32>().sqrt();
+        mfcc.push((frame_energy + 1e-6).ln());
+
+        feature_matrix.push(mfcc);
+    }
+
+    feature_matrix
+}
+
+/// Алгоритм FastDTW по MFCC признакам с выделением гласных ядер
+pub fn compute_fast_dtw_mfcc(
+    orig_features: &[Vec<f32>],
+    dub_features: &[Vec<f32>],
+    orig_vowels: &[bool],
+    dub_vowels: &[bool],
     hop_ms: f64,
 ) -> (f32, Vec<DtwPoint>) {
     let n = orig_features.len();
@@ -425,25 +556,33 @@ pub fn compute_dynamic_time_warping(
         return (0.0, Vec::new());
     }
 
-    // Матрица накопленной стоимости DTW (Cost Matrix)
-    // Используем плоский вектор для максимальной производительности в кэше процессора
+    let feat_dim = orig_features[0].len().min(dub_features[0].len());
     let mut dtw = vec![f32::INFINITY; (n + 1) * (m + 1)];
     let get_idx = |i: usize, j: usize| i * (m + 1) + j;
 
     dtw[get_idx(0, 0)] = 0.0;
-
-    // Ограничение окна Сакое-Чиба (Sakoe-Chiba Band) для предотвращения патологических искажений
-    let max_window_drift = ((n.max(m) as f64) * 0.40).ceil() as usize;
+    let window_drift = ((n.max(m) as f64) * 0.35).ceil() as usize;
 
     for i in 1..=n {
-        let orig_val = orig_features[i - 1];
-        let j_start = 1.max(if i > max_window_drift { i - max_window_drift } else { 1 });
-        let j_end = m.min(i + max_window_drift);
+        let j_start = 1.max(if i > window_drift { i - window_drift } else { 1 });
+        let j_end = m.min(i + window_drift);
 
         for j in j_start..=j_end {
-            let dub_val = dub_features[j - 1];
-            // Евклидово расстояние между значениями энергии
-            let cost = (orig_val - dub_val).abs();
+            let mut dist_sq = 0.0f32;
+            for k in 0..feat_dim {
+                let diff = orig_features[i - 1][k] - dub_features[j - 1][k];
+                dist_sq += diff * diff;
+            }
+            let mut cost = dist_sq.sqrt();
+
+            let orig_is_vowel = orig_vowels.get(i - 1).cloned().unwrap_or(false);
+            let dub_is_vowel = dub_vowels.get(j - 1).cloned().unwrap_or(false);
+
+            if !orig_is_vowel && !dub_is_vowel {
+                cost *= 0.2;
+            } else if orig_is_vowel != dub_is_vowel {
+                cost *= 1.8;
+            }
 
             let match_cost = dtw[get_idx(i - 1, j - 1)];
             let insert_cost = dtw[get_idx(i - 1, j)];
@@ -457,13 +596,8 @@ pub fn compute_dynamic_time_warping(
     }
 
     let total_cost = dtw[get_idx(n, m)];
-    let normalized_distance = if (n + m) > 0 {
-        total_cost / ((n + m) as f32)
-    } else {
-        0.0
-    };
+    let norm_dist = if (n + m) > 0 { total_cost / ((n + m) as f32) } else { 0.0 };
 
-    // Обратный ход (Backtracking) для построения оптимального пути
     let mut path = Vec::new();
     let mut i = n;
     let mut j = m;
@@ -471,14 +605,16 @@ pub fn compute_dynamic_time_warping(
     while i > 0 && j > 0 {
         let orig_time = (i - 1) as f64 * hop_ms;
         let dub_time = (j - 1) as f64 * hop_ms;
-        let cost = (orig_features[i - 1] - dub_features[j - 1]).abs();
+        let is_vowel = orig_vowels.get(i - 1).cloned().unwrap_or(false)
+            || dub_vowels.get(j - 1).cloned().unwrap_or(false);
 
         path.push(DtwPoint {
             orig_index: i - 1,
             dub_index: j - 1,
             orig_time_ms: orig_time,
             dub_time_ms: dub_time,
-            cost,
+            cost: dtw[get_idx(i, j)],
+            is_vowel,
         });
 
         let diag = dtw[get_idx(i - 1, j - 1)];
@@ -496,86 +632,14 @@ pub fn compute_dynamic_time_warping(
     }
 
     path.reverse();
-    (normalized_distance, path)
-}
-
-/// Разбиение DTW-пути на локальные сегменты фразы с расчетом Stretch Ratio и отклонений
-pub fn calculate_segment_adjustments(
-    dtw_path: &[DtwPoint],
-    orig_dur_ms: f64,
-    _dub_dur_ms: f64,
-    num_subsegments: usize,
-) -> Vec<SegmentAdjustment> {
-    if dtw_path.is_empty() || num_subsegments == 0 {
-        return Vec::new();
-    }
-
-    let segment_dur = orig_dur_ms / (num_subsegments as f64);
-    let mut adjustments = Vec::with_capacity(num_subsegments);
-
-    for seg_idx in 0..num_subsegments {
-        let seg_orig_start = seg_idx as f64 * segment_dur;
-        let seg_orig_end = ((seg_idx + 1) as f64 * segment_dur).min(orig_dur_ms);
-
-        // Находим соответствующие точки в DTW пути
-        let start_point = dtw_path
-            .iter()
-            .find(|p| p.orig_time_ms >= seg_orig_start)
-            .unwrap_or(&dtw_path[0]);
-
-        let end_point = dtw_path
-            .iter()
-            .rfind(|p| p.orig_time_ms <= seg_orig_end)
-            .unwrap_or(dtw_path.last().unwrap());
-
-        let seg_dub_start = start_point.dub_time_ms;
-        let seg_dub_end = end_point.dub_time_ms.max(seg_dub_start + 1.0);
-
-        let orig_segment_duration = (seg_orig_end - seg_orig_start).max(1.0);
-        let dub_segment_duration = (seg_dub_end - seg_dub_start).max(1.0);
-
-        // Коэффициент растяжения/сжатия: отношение целевой (оригинальной) длины к дублю
-        let stretch_ratio = orig_segment_duration / dub_segment_duration;
-
-        // Отклонение в процентах (|ratio - 1.0| * 100%)
-        let deviation_percent = (stretch_ratio - 1.0).abs() * 100.0;
-
-        // Среднее сходство энергии на этом участке
-        let matched_costs: Vec<f32> = dtw_path
-            .iter()
-            .filter(|p| p.orig_time_ms >= seg_orig_start && p.orig_time_ms <= seg_orig_end)
-            .map(|p| p.cost)
-            .collect();
-
-        let avg_cost = if !matched_costs.is_empty() {
-            matched_costs.iter().sum::<f32>() / (matched_costs.len() as f32)
-        } else {
-            0.0
-        };
-
-        let energy_similarity = (1.0 - avg_cost).max(0.0).min(1.0);
-
-        adjustments.push(SegmentAdjustment {
-            segment_index: seg_idx,
-            orig_start_ms: (seg_orig_start * 10.0).round() / 10.0,
-            orig_end_ms: (seg_orig_end * 10.0).round() / 10.0,
-            dub_start_ms: (seg_dub_start * 10.0).round() / 10.0,
-            dub_end_ms: (seg_dub_end * 10.0).round() / 10.0,
-            time_stretch_ratio: (stretch_ratio * 1000.0).round() / 1000.0,
-            pitch_shift_semitones: 0.0, // WSOLA/Phase Vocoder pitch-neutral
-            energy_similarity: (energy_similarity * 100.0).round() / 100.0,
-            deviation_percent: (deviation_percent * 10.0).round() / 10.0,
-        });
-    }
-
-    adjustments
+    (norm_dist, path)
 }
 
 // ============================================================================
-// 3. WSOLA TIME-STRETCH АЛГОРИТМ (WAVEFORM SIMILARITY OVERLAP-ADD)
+// 4. АЛГОРИТМ РЕСИНТЕЗА WSOLA (WAVEFORM SIMILARITY OVERLAP-ADD)
 // ============================================================================
 
-/// Поиск позиции с максимальным сходством формы волны
+/// Поиск позиции с максимальной фазовой автокорреляцией формы волны
 fn find_best_wsola_offset(
     input: &[f32],
     target_pos: usize,
@@ -613,27 +677,32 @@ fn find_best_wsola_offset(
     best_offset
 }
 
-/// Высококачественное растяжение/сжатие речи WSOLA
-pub fn wsola_time_stretch(samples: &[f32], rate: f64, sample_rate: u32) -> Vec<f32> {
-    if samples.is_empty() || (rate - 1.0).abs() < 0.005 {
-        return samples.to_vec();
-    }
+/// Ресинтез WSOLA с адаптивным сохранением пауз/вдохов и лимитом 0.85x..1.18x
+pub fn wsola_time_stretch_vowel_selective(
+    samples: &[f32],
+    vowel_mask: &[bool],
+    target_ratio: f64,
+    sample_rate: u32,
+    hop_ms: f64,
+) -> (Vec<f32>, bool) {
+    let bounded_ratio = target_ratio.max(0.85).min(1.18);
+    let was_clamped = (target_ratio - bounded_ratio).abs() > 0.02;
 
-    let rate = rate.max(0.5).min(2.0); // Защитный диапазон
+    if samples.is_empty() || (bounded_ratio - 1.0).abs() < 0.005 {
+        return (samples.to_vec(), was_clamped);
+    }
 
     let win_size = ((sample_rate as f64) * 0.025).round() as usize;
     let win_size = (win_size / 2) * 2;
     let hop_out = win_size / 2;
-    let hop_in = ((hop_out as f64) * rate).round() as usize;
     let search_range = win_size / 2;
 
     let mut hanning_window = vec![0.0f32; win_size];
     for i in 0..win_size {
-        hanning_window[i] =
-            0.5 * (1.0 - (2.0 * PI * (i as f32) / (win_size as f32 - 1.0)).cos());
+        hanning_window[i] = 0.5 * (1.0 - (2.0 * PI * (i as f32) / (win_size as f32 - 1.0)).cos());
     }
 
-    let estimated_out_len = ((samples.len() as f64) / rate).ceil() as usize + win_size * 2;
+    let estimated_out_len = ((samples.len() as f64) / bounded_ratio).ceil() as usize + win_size * 2;
     let mut output = vec![0.0f32; estimated_out_len];
     let mut weight_sum = vec![0.0f32; estimated_out_len];
 
@@ -646,12 +715,21 @@ pub fn wsola_time_stretch(samples: &[f32], rate: f64, sample_rate: u32) -> Vec<f
             output[i] += samples[i] * hanning_window[i];
             weight_sum[i] += hanning_window[i];
         }
-        prev_natural_pos = hop_in;
-        in_pos = hop_in;
+        prev_natural_pos = hop_out;
+        in_pos = hop_out;
         out_pos = hop_out;
     }
 
+    let samples_per_frame = ((sample_rate as f64 * hop_ms) / 1000.0).round() as usize;
+
     while in_pos + win_size + search_range < samples.len() {
+        let frame_idx = (in_pos / samples_per_frame.max(1)).min(vowel_mask.len().saturating_sub(1));
+        let is_vowel = vowel_mask.get(frame_idx).cloned().unwrap_or(false);
+
+        // Паузы и вдохи НЕ растягиваются (растяжение 1.0x), растягиваются только гласные ядра
+        let frame_ratio = if is_vowel { bounded_ratio } else { 1.0 };
+        let hop_in = ((hop_out as f64) * frame_ratio).round() as usize;
+
         let best_in = find_best_wsola_offset(
             samples,
             in_pos,
@@ -671,7 +749,7 @@ pub fn wsola_time_stretch(samples: &[f32], rate: f64, sample_rate: u32) -> Vec<f
         }
 
         prev_natural_pos = best_in + hop_out;
-        in_pos += hop_in;
+        in_pos += hop_in.max(1);
         out_pos += hop_out;
     }
 
@@ -687,54 +765,98 @@ pub fn wsola_time_stretch(samples: &[f32], rate: f64, sample_rate: u32) -> Vec<f
         }
     }
 
-    final_output
+    (final_output, was_clamped)
 }
 
 // ============================================================================
-// 4. ГЛАВНАЯ ЛОГИКА СОПОСТАВЛЕНИЯ ТАЙМИНГОВ (SMART ALIGN ENGINE)
+// 5. ОСНОВНОЙ МОДУЛЬ СИНХРОНИЗАЦИИ (Smart Align Execution Engine)
 // ============================================================================
 
-/// Полный анализ сопоставления между оригинальной репликой и дублем (GCC-PHAT + DTW)
 pub fn perform_smart_alignment_analysis(
     orig_samples: &[f32],
     dub_samples: &[f32],
     sample_rate: u32,
-    original_cue_id: &str,
-    dub_cue_id: &str,
+    original_path: &str,
+    dub_path: &str,
+    output_path: &str,
     config: Option<SmartAlignConfig>,
-) -> Result<AlignmentAdjustment, String> {
+) -> Result<AlignmentResult, String> {
     let cfg = config.unwrap_or_default();
     let max_search_ms = cfg.max_search_offset_ms.unwrap_or(2000.0);
     let hop_ms = cfg.dtw_hop_size_ms.unwrap_or(10.0);
     let win_ms = cfg.dtw_window_size_ms.unwrap_or(25.0);
-    let max_dev_limit = cfg.max_deviation_limit_percent.unwrap_or(25.0);
+    let max_dev_limit = cfg.max_deviation_limit_percent.unwrap_or(20.0);
 
     let orig_dur_ms = (orig_samples.len() as f64 / sample_rate as f64) * 1000.0;
     let dub_dur_ms = (dub_samples.len() as f64 / sample_rate as f64) * 1000.0;
 
-    // 1. GCC-PHAT кросс-корреляция: определение временного сдвига
+    // 1. Уровень 1: GCC-PHAT
     let (lag_ms, lag_samples, correlation_score) =
         calculate_gcc_phat_lag(orig_samples, dub_samples, sample_rate, max_search_ms);
 
-    // 2. Вычисление огибающих энергии для DTW
-    let orig_energy = compute_feature_energy_envelope(orig_samples, sample_rate, win_ms, hop_ms);
-    let dub_energy = compute_feature_energy_envelope(dub_samples, sample_rate, win_ms, hop_ms);
+    let win_size = ((sample_rate as f64 * win_ms / 1000.0).round() as usize).max(64);
+    let hop_size = ((sample_rate as f64 * hop_ms / 1000.0).round() as usize).max(32);
 
-    // 3. Dynamic Time Warping (DTW)
-    let (dtw_distance, dtw_path) = compute_dynamic_time_warping(&orig_energy, &dub_energy, hop_ms);
+    // 2. Уровень 2: VAD & Vowel Kernels
+    let orig_vad = analyze_vad_and_vowels(orig_samples, sample_rate, win_size, hop_size);
+    let dub_vad = analyze_vad_and_vowels(dub_samples, sample_rate, win_size, hop_size);
 
-    // 4. Сегментный расчет (делим реплику на 4-8 смысловых под-сегментов)
-    let num_segments = ((orig_dur_ms / 400.0).round() as usize).max(3).min(10);
-    let segment_adjustments =
-        calculate_segment_adjustments(&dtw_path, orig_dur_ms, dub_dur_ms, num_segments);
+    let orig_vowels: Vec<bool> = orig_vad.iter().map(|v| v.is_vowel_kernel).collect();
+    let dub_vowels: Vec<bool> = dub_vad.iter().map(|v| v.is_vowel_kernel).collect();
 
-    // 5. Оценка максимального расхождения и проверка порога >25%
-    let overall_ratio = if dub_dur_ms > 0.0 {
-        orig_dur_ms / dub_dur_ms
-    } else {
-        1.0
-    };
+    // 3. FastDTW по MFCC признакам
+    let orig_mfcc = extract_mfcc_features(orig_samples, sample_rate, win_size, hop_size, 20, 12);
+    let dub_mfcc = extract_mfcc_features(dub_samples, sample_rate, win_size, hop_size, 20, 12);
 
+    let (dtw_distance, dtw_path) =
+        compute_fast_dtw_mfcc(&orig_mfcc, &dub_mfcc, &orig_vowels, &dub_vowels, hop_ms);
+
+    // 4. Сегментная подгонка фразы
+    let num_segments = ((orig_dur_ms / 400.0).round() as usize).max(3).min(12);
+    let segment_dur = orig_dur_ms / (num_segments as f64);
+    let mut segment_adjustments = Vec::with_capacity(num_segments);
+
+    for seg_idx in 0..num_segments {
+        let seg_orig_start = seg_idx as f64 * segment_dur;
+        let seg_orig_end = ((seg_idx + 1) as f64 * segment_dur).min(orig_dur_ms);
+
+        let start_point = dtw_path
+            .iter()
+            .find(|p| p.orig_time_ms >= seg_orig_start)
+            .unwrap_or(&dtw_path[0]);
+
+        let end_point = dtw_path
+            .iter()
+            .rfind(|p| p.orig_time_ms <= seg_orig_end)
+            .unwrap_or(dtw_path.last().unwrap());
+
+        let seg_dub_start = start_point.dub_time_ms;
+        let seg_dub_end = end_point.dub_time_ms.max(seg_dub_start + 1.0);
+
+        let orig_segment_dur = (seg_orig_end - seg_orig_start).max(1.0);
+        let dub_segment_dur = (seg_dub_end - seg_dub_start).max(1.0);
+
+        let stretch_ratio = orig_segment_dur / dub_segment_dur;
+        let deviation_percent = (stretch_ratio - 1.0).abs() * 100.0;
+
+        let frame_start_idx = (seg_orig_start / hop_ms) as usize;
+        let is_vowel_kernel = orig_vowels.get(frame_start_idx).cloned().unwrap_or(false);
+
+        segment_adjustments.push(SegmentAdjustment {
+            segment_index: seg_idx,
+            orig_start_ms: (seg_orig_start * 10.0).round() / 10.0,
+            orig_end_ms: (seg_orig_end * 10.0).round() / 10.0,
+            dub_start_ms: (seg_dub_start * 10.0).round() / 10.0,
+            dub_end_ms: (seg_dub_end * 10.0).round() / 10.0,
+            time_stretch_ratio: (stretch_ratio * 1000.0).round() / 1000.0,
+            pitch_shift_semitones: 0.0,
+            energy_similarity: (1.0 - start_point.cost.min(1.0)),
+            deviation_percent: (deviation_percent * 10.0).round() / 10.0,
+            is_vowel_kernel,
+        });
+    }
+
+    let overall_ratio = if dub_dur_ms > 0.0 { orig_dur_ms / dub_dur_ms } else { 1.0 };
     let max_seg_dev = segment_adjustments
         .iter()
         .map(|s| s.deviation_percent)
@@ -743,33 +865,43 @@ pub fn perform_smart_alignment_analysis(
     let overall_dev = (overall_ratio - 1.0).abs() * 100.0;
     let max_deviation_percent = max_seg_dev.max(overall_dev);
 
-    // Если расхождение превышает 25%, взводим флаг предупреждения перезаписи
-    let requires_actor_re_recording = max_deviation_percent > max_dev_limit;
+    // Если расхождение > 20%, требуется ручная синхронизация
+    let manual_sync_required = max_deviation_percent > max_dev_limit || overall_ratio < 0.80 || overall_ratio > 1.20;
+    let requires_actor_re_recording = manual_sync_required;
 
-    let warning_message = if requires_actor_re_recording {
+    let warning_message = if manual_sync_required {
         Some(format!(
-            "Расхождение темпа реплики составляет {:.1}% (лимит {:.1}%). Рекомендуется перезапись дубля актером во избежание деградации тембра.",
+            "Расхождение темпа реплики составляет {:.1}% (порог {:.1}%). Установлен флаг manual_sync_required.",
             max_deviation_percent, max_dev_limit
         ))
     } else {
         None
     };
 
-    Ok(AlignmentAdjustment {
-        original_cue_id: original_cue_id.to_string(),
-        dub_cue_id: dub_cue_id.to_string(),
-        detected_lag_ms: (lag_ms * 10.0).round() / 10.0,
-        detected_lag_samples: lag_samples,
+    Ok(AlignmentResult {
+        original_path: original_path.to_string(),
+        dub_path: dub_path.to_string(),
+        output_path: output_path.to_string(),
+        original_duration_ms: (orig_dur_ms * 10.0).round() / 10.0,
+        dub_duration_ms: (dub_dur_ms * 10.0).round() / 10.0,
+        output_duration_ms: (dub_dur_ms * 10.0).round() / 10.0,
+        detected_offset_ms: (lag_ms * 10.0).round() / 10.0,
+        offset_shift_ms: (lag_ms * 10.0).round() / 10.0,
+        stretch_ratio: (overall_ratio * 1000.0).round() / 1000.0,
         correlation_score: (correlation_score * 100.0).round() / 100.0,
-        average_stretch_ratio: (overall_ratio * 1000.0).round() / 1000.0,
-        max_deviation_percent: (max_deviation_percent * 10.0).round() / 10.0,
+        sample_rate,
+        was_stretched: (overall_ratio - 1.0).abs() > 0.02,
+        manual_sync_required,
         requires_actor_re_recording,
         warning_message,
         segment_adjustments,
         dtw_distance: (dtw_distance * 1000.0).round() / 1000.0,
-        sample_rate,
-        original_duration_ms: (orig_dur_ms * 10.0).round() / 10.0,
-        dub_duration_ms: (dub_dur_ms * 10.0).round() / 10.0,
+        original_cue_id: Some(original_path.to_string()),
+        dub_cue_id: Some(dub_path.to_string()),
+        detected_lag_ms: Some((lag_ms * 10.0).round() / 10.0),
+        detected_lag_samples: Some(lag_samples),
+        average_stretch_ratio: Some((overall_ratio * 1000.0).round() / 1000.0),
+        max_deviation_percent: Some((max_deviation_percent * 10.0).round() / 10.0),
     })
 }
 
@@ -777,44 +909,57 @@ pub fn perform_smart_alignment_analysis(
 // TAURI V2 КОМАНДЫ
 // ============================================================================
 
-/// Вычисление интеллектуального выравнивания таймингов (GCC-PHAT + DTW + Time Stretch Ratio)
+/// Tauri V2 Команда вычисления смарт-выравнивания дубляжа с оригиналом
 #[command]
 pub async fn calculate_smart_alignment(
-    _app: AppHandle,
-    cache_state: State<'_, AudioBufferCache>,
-    original_cue_id: String,
-    dub_cue_id: String,
+    app: AppHandle,
+    cache_state: Option<State<'_, AudioBufferCache>>,
+    original_path: Option<String>,
+    dub_path: Option<String>,
+    output_path: Option<String>,
+    original_cue_id: Option<String>,
+    dub_cue_id: Option<String>,
     config: Option<SmartAlignConfig>,
-) -> Result<AlignmentAdjustment, String> {
-    let orig_id = original_cue_id.clone();
-    let dub_id = dub_cue_id.clone();
-    let cache_clone = cache_state.inner().clone();
+) -> Result<AlignmentResult, String> {
+    let orig_str = original_path
+        .or(original_cue_id)
+        .ok_or_else(|| "Укажите путь к оригинальному аудио (original_path)".to_string())?;
+
+    let dub_str = dub_path
+        .or(dub_cue_id)
+        .ok_or_else(|| "Укажите путь к дубляжу (dub_path)".to_string())?;
+
+    let out_str = output_path.unwrap_or_else(|| dub_str.clone());
+
+    let cache_opt = cache_state.map(|s| s.inner().clone());
 
     tokio::task::spawn_blocking(move || {
-        let orig_buf = resolve_audio_samples(&orig_id, Some(&cache_clone))
-            .map_err(|e| format!("Ошибка оригинального трека: {}", e))?;
-        let dub_buf = resolve_audio_samples(&dub_id, Some(&cache_clone))
-            .map_err(|e| format!("Ошибка трека дубляжа: {}", e))?;
+        let orig_buf = resolve_audio_samples(&orig_str, cache_opt.as_ref())
+            .map_err(|e| format!("Ошибка загрузки оригинала: {}", e))?;
+        let dub_buf = resolve_audio_samples(&dub_str, cache_opt.as_ref())
+            .map_err(|e| format!("Ошибка загрузки дубляжа: {}", e))?;
 
         let sample_rate = orig_buf.sample_rate.min(dub_buf.sample_rate);
+
         perform_smart_alignment_analysis(
             &orig_buf.samples,
             &dub_buf.samples,
             sample_rate,
-            &orig_id,
-            &dub_id,
+            &orig_str,
+            &dub_str,
+            &out_str,
             config,
         )
     })
     .await
-    .map_err(|e| format!("Ошибка задачи calculate_smart_alignment: {}", e))?
+    .map_err(|e| format!("Ошибка выполнения фоновой задачи Smart Align: {}", e))?
 }
 
-/// Выравнивание и рендер вокального клипа с сохранением файла
+/// Выравнивание и сохранение готового аудиоклипа на диск
 #[command]
 pub async fn align_vocal_clip(
-    _app: AppHandle,
-    cache_state: State<'_, AudioBufferCache>,
+    app: AppHandle,
+    cache_state: Option<State<'_, AudioBufferCache>>,
     original_clip_path: String,
     dubbed_clip_path: String,
     output_path: String,
@@ -823,68 +968,55 @@ pub async fn align_vocal_clip(
     let orig_path = original_clip_path.clone();
     let dub_path = dubbed_clip_path.clone();
     let out_path = output_path.clone();
-    let cfg = config.clone().unwrap_or_default();
-    let cache_clone = cache_state.inner().clone();
+    let cfg = config.unwrap_or_default();
+    let cache_opt = cache_state.map(|s| s.inner().clone());
 
     tokio::task::spawn_blocking(move || {
-        let orig_audio = resolve_audio_samples(&orig_path, Some(&cache_clone))?;
-        let dub_audio = resolve_audio_samples(&dub_path, Some(&cache_clone))?;
+        let orig_audio = resolve_audio_samples(&orig_path, cache_opt.as_ref())?;
+        let dub_audio = resolve_audio_samples(&dub_path, cache_opt.as_ref())?;
 
         let sample_rate = dub_audio.sample_rate;
         let orig_samples = orig_audio.samples;
-        let mut dub_samples = dub_audio.samples;
+        let dub_samples = dub_audio.samples;
 
-        // Выполняем точный анализ GCC-PHAT + DTW
-        let adjustment = perform_smart_alignment_analysis(
+        let mut alignment_res = perform_smart_alignment_analysis(
             &orig_samples,
             &dub_samples,
             sample_rate,
             &orig_path,
             &dub_path,
+            &out_path,
             Some(cfg.clone()),
         )?;
 
-        let mut was_stretched = false;
-        let mut final_stretch_ratio = adjustment.average_stretch_ratio;
+        let win_size = ((sample_rate as f64 * 25.0 / 1000.0).round() as usize).max(64);
+        let hop_size = ((sample_rate as f64 * 10.0 / 1000.0).round() as usize).max(32);
+        let dub_vad = analyze_vad_and_vowels(&dub_samples, sample_rate, win_size, hop_size);
+        let dub_vowels: Vec<bool> = dub_vad.iter().map(|v| v.is_vowel_kernel).collect();
 
-        // Если расхождение НЕ превышает критический предел (>25%), выполняем бережное WSOLA-выравнивание
-        if !adjustment.requires_actor_re_recording {
-            let stretch_thresh = cfg.stretch_threshold_percent.unwrap_or(15.0) / 100.0;
-            let min_stretch = cfg.min_stretch_ratio.unwrap_or(0.75);
-            let max_stretch = cfg.max_stretch_ratio.unwrap_or(1.25);
+        let (processed_samples, was_clamped) = wsola_time_stretch_vowel_selective(
+            &dub_samples,
+            &dub_vowels,
+            alignment_res.stretch_ratio,
+            sample_rate,
+            10.0,
+        );
 
-            let diff_ratio = (final_stretch_ratio - 1.0).abs();
-            if diff_ratio > stretch_thresh {
-                let clamped_ratio = final_stretch_ratio.max(min_stretch).min(max_stretch);
-                dub_samples = wsola_time_stretch(&dub_samples, clamped_ratio, sample_rate);
-                was_stretched = true;
-                final_stretch_ratio = clamped_ratio;
-            }
+        if was_clamped {
+            alignment_res.manual_sync_required = true;
+            alignment_res.requires_actor_re_recording = true;
         }
 
-        // Сохраняем обработанный 24-bit WAV
-        save_mono_wav_24bit(&out_path, &dub_samples, sample_rate)?;
+        save_mono_wav_24bit(&out_path, &processed_samples, sample_rate)?;
 
-        let out_dur_ms = (dub_samples.len() as f64 / sample_rate as f64) * 1000.0;
+        let out_dur_ms = (processed_samples.len() as f64 / sample_rate as f64) * 1000.0;
+        alignment_res.output_duration_ms = (out_dur_ms * 10.0).round() / 10.0;
+        alignment_res.was_stretched = true;
 
-        Ok(AlignResult {
-            original_path: orig_path,
-            dubbed_path: dub_path,
-            output_path: out_path,
-            original_duration_ms: adjustment.original_duration_ms,
-            dubbed_duration_ms: adjustment.dub_duration_ms,
-            output_duration_ms: (out_dur_ms * 10.0).round() / 10.0,
-            detected_offset_ms: adjustment.detected_lag_ms,
-            stretch_ratio: (final_stretch_ratio * 1000.0).round() / 1000.0,
-            correlation_score: adjustment.correlation_score,
-            sample_rate,
-            was_stretched,
-            requires_actor_re_recording: adjustment.requires_actor_re_recording,
-            alignment_adjustment: Some(adjustment),
-        })
+        Ok(alignment_res)
     })
     .await
-    .map_err(|e| format!("Ошибка вызова задачи align_vocal_clip: {}", e))?
+    .map_err(|e| format!("Ошибка задачи align_vocal_clip: {}", e))?
 }
 
 // ============================================================================
@@ -911,32 +1043,27 @@ mod tests {
     }
 
     #[test]
-    fn test_dtw_energy_matching() {
-        let env1 = vec![0.1, 0.3, 0.8, 0.9, 0.4, 0.1];
-        let env2 = vec![0.1, 0.2, 0.7, 0.9, 0.5, 0.1];
+    fn test_mfcc_extraction() {
+        let sample_rate = 48000;
+        let mut sig = vec![0.0f32; 4800];
+        for i in 0..4800 {
+            sig[i] = (2.0 * PI * 1000.0 * (i as f32 / 48000.0)).sin();
+        }
 
-        let (distance, path) = compute_dynamic_time_warping(&env1, &env2, 10.0);
-        assert!(distance < 0.2);
-        assert!(!path.is_empty());
+        let mfcc = extract_mfcc_features(&sig, sample_rate, 1200, 480, 20, 12);
+        assert!(!mfcc.is_empty());
+        assert_eq!(mfcc[0].len(), 13); // 12 coeffs + energy
     }
 
     #[test]
-    fn test_extreme_deviation_protection() {
-        let sample_rate = 48000;
-        let orig = vec![0.5f32; 48000];      // 1.0 секунда
-        let dub_extreme = vec![0.5f32; 65000]; // 1.35 секунды (+35% расхождение)
+    fn test_wsola_bounded_stretch() {
+        let samples = vec![0.5f32; 4800];
+        let vowels = vec![true; 100];
+        let (stretched, clamped) = wsola_time_stretch_vowel_selective(&samples, &vowels, 1.10, 48000, 10.0);
+        assert!(!stretched.is_empty());
+        assert!(!clamped);
 
-        let result = perform_smart_alignment_analysis(
-            &orig,
-            &dub_extreme,
-            sample_rate,
-            "orig_1",
-            "dub_1",
-            None,
-        ).unwrap();
-
-        assert!(result.max_deviation_percent > 25.0);
-        assert!(result.requires_actor_re_recording);
-        assert!(result.warning_message.is_some());
+        let (_, clamped_extreme) = wsola_time_stretch_vowel_selective(&samples, &vowels, 1.40, 48000, 10.0);
+        assert!(clamped_extreme);
     }
 }

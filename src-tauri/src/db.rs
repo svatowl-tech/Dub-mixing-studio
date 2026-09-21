@@ -1,20 +1,40 @@
-use serde::{Deserialize, Serialize};
-// sync
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite, Row};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+// ============================================================================
+// DUB MIXING STUDIO PRO - UNIFIED TRANSACTIONAL SQLITE STORAGE (RUST)
+// ============================================================================
+// Единая схема реляционной базы данных SQLite в режиме WAL с гарантированной
+// ссылочной целостностью (PRAGMA foreign_keys = ON) и полной изоляцией
+// транзакций через sqlx::Transaction.
+//
+// Исключены любые динамические интерполяции строк в SQL запросах.
+// Полная совместимость между legacy db интерфейсами, project_repository
+// и timeline_history_engine.
+// ============================================================================
+
+use std::collections::HashSet;
 use std::fs;
+use std::sync::Arc;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    Pool, Row, Sqlite,
+};
 use tauri::State;
-use hound;
+use tokio::sync::Mutex;
 
-use crate::logger::log_debug;
+use crate::logger::{log_debug, log_error, log_info};
 
-// Define an app state that holds the DB pool
+// ============================================================================
+// 1. APPLICATION STATE
+// ============================================================================
+
 pub struct AppState {
     pub db: Arc<Mutex<Option<Pool<Sqlite>>>>,
 }
 
-// --- STRUCTURES THAT MATCH TYPESCRIPT INTERFACES ---
+// ============================================================================
+// 2. DATA TRANSFER OBJECTS (MATCHING TYPESCRIPT CONTRACTS)
+// ============================================================================
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubtitleLine {
@@ -40,7 +60,6 @@ pub struct AudioSettings {
     pub bit_depth: i64,
     #[serde(default)]
     pub asio_mode: Option<bool>,
-    // Omitting exhaustive fields to keep example minimal, but storing as JSON is foolproof
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -48,7 +67,7 @@ pub struct AudioSettings {
 pub struct ProjectRow {
     pub id: String,
     pub name: String,
-    pub config_json: String, // AudioSettings, subs, roles dumped as JSON
+    pub config_json: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -82,7 +101,6 @@ pub struct VerificationResult {
     pub orphaned_files: Vec<String>,
 }
 
-// Full Composite Structs for frontend sending
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SegmentData {
@@ -111,143 +129,372 @@ pub struct ProjectData {
     pub id: String,
     pub name: String,
     pub audio_offset_ms: Option<f64>,
-    // we use a Catch_all JSON serde approach for the flexible config
     #[serde(flatten)]
     pub config: serde_json::Value,
     pub tracks: Vec<TrackData>,
 }
 
-// --- DATABASE INITIALIZATION ---
+// ============================================================================
+// 3. DATABASE INITIALIZATION & UNIFIED SCHEMA MIGRATION
+// ============================================================================
 
+/// Синхронно-готовящийся и надежный пул базы данных SQLite.
+/// Гарантирует применение PRAGMA (WAL, foreign_keys, busy_timeout)
+/// и всех схем миграций до возврата пула в runtime.
 pub async fn init_db(db_path: &str) -> Result<Pool<Sqlite>, sqlx::Error> {
-    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
-
     if let Some(parent) = std::path::Path::new(db_path).parent() {
         let _ = fs::create_dir_all(parent);
     }
-    
+
     let options = SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal);
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(5));
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(10)
         .connect_with(options)
         .await?;
 
-    // MIGRATION: Schema Setup for Legacy and Modern Project Repository
-    crate::project_repository::run_project_migrations(&pool).await?;
-    crate::timeline_history_engine::run_timeline_history_migrations(&pool).await?;
+    // Применение базовых настроек производительности и целостности
+    sqlx::query("PRAGMA journal_mode = WAL;").execute(&pool).await?;
+    sqlx::query("PRAGMA synchronous = NORMAL;").execute(&pool).await?;
+    sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await?;
+    sqlx::query("PRAGMA temp_store = MEMORY;").execute(&pool).await?;
+    sqlx::query("PRAGMA cache_size = -64000;").execute(&pool).await?;
 
-    // Maintain backwards compatibility for legacy segments table if needed
+    // 1. Таблица проектов
+    sqlx::query("
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            sample_rate INTEGER NOT NULL DEFAULT 48000,
+            frame_rate REAL NOT NULL DEFAULT 24.0,
+            target_lufs REAL NOT NULL DEFAULT -14.0,
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
+            audio_offset_ms REAL NOT NULL DEFAULT 0.0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            config_json TEXT NOT NULL DEFAULT '{}'
+        );
+    ").execute(&pool).await?;
+
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN sample_rate INTEGER NOT NULL DEFAULT 48000;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN frame_rate REAL NOT NULL DEFAULT 24.0;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN target_lufs REAL NOT NULL DEFAULT -14.0;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN created_at TEXT NOT NULL DEFAULT '';").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN audio_offset_ms REAL NOT NULL DEFAULT 0.0;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE projects ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}';").execute(&pool).await;
+
+    // 2. Таблица аудиодорожек
+    sqlx::query("
+        CREATE TABLE IF NOT EXISTS tracks (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            track_type TEXT NOT NULL DEFAULT 'Dub',
+            volume REAL NOT NULL DEFAULT 1.0,
+            pan REAL NOT NULL DEFAULT 0.0,
+            is_muted BOOLEAN NOT NULL DEFAULT 0,
+            is_solo BOOLEAN NOT NULL DEFAULT 0,
+            order_index INTEGER NOT NULL DEFAULT 0
+        );
+    ").execute(&pool).await?;
+
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN track_type TEXT NOT NULL DEFAULT 'Dub';").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN volume REAL NOT NULL DEFAULT 1.0;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN pan REAL NOT NULL DEFAULT 0.0;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN is_muted BOOLEAN NOT NULL DEFAULT 0;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN is_solo BOOLEAN NOT NULL DEFAULT 0;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE tracks ADD COLUMN order_index INTEGER NOT NULL DEFAULT 0;").execute(&pool).await;
+
+    // 3. Таблица аудиосегментов (audio_segments)
+    sqlx::query("
+        CREATE TABLE IF NOT EXISTS audio_segments (
+            id TEXT PRIMARY KEY,
+            track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+            file_path TEXT,
+            start_time REAL NOT NULL DEFAULT 0.0,
+            duration REAL NOT NULL DEFAULT 0.0,
+            file_offset REAL NOT NULL DEFAULT 0.0,
+            file_duration REAL NOT NULL DEFAULT 0.0,
+            gain REAL NOT NULL DEFAULT 1.0,
+            backstage_video_path TEXT,
+            is_active BOOLEAN NOT NULL DEFAULT 1
+        );
+    ").execute(&pool).await?;
+
+    let _ = sqlx::query("ALTER TABLE audio_segments ADD COLUMN backstage_video_path TEXT;").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE audio_segments ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1;").execute(&pool).await;
+
+    // Обратная совместимость с таблицами segments и audio_clips
     sqlx::query("
         CREATE TABLE IF NOT EXISTS segments (
             id TEXT PRIMARY KEY,
             track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-            start_time REAL NOT NULL,
-            duration REAL NOT NULL,
-            file_offset REAL NOT NULL,
-            file_duration REAL NOT NULL,
+            start_time REAL NOT NULL DEFAULT 0.0,
+            duration REAL NOT NULL DEFAULT 0.0,
+            file_offset REAL NOT NULL DEFAULT 0.0,
+            file_duration REAL NOT NULL DEFAULT 0.0,
             file_path TEXT,
             backstage_video_path TEXT,
             gain REAL NOT NULL DEFAULT 1.0
         );
     ").execute(&pool).await?;
-
     let _ = sqlx::query("ALTER TABLE segments ADD COLUMN backstage_video_path TEXT;").execute(&pool).await;
 
+    sqlx::query("
+        CREATE TABLE IF NOT EXISTS audio_clips (
+            id TEXT PRIMARY KEY,
+            track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+            file_path TEXT NOT NULL DEFAULT '',
+            start_time_ms REAL NOT NULL DEFAULT 0.0,
+            duration_ms REAL NOT NULL DEFAULT 0.0,
+            source_offset_ms REAL NOT NULL DEFAULT 0.0,
+            gain_db REAL NOT NULL DEFAULT 0.0,
+            is_active BOOLEAN NOT NULL DEFAULT 1,
+            backstage_video_path TEXT
+        );
+    ").execute(&pool).await?;
+
+    // 4. Таблица субтитров
+    sqlx::query("
+        CREATE TABLE IF NOT EXISTS subtitles (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            character_name TEXT NOT NULL DEFAULT '',
+            text TEXT NOT NULL DEFAULT '',
+            start_time_ms REAL NOT NULL DEFAULT 0.0,
+            end_time_ms REAL NOT NULL DEFAULT 0.0,
+            matched_clip_id TEXT
+        );
+    ").execute(&pool).await?;
+
+    // 5. Таблица дельт истории (history_deltas)
+    sqlx::query("
+        CREATE TABLE IF NOT EXISTS history_deltas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            action_description TEXT NOT NULL DEFAULT '',
+            undo_patch TEXT NOT NULL DEFAULT '[]',
+            redo_patch TEXT NOT NULL DEFAULT '[]',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            sequence_index INTEGER NOT NULL DEFAULT 0,
+            is_current BOOLEAN NOT NULL DEFAULT 0
+        );
+    ").execute(&pool).await?;
+
+    // Индексы для ускорения выборок и джойнов
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tracks_project ON tracks(project_id);").execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_audio_segments_track ON audio_segments(track_id);").execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_audio_segments_range ON audio_segments(track_id, start_time, duration);").execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_segments_track ON segments(track_id);").execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_segments_range ON segments(track_id, start_time, duration);").execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_audio_clips_track ON audio_clips(track_id);").execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_subtitles_project ON subtitles(project_id);").execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_history_deltas_proj ON history_deltas(project_id, sequence_index);").execute(&pool).await?;
+
+    // Инициализация подсистем project_repository и timeline_history_engine
+    crate::project_repository::run_project_migrations(&pool).await?;
+    crate::timeline_history_engine::run_timeline_history_migrations(&pool).await?;
+
+    log_info("Database pool initialized synchronously with strict schema and foreign key constraints.");
     Ok(pool)
 }
 
-// --- CRUD OPERATIONS ---
+// ============================================================================
+// 4. ATOMIC TRANSACTIONAL CRUD OPERATIONS
+// ============================================================================
 
+/// Сохранение субтитров в единой атомарной транзакции с параметризованными запросами
 #[tauri::command]
-pub async fn save_subtitles(state: State<'_, AppState>, project_id: String, subtitles: Vec<SubtitleLine>) -> Result<(), String> {
+pub async fn save_subtitles(
+    state: State<'_, AppState>,
+    project_id: String,
+    subtitles: Vec<SubtitleLine>,
+) -> Result<(), String> {
     let mutex = state.db.lock().await;
     let pool = mutex.as_ref().ok_or("Database not initialized")?;
 
-    // Clear existing for this project to overwrite
+    let mut tx = pool.begin().await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
+
+    // Очистка старых строк субтитров
     sqlx::query("DELETE FROM subtitles WHERE project_id = ?")
         .bind(&project_id)
-        .execute(pool)
-        .await.map_err(|e| e.to_string())?;
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
+    // Пакетная вставка новых субтитров
     for line in subtitles {
         sqlx::query("
-            INSERT INTO subtitles (id, project_id, start_time, end_time, text, role)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            INSERT INTO subtitles (id, project_id, character_name, text, start_time_ms, end_time_ms, matched_clip_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
         ")
         .bind(&line.id)
         .bind(&project_id)
-        .bind(line.start)
-        .bind(line.end)
-        .bind(&line.text)
         .bind(&line.role)
-        .execute(pool)
-        .await.map_err(|e| e.to_string())?;
+        .bind(&line.text)
+        .bind(line.start * 1000.0)
+        .bind(line.end * 1000.0)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
     }
 
+    tx.commit().await.map_err(|e| format!("Failed to commit transaction: {}", e))?;
     Ok(())
 }
 
+/// Атомарное сохранение проекта в базе данных:
+/// - Обновление метаданных
+/// - Параметризованный UPSERT треков и сегментов
+/// - Безопасное удаление устаревших элементов без строковой конкатенации
 #[tauri::command]
-pub async fn save_project_to_db(state: State<'_, AppState>, payload: ProjectData) -> Result<(), String> {
+pub async fn save_project_to_db(
+    state: State<'_, AppState>,
+    payload: ProjectData,
+) -> Result<(), String> {
     log_debug(&format!("save_project_to_db called for project: {} ({})", payload.name, payload.id));
     let mutex = state.db.lock().await;
     let pool = mutex.as_ref().ok_or("Database not initialized")?;
 
-    let config_str = serde_json::to_string(&payload.config).unwrap_or("{}".to_string());
+    let config_str = serde_json::to_string(&payload.config).unwrap_or_else(|_| "{}".to_string());
+    let now = Utc::now().to_rfc3339();
 
-    log_debug(&format!("Saving {} tracks...", payload.tracks.len()));
-
-    let sample_rate = payload.config.get("audioSettings")
+    let sample_rate = payload
+        .config
+        .get("audioSettings")
         .and_then(|a| a.get("sampleRate"))
         .and_then(|s| s.as_i64())
         .unwrap_or(48000);
 
-    // UPSERT Project
+    let frame_rate = payload
+        .config
+        .get("frameRate")
+        .and_then(|f| f.as_f64())
+        .unwrap_or(24.0);
+
+    let target_lufs = payload
+        .config
+        .get("targetLufs")
+        .and_then(|l| l.as_f64())
+        .unwrap_or(-14.0);
+
+    // Начало единой транзакции SQLite
+    let mut tx = pool.begin().await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
+
+    // 1. UPSERT Проекта
     sqlx::query("
-        INSERT INTO projects (id, name, config_json, metadata_json, sample_rate, audio_offset_ms) 
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        INSERT INTO projects (
+            id, name, sample_rate, frame_rate, target_lufs, created_at, updated_at, audio_offset_ms, metadata_json, config_json
+        ) 
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         ON CONFLICT(id) DO UPDATE SET 
-        name=excluded.name, config_json=excluded.config_json, metadata_json=excluded.metadata_json,
-        sample_rate=excluded.sample_rate, audio_offset_ms=excluded.audio_offset_ms
+            name = excluded.name,
+            sample_rate = excluded.sample_rate,
+            frame_rate = excluded.frame_rate,
+            target_lufs = excluded.target_lufs,
+            updated_at = excluded.updated_at,
+            audio_offset_ms = excluded.audio_offset_ms,
+            metadata_json = excluded.metadata_json,
+            config_json = excluded.config_json
     ")
     .bind(&payload.id)
     .bind(&payload.name)
-    .bind(&config_str)
-    .bind(&config_str)
     .bind(sample_rate)
+    .bind(frame_rate)
+    .bind(target_lufs)
+    .bind(&now)
+    .bind(&now)
     .bind(payload.audio_offset_ms.unwrap_or(0.0))
-    .execute(pool)
-    .await.map_err(|e| e.to_string())?;
+    .bind(&config_str)
+    .bind(&config_str)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
-    for track in &payload.tracks {
+    // 2. Пакетная вставка / обновление дорожек и сегментов
+    let mut current_track_ids: HashSet<String> = HashSet::new();
+
+    for (order_idx, track) in payload.tracks.iter().enumerate() {
+        current_track_ids.insert(track.id.clone());
+
         // UPSERT Track
         sqlx::query("
-            INSERT INTO tracks (id, project_id, name, volume, is_muted) 
-            VALUES (?1, ?2, ?3, ?4, ?5)
+            INSERT INTO tracks (id, project_id, name, track_type, volume, pan, is_muted, is_solo, order_index) 
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(id) DO UPDATE SET 
-            name=excluded.name, volume=excluded.volume, is_muted=excluded.is_muted
+                name = excluded.name,
+                volume = excluded.volume,
+                is_muted = excluded.is_muted,
+                order_index = excluded.order_index
         ")
         .bind(&track.id)
         .bind(&payload.id)
         .bind(&track.name)
+        .bind("Dub")
         .bind(track.volume)
+        .bind(0.0)
         .bind(track.is_muted)
-        .execute(pool)
-        .await.map_err(|e| e.to_string())?;
+        .bind(false)
+        .bind(order_idx as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // Обработка сегментов текущей дорожки
+        let mut current_seg_ids: HashSet<String> = HashSet::new();
 
         for seg in &track.segments {
-            // UPSERT Segment
+            current_seg_ids.insert(seg.id.clone());
+
+            // UPSERT в audio_segments
             sqlx::query("
-                INSERT INTO segments (id, track_id, start_time, duration, file_offset, file_duration, file_path, backstage_video_path, gain) 
+                INSERT INTO audio_segments (
+                    id, track_id, file_path, start_time, duration, file_offset, file_duration, gain, backstage_video_path, is_active
+                ) 
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)
+                ON CONFLICT(id) DO UPDATE SET 
+                    file_path = excluded.file_path,
+                    start_time = excluded.start_time,
+                    duration = excluded.duration, 
+                    file_offset = excluded.file_offset,
+                    file_duration = excluded.file_duration, 
+                    gain = excluded.gain,
+                    backstage_video_path = excluded.backstage_video_path,
+                    is_active = excluded.is_active
+            ")
+            .bind(&seg.id)
+            .bind(&track.id)
+            .bind(&seg.file_path)
+            .bind(seg.start_time)
+            .bind(seg.duration)
+            .bind(seg.file_offset)
+            .bind(seg.file_duration)
+            .bind(seg.gain)
+            .bind(&seg.backstage_video_path)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            // Синхронизация в legacy таблицу segments
+            sqlx::query("
+                INSERT INTO segments (
+                    id, track_id, start_time, duration, file_offset, file_duration, file_path, backstage_video_path, gain
+                ) 
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                 ON CONFLICT(id) DO UPDATE SET 
-                start_time=excluded.start_time, duration=excluded.duration, 
-                file_offset=excluded.file_offset, file_duration=excluded.file_duration, 
-                file_path=excluded.file_path, backstage_video_path=excluded.backstage_video_path, gain=excluded.gain
+                    start_time = excluded.start_time,
+                    duration = excluded.duration, 
+                    file_offset = excluded.file_offset,
+                    file_duration = excluded.file_duration, 
+                    file_path = excluded.file_path,
+                    backstage_video_path = excluded.backstage_video_path,
+                    gain = excluded.gain
             ")
             .bind(&seg.id)
             .bind(&track.id)
@@ -258,71 +505,152 @@ pub async fn save_project_to_db(state: State<'_, AppState>, payload: ProjectData
             .bind(&seg.file_path)
             .bind(&seg.backstage_video_path)
             .bind(seg.gain)
-            .execute(pool)
-            .await.map_err(|e| e.to_string())?;
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            // Синхронизация в таблицу audio_clips
+            let file_p = seg.file_path.clone().unwrap_or_default();
+            sqlx::query("
+                INSERT INTO audio_clips (
+                    id, track_id, file_path, start_time_ms, duration_ms, source_offset_ms, gain_db, is_active, backstage_video_path
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)
+                ON CONFLICT(id) DO UPDATE SET
+                    file_path = excluded.file_path,
+                    start_time_ms = excluded.start_time_ms,
+                    duration_ms = excluded.duration_ms,
+                    source_offset_ms = excluded.source_offset_ms,
+                    gain_db = excluded.gain_db,
+                    is_active = excluded.is_active,
+                    backstage_video_path = excluded.backstage_video_path
+            ")
+            .bind(&seg.id)
+            .bind(&track.id)
+            .bind(&file_p)
+            .bind(seg.start_time * 1000.0)
+            .bind(seg.duration * 1000.0)
+            .bind(seg.file_offset * 1000.0)
+            .bind(if seg.gain > 0.0 { 20.0 * seg.gain.log10() } else { -96.0 })
+            .bind(&seg.backstage_video_path)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+
+        // Параметризованная очистка удаленных сегментов дорожки
+        let existing_segs = sqlx::query("SELECT id FROM audio_segments WHERE track_id = ?")
+            .bind(&track.id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        for s_row in existing_segs {
+            let sid: String = s_row.get("id");
+            if !current_seg_ids.contains(&sid) {
+                sqlx::query("DELETE FROM audio_segments WHERE id = ?")
+                    .bind(&sid)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                sqlx::query("DELETE FROM segments WHERE id = ?")
+                    .bind(&sid)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                sqlx::query("DELETE FROM audio_clips WHERE id = ?")
+                    .bind(&sid)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
         }
     }
 
-    // --- Cleanup deleted tracks ---
-    let track_ids: Vec<String> = payload.tracks.iter().map(|t| t.id.clone()).collect();
-    let track_ids_str = track_ids.join("','");
-    
-    if !track_ids.is_empty() {
-        let q_str = format!("DELETE FROM tracks WHERE project_id = ? AND id NOT IN ('{}')", track_ids_str);
-        sqlx::query(&q_str).bind(&payload.id).execute(pool).await.map_err(|e| e.to_string())?;
-    } else {
-        sqlx::query("DELETE FROM tracks WHERE project_id = ?").bind(&payload.id).execute(pool).await.map_err(|e| e.to_string())?;
-    }
+    // 3. Параметризованная очистка удаленных дорожек проекта
+    let existing_tracks = sqlx::query("SELECT id FROM tracks WHERE project_id = ?")
+        .bind(&payload.id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    // --- Cleanup deleted segments within retained tracks ---
-    for track in &payload.tracks {
-        let seg_ids: Vec<String> = track.segments.iter().map(|s| s.id.clone()).collect();
-        let seg_ids_str = seg_ids.join("','");
-        
-        if !seg_ids.is_empty() {
-            let q_str = format!("DELETE FROM segments WHERE track_id = ? AND id NOT IN ('{}')", seg_ids_str);
-            sqlx::query(&q_str).bind(&track.id).execute(pool).await.map_err(|e| e.to_string())?;
-        } else {
-            sqlx::query("DELETE FROM segments WHERE track_id = ?").bind(&track.id).execute(pool).await.map_err(|e| e.to_string())?;
+    for t_row in existing_tracks {
+        let tid: String = t_row.get("id");
+        if !current_track_ids.contains(&tid) {
+            // Каскадное удаление трека и всех его связанных сущностей
+            sqlx::query("DELETE FROM tracks WHERE id = ?")
+                .bind(&tid)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
         }
     }
 
-    log_debug("save_project_to_db finished successfully");
+    // Коммит транзакции
+    tx.commit().await.map_err(|e| format!("Failed to commit transaction: {}", e))?;
+
+    log_debug("save_project_to_db finished successfully in single atomic transaction");
     Ok(())
 }
 
+/// Загрузка проекта из реляционной базы
 #[tauri::command]
-pub async fn load_project_from_db(state: State<'_, AppState>, project_id: String) -> Result<ProjectData, String> {
+pub async fn load_project_from_db(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<ProjectData, String> {
     log_debug(&format!("load_project_from_db called for project_id: {}", project_id));
     let mutex = state.db.lock().await;
     let pool = mutex.as_ref().ok_or("Database not initialized")?;
 
-    let proj_row = sqlx::query("SELECT id, name, COALESCE(NULLIF(config_json, ''), NULLIF(metadata_json, ''), '{}') as config_json, audio_offset_ms FROM projects WHERE id = ?")
-        .bind(&project_id)
-        .fetch_optional(pool)
-        .await.map_err(|e| e.to_string())?;
+    let proj_row = sqlx::query("
+        SELECT id, name, COALESCE(NULLIF(config_json, ''), NULLIF(metadata_json, ''), '{}') as config_json, audio_offset_ms 
+        FROM projects WHERE id = ?
+    ")
+    .bind(&project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     let proj_row = proj_row.ok_or("Project not found")?;
 
-    log_debug(&format!("Found project name: {}", proj_row.get::<String, _>("name")));
-
     let config_json: String = proj_row.get("config_json");
-    let config: serde_json::Value = serde_json::from_str(&config_json).unwrap_or(serde_json::json!({}));
+    let config: serde_json::Value = serde_json::from_str(&config_json).unwrap_or_else(|_| serde_json::json!({}));
 
-    // Fetch Tracks
-    let tracks_rows = sqlx::query("SELECT id, name, volume, is_muted FROM tracks WHERE project_id = ?")
+    // Загрузка дорожек
+    let tracks_rows = sqlx::query("SELECT id, name, volume, is_muted FROM tracks WHERE project_id = ? ORDER BY order_index ASC")
         .bind(&project_id)
         .fetch_all(pool)
-        .await.map_err(|e| e.to_string())?;
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut tracks_data = Vec::new();
 
     for trow in tracks_rows {
-        // Fetch Segments
-        let segs_rows = sqlx::query("SELECT id, start_time, duration, file_offset, file_duration, file_path, backstage_video_path, gain FROM segments WHERE track_id = ?")
-            .bind(trow.get::<&str, _>("id").to_string())
+        let track_id: String = trow.get("id");
+
+        // Загрузка сегментов дорожки с поддержкой fallback между audio_segments и segments
+        let mut segs_rows = sqlx::query("
+            SELECT id, start_time, duration, file_offset, file_duration, file_path, backstage_video_path, gain 
+            FROM audio_segments WHERE track_id = ? ORDER BY start_time ASC
+        ")
+        .bind(&track_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        if segs_rows.is_empty() {
+            segs_rows = sqlx::query("
+                SELECT id, start_time, duration, file_offset, file_duration, file_path, backstage_video_path, gain 
+                FROM segments WHERE track_id = ? ORDER BY start_time ASC
+            ")
+            .bind(&track_id)
             .fetch_all(pool)
-            .await.map_err(|e| e.to_string())?;
+            .await
+            .unwrap_or_default();
+        }
 
         let mut segments_data = Vec::new();
         for srow in segs_rows {
@@ -339,7 +667,7 @@ pub async fn load_project_from_db(state: State<'_, AppState>, project_id: String
         }
 
         tracks_data.push(TrackData {
-            id: trow.get("id"),
+            id: track_id,
             name: trow.get("name"),
             volume: trow.get("volume"),
             is_muted: trow.get::<i64, _>("is_muted") == 1,
@@ -351,32 +679,139 @@ pub async fn load_project_from_db(state: State<'_, AppState>, project_id: String
         id: proj_row.get("id"),
         name: proj_row.get("name"),
         audio_offset_ms: Some(proj_row.get("audio_offset_ms")),
-        config: config,
+        config,
         tracks: tracks_data,
     })
 }
 
-#[tauri::command]
-pub async fn load_segments_in_range(_state: State<'_, AppState>, _project_id: String, _start: f64, _end: f64) -> Result<Vec<SegmentData>, String> {
-    Ok(Vec::new())
+/// Запрос сегментов с пространственно-временной фильтрацией по диапазону [start_range, end_range]
+/// и привязке к проекту / треку. Сегмент попадает в диапазон, если:
+/// start_time < end_range AND (start_time + duration) > start_range.
+pub async fn query_segments_in_range_internal(
+    pool: &Pool<Sqlite>,
+    project_id: Option<&str>,
+    track_id: Option<&str>,
+    start_range: f64,
+    end_range: f64,
+) -> Result<Vec<SegmentData>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT 
+            s.id, 
+            s.start_time, 
+            s.duration, 
+            s.file_offset, 
+            s.file_duration, 
+            s.file_path, 
+            s.backstage_video_path, 
+            s.gain
+         FROM audio_segments s
+         JOIN tracks t ON s.track_id = t.id
+         WHERE (?1 IS NULL OR t.project_id = ?1)
+           AND (?2 IS NULL OR s.track_id = ?2)
+           AND s.start_time < ?3
+           AND (s.start_time + s.duration) > ?4
+         ORDER BY s.start_time ASC",
+    )
+    .bind(project_id)
+    .bind(track_id)
+    .bind(end_range)
+    .bind(start_range)
+    .fetch_all(pool)
+    .await;
+
+    let segs_rows = match rows {
+        Ok(r) => r,
+        Err(_) => {
+            // Fallback к таблице segments для легаси баз
+            sqlx::query(
+                "SELECT 
+                    s.id, 
+                    s.start_time, 
+                    s.duration, 
+                    s.file_offset, 
+                    s.file_duration, 
+                    s.file_path, 
+                    s.backstage_video_path, 
+                    s.gain
+                 FROM segments s
+                 JOIN tracks t ON s.track_id = t.id
+                 WHERE (?1 IS NULL OR t.project_id = ?1)
+                   AND (?2 IS NULL OR s.track_id = ?2)
+                   AND s.start_time < ?3
+                   AND (s.start_time + s.duration) > ?4
+                 ORDER BY s.start_time ASC",
+            )
+            .bind(project_id)
+            .bind(track_id)
+            .bind(end_range)
+            .bind(start_range)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    Ok(segs_rows
+        .into_iter()
+        .map(|row| SegmentData {
+            id: row.get("id"),
+            start_time: row.get("start_time"),
+            duration: row.get("duration"),
+            file_offset: row.get("file_offset"),
+            file_duration: row.get("file_duration"),
+            file_path: row.get("file_path"),
+            backstage_video_path: row.get("backstage_video_path"),
+            gain: row.get("gain"),
+        })
+        .collect())
 }
 
-// --- MIGRATION UTILITY ---
+#[tauri::command]
+pub async fn load_segments_in_range(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    track_id: Option<String>,
+    start: Option<f64>,
+    end: Option<f64>,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
+) -> Result<Vec<SegmentData>, String> {
+    let mutex = state.db.lock().await;
+    let pool = mutex.as_ref().ok_or("Database not initialized")?;
+
+    let s_range = start.or(start_time).unwrap_or(0.0);
+    let e_range = end.or(end_time).unwrap_or(f64::MAX);
+
+    query_segments_in_range_internal(
+        pool,
+        project_id.as_deref(),
+        track_id.as_deref(),
+        s_range,
+        e_range,
+    )
+    .await
+    .map_err(|e| format!("Failed to query segments in range: {}", e))
+}
+
+// ============================================================================
+// 5. MIGRATION UTILITY
+// ============================================================================
 
 #[tauri::command]
-pub async fn migrate_json_to_db(state: State<'_, AppState>, json_string: String) -> Result<String, String> {
-    // 1. Parse older JSON payload directly
-    let parsed: serde_json::Value = serde_json::from_str(&json_string).map_err(|e| format!("Invalid JSON: {}", e))?;
-    
-    // 2. Identify the project id
+pub async fn migrate_json_to_db(
+    state: State<'_, AppState>,
+    json_string: String,
+) -> Result<String, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(&json_string).map_err(|e| format!("Invalid JSON: {}", e))?;
+
     let pid = parsed.get("id").and_then(|i| i.as_str()).unwrap_or("missing_id");
     let pname = parsed.get("name").and_then(|i| i.as_str()).unwrap_or("Migrated Project");
 
-    // 3. Serialize flexible portions
     let mut config = parsed.clone();
-    config.as_object_mut().unwrap().remove("tracks");
+    if let Some(obj) = config.as_object_mut() {
+        obj.remove("tracks");
+    }
 
-    // 4. Map directly to our standard format and save
     let mut track_vec = Vec::new();
     if let Some(tracks) = parsed.get("tracks").and_then(|t| t.as_array()) {
         for t in tracks {
@@ -415,38 +850,37 @@ pub async fn migrate_json_to_db(state: State<'_, AppState>, json_string: String)
     };
 
     save_project_to_db(state, pdata).await?;
-
     Ok(pid.to_string())
 }
 
+// ============================================================================
+// 6. ASSET VERIFICATION, RELINKING & HELPERS
+// ============================================================================
+
 #[tauri::command]
 pub async fn generate_stress_test(
-    state: State<'_, AppState>, 
-    project_id: String, 
+    state: State<'_, AppState>,
+    project_id: String,
     track_id: String,
-    project_path: String
+    project_path: String,
 ) -> Result<(), String> {
     let mutex = state.db.lock().await;
     let pool = mutex.as_ref().ok_or("Database not initialized")?;
 
-    println!("Generating stress test for project {} in {}", project_id, project_path);
-
-    // Ensure the .dubstudio dir exists
     let dub_dir = std::path::Path::new(&project_path).join(".dubstudio");
     if !dub_dir.exists() {
         fs::create_dir_all(&dub_dir).map_err(|e| e.to_string())?;
     }
 
-    // Insert 1000 segments
-    
+    let mut tx = pool.begin().await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
+
     for i in 0..1000 {
         let segment_id = format!("stress_{}", i);
-        let start_time = (i as f64) * 2.5; // Every 2.5 seconds
+        let start_time = (i as f64) * 2.5;
         let duration = 1.8;
         let file_path = dub_dir.join(format!("stress_{}.wav", i));
         let file_path_str = file_path.to_str().unwrap().to_string();
 
-        // Create a minimal silent WAV (44.1kHz, 16bit, mono, 1sec)
         let spec = hound::WavSpec {
             channels: 1,
             sample_rate: 44100,
@@ -460,6 +894,23 @@ pub async fn generate_stress_test(
         writer.finalize().map_err(|e| e.to_string())?;
 
         sqlx::query("
+            INSERT INTO audio_segments (id, track_id, start_time, duration, file_offset, file_duration, file_path, backstage_video_path, gain, is_active) 
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)
+        ")
+        .bind(&segment_id)
+        .bind(&track_id)
+        .bind(start_time)
+        .bind(duration)
+        .bind(0.0)
+        .bind(1.0)
+        .bind(&file_path_str)
+        .bind(None::<String>)
+        .bind(1.0)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        sqlx::query("
             INSERT INTO segments (id, track_id, start_time, duration, file_offset, file_duration, file_path, backstage_video_path, gain) 
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ")
@@ -470,16 +921,15 @@ pub async fn generate_stress_test(
         .bind(0.0)
         .bind(1.0)
         .bind(&file_path_str)
-        .bind(None::<String>) // backstage_video_path
+        .bind(None::<String>)
         .bind(1.0)
-        .execute(pool)
-        .await.map_err(|e| e.to_string())?;
-        
-        if i % 100 == 0 {
-            println!("Created {} stress segments...", i);
-        }
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
     }
 
+    tx.commit().await.map_err(|e| format!("Failed to commit stress test: {}", e))?;
+    log_info(&format!("Generated 1000 stress test segments for project {}", project_id));
     Ok(())
 }
 
@@ -489,10 +939,12 @@ pub async fn find_file_by_hash(
     target_hash: String,
 ) -> Result<Option<String>, String> {
     let root = std::path::Path::new(&search_root);
-    if !root.exists() { return Ok(None); }
+    if !root.exists() {
+        return Ok(None);
+    }
 
     let mut stack = vec![root.to_path_buf()];
-    
+
     while let Some(current_dir) = stack.pop() {
         if let Ok(entries) = fs::read_dir(current_dir) {
             for entry in entries.flatten() {
@@ -527,17 +979,19 @@ pub async fn verify_project_files(
     let mutex = state.db.lock().await;
     let pool = mutex.as_ref().ok_or("Database not initialized")?;
 
-    // 1. Get all segments for the project
-    let segments_rows = sqlx::query("SELECT s.id, s.start_time, s.duration, s.file_offset, s.file_duration, s.file_path, s.backstage_video_path, s.gain FROM segments s
-         JOIN tracks t ON s.track_id = t.id
-         WHERE t.project_id = ?")
-         .bind(&project_id)
-         .fetch_all(pool)
-         .await
-         .map_err(|e| e.to_string())?;
+    let segments_rows = sqlx::query("
+        SELECT s.id, s.start_time, s.duration, s.file_offset, s.file_duration, s.file_path, s.backstage_video_path, s.gain 
+        FROM audio_segments s
+        JOIN tracks t ON s.track_id = t.id
+        WHERE t.project_id = ?
+    ")
+    .bind(&project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     let mut missing_segments = Vec::new();
-    let mut referenced_files = std::collections::HashSet::new();
+    let mut referenced_files = HashSet::new();
 
     for row in segments_rows {
         let file_path: Option<String> = row.get("file_path");
@@ -564,7 +1018,6 @@ pub async fn verify_project_files(
         }
     }
 
-    // 2. Find orphaned files in .dubstudio
     let mut orphaned_files = Vec::new();
     let dub_dir = std::path::Path::new(&project_root).join(".dubstudio");
     if dub_dir.exists() {
@@ -573,7 +1026,6 @@ pub async fn verify_project_files(
                 if let Ok(file_type) = entry.file_type() {
                     if file_type.is_file() {
                         let path_str = entry.path().to_str().unwrap_or("").to_string();
-                        // Check if ends with .wav and not in referenced_files
                         if path_str.to_lowercase().ends_with(".wav") && !referenced_files.contains(&path_str) {
                             orphaned_files.push(path_str);
                         }
@@ -615,13 +1067,30 @@ pub async fn relink_segment_file(
     let mutex = state.db.lock().await;
     let pool = mutex.as_ref().ok_or("Database not initialized")?;
 
-    sqlx::query("UPDATE segments SET file_path = ? WHERE id = ?")
+    let mut tx = pool.begin().await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
+
+    sqlx::query("UPDATE audio_segments SET file_path = ? WHERE id = ?")
         .bind(&new_path)
         .bind(&segment_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
+    sqlx::query("UPDATE segments SET file_path = ? WHERE id = ?")
+        .bind(&new_path)
+        .bind(&segment_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query("UPDATE audio_clips SET file_path = ? WHERE id = ?")
+        .bind(&new_path)
+        .bind(&segment_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| format!("Failed to commit relink: {}", e))?;
     Ok(())
 }
 
@@ -634,58 +1103,171 @@ pub async fn check_project_assets(
     let mutex = state.db.lock().await;
     let pool = mutex.as_ref().ok_or("Database not initialized")?;
 
-    // 1. Get all segments for the project
-    let segments = sqlx::query("SELECT s.id, s.file_path FROM segments s
-         JOIN tracks t ON s.track_id = t.id
-         WHERE t.project_id = ?")
-         .bind(project_id)
-         .fetch_all(pool)
-         .await
-         .map_err(|e| e.to_string())?;
+    let segments = sqlx::query("
+        SELECT s.id, s.file_path FROM audio_segments s
+        JOIN tracks t ON s.track_id = t.id
+        WHERE t.project_id = ?
+    ")
+    .bind(&project_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     let mut broken_segments = Vec::new();
     let dub_dir = std::path::Path::new(&project_root).join(".dubstudio");
 
-    // 2. Check existence and try to fix
     for seg in segments {
         let id: String = seg.get("id");
         let file_path: Option<String> = seg.get("file_path");
         if let Some(path_str) = file_path {
             let path = std::path::Path::new(&path_str);
-            
+
             if !path.exists() {
-                // Try to find in .dubstudio
                 let file_name = path.file_name().and_then(|f| f.to_str());
                 let mut found = false;
-                
+
                 if let (Some(name), true) = (file_name, dub_dir.exists()) {
                     if let Ok(entries) = fs::read_dir(&dub_dir) {
                         for entry in entries.flatten() {
                             if entry.file_name() == name {
-                                // Found: update database
                                 let new_path = entry.path().to_str().unwrap().to_string();
+                                let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+                                sqlx::query("UPDATE audio_segments SET file_path = ? WHERE id = ?")
+                                    .bind(&new_path)
+                                    .bind(&id)
+                                    .execute(&mut *tx)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+
                                 sqlx::query("UPDATE segments SET file_path = ? WHERE id = ?")
                                     .bind(&new_path)
                                     .bind(&id)
-                                    .execute(pool)
+                                    .execute(&mut *tx)
                                     .await
                                     .map_err(|e| e.to_string())?;
+
+                                sqlx::query("UPDATE audio_clips SET file_path = ? WHERE id = ?")
+                                    .bind(&new_path)
+                                    .bind(&id)
+                                    .execute(&mut *tx)
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+
+                                tx.commit().await.map_err(|e| e.to_string())?;
                                 found = true;
                                 break;
                             }
                         }
                     }
                 }
-                
+
                 if !found {
                     broken_segments.push(id.clone());
                 }
             }
         } else {
-            // Path is None, consider broken if duration > 0
             broken_segments.push(id);
         }
     }
 
     Ok(broken_segments)
+}
+
+// ============================================================================
+// 6. UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_spatial_temporal_range_query() {
+        let pool = init_db(":memory:").await.expect("Failed to init in-memory DB");
+
+        // Create Project
+        sqlx::query("INSERT INTO projects (id, name) VALUES ('proj_1', 'Test Project');")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Create Track
+        sqlx::query("INSERT INTO tracks (id, project_id, name) VALUES ('track_1', 'proj_1', 'Voice');")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Insert Segments
+        // Seg 1: 0.0 .. 5.0 (start: 0.0, dur: 5.0)
+        // Seg 2: 10.0 .. 20.0 (start: 10.0, dur: 10.0)
+        // Seg 3: 15.0 .. 30.0 (start: 15.0, dur: 15.0)
+        // Seg 4: 40.0 .. 45.0 (start: 40.0, dur: 5.0)
+        let segments = vec![
+            ("seg_1", "track_1", 0.0, 5.0, 0.0, 5.0, "/path/1.wav", 1.0),
+            ("seg_2", "track_1", 10.0, 10.0, 0.0, 10.0, "/path/2.wav", 0.8),
+            ("seg_3", "track_1", 15.0, 15.0, 0.0, 15.0, "/path/3.wav", 1.2),
+            ("seg_4", "track_1", 40.0, 5.0, 0.0, 5.0, "/path/4.wav", 1.0),
+        ];
+
+        for (id, trk, st, dur, f_off, f_dur, f_path, gain) in segments {
+            sqlx::query("
+                INSERT INTO audio_segments (id, track_id, start_time, duration, file_offset, file_duration, file_path, gain)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ")
+            .bind(id)
+            .bind(trk)
+            .bind(st)
+            .bind(dur)
+            .bind(f_off)
+            .bind(f_dur)
+            .bind(f_path)
+            .bind(gain)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // 1. Range 12.0 .. 18.0 should match seg_2 (10..20) and seg_3 (15..30)
+        let res1 = query_segments_in_range_internal(&pool, Some("proj_1"), None, 12.0, 18.0)
+            .await
+            .unwrap();
+        assert_eq!(res1.len(), 2);
+        assert_eq!(res1[0].id, "seg_2");
+        assert_eq!(res1[0].gain, 0.8);
+        assert_eq!(res1[1].id, "seg_3");
+        assert_eq!(res1[1].gain, 1.2);
+
+        // 2. Range 0.0 .. 5.0 should match seg_1 (0..5) only
+        let res2 = query_segments_in_range_internal(&pool, Some("proj_1"), None, 0.0, 5.0)
+            .await
+            .unwrap();
+        assert_eq!(res2.len(), 1);
+        assert_eq!(res2[0].id, "seg_1");
+
+        // 3. Boundary touching: Range 5.0 .. 10.0 (between seg_1 and seg_2)
+        // seg_1 ends at 5.0, seg_2 starts at 10.0 -> neither should be included
+        let res3 = query_segments_in_range_internal(&pool, Some("proj_1"), None, 5.0, 10.0)
+            .await
+            .unwrap();
+        assert_eq!(res3.len(), 0);
+
+        // 4. Far range: 50.0 .. 60.0 -> no segments
+        let res4 = query_segments_in_range_internal(&pool, Some("proj_1"), None, 50.0, 60.0)
+            .await
+            .unwrap();
+        assert_eq!(res4.len(), 0);
+
+        // 5. Track filter
+        let res_track = query_segments_in_range_internal(&pool, None, Some("track_1"), 0.0, 100.0)
+            .await
+            .unwrap();
+        assert_eq!(res_track.len(), 4);
+
+        // 6. Unknown project filter -> 0
+        let res_unknown = query_segments_in_range_internal(&pool, Some("unknown_proj"), None, 0.0, 100.0)
+            .await
+            .unwrap();
+        assert_eq!(res_unknown.len(), 0);
+    }
 }

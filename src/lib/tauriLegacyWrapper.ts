@@ -1,7 +1,7 @@
 import { invoke, isTauri, convertFileSrc } from '@tauri-apps/api/core';
 // sync
 import { open, save, message } from '@tauri-apps/plugin-dialog';
-import { listen, emit, UnlistenFn } from '@tauri-apps/api/event';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 
 import { safeConfirm, getSafeFileUrl, safeStringifyProject } from './utils';
 import { IOLogger } from './ioLogger';
@@ -33,58 +33,6 @@ export const addToWebFileCache = (path: string, file: File) => {
 const genId = () => Math.random().toString(36).substring(2, 11);
 
 const listenerRegistry = new Set<() => void>();
-
-/**
- * Emit an action and wait for the result via the dubstudio-result event.
- * This decouples the invocation from the response, avoiding callback ID errors.
- */
-async function emitAction<T>(action: string, payload: any): Promise<T> {
-    if (!IS_TAURI) throw new Error("Not in Tauri environment");
-    const requestId = genId();
-    
-    return new Promise((resolve, reject) => {
-        let unlistenFunc: UnlistenFn | null = null;
-        
-        const cleanup = () => {
-            if (unlistenFunc) {
-                unlistenFunc();
-                listenerRegistry.delete(unlistenFunc);
-                unlistenFunc = null;
-            }
-        };
-
-        // Setup timeout to prevent hanging forever
-        const timeout = setTimeout(() => {
-            cleanup();
-            reject(new Error(`Action ${action} timed out`));
-        }, 120000); // 120 seconds (long for extraction)
-
-        listen('dubstudio-result', (event: any) => {
-            const result = event.payload;
-            if (result.request_id === requestId && result.action === action) {
-                clearTimeout(timeout);
-                cleanup();
-                if (result.success) {
-                    resolve(result.data as T);
-                } else {
-                    reject(new Error(result.error || 'Unknown backend error'));
-                }
-            }
-        }).then(u => {
-            unlistenFunc = u;
-            listenerRegistry.add(u);
-            
-            emit('dubstudio-action', { action, data: payload, request_id: requestId }).catch(err => {
-                clearTimeout(timeout);
-                cleanup();
-                reject(err);
-            });
-        }).catch(err => {
-            clearTimeout(timeout);
-            reject(err);
-        });
-    });
-}
 
 /**
  * Watchdog helper for long running Rust commands.
@@ -448,15 +396,16 @@ export const tauriAPI = {
     const wavPath = `${projectPath}/original_audio.wav`.replace(/\\/g, '/');
     
     try {
-      // Use event-driven action for long running peak extraction
-      const response = await emitAction('extract_audio_peaks', { filePath: videoPath, outputDir: projectPath });
-      console.log("extract_audio_peaks event response received");
+      const response = await invoke<number[] | Uint8Array | ArrayBuffer>('extract_audio_peaks_bin', {
+        filePath: videoPath,
+        outputDir: projectPath,
+      });
       const peaks = bufferToFloat32Array(response);
       const duration = peaks.length / 50.0;
       
       return { success: true, data: { filePath: wavPath, peaks, duration } };
     } catch(err) {
-      console.warn("Event extract_audio_peaks failed, trying direct native command:", err);
+      console.warn("extract_audio_peaks_bin failed, trying direct peak generation fallback:", err);
       try {
         const info = await invoke<any>('get_file_info', { path: videoPath });
         const duration = info?.duration || 0;
@@ -508,9 +457,9 @@ export const tauriAPI = {
   ): Promise<BridgeResponse<void>> => {
     if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
     try {
-        console.log(`[Bridge] start_recording via event: device=${device}, host=${hostName}, limiter=${limiterEnabled} (${limiterThreshold}dB)`);
+        console.log(`[Bridge] start_recording via invoke: device=${device}, host=${hostName}, limiter=${limiterEnabled} (${limiterThreshold}dB)`);
         
-        await emitAction('start_recording', { 
+        await invoke('start_recording', { 
             deviceName: device, 
             hostName: hostName, 
             sampleRate, 
@@ -780,8 +729,8 @@ export const tauriAPI = {
   stopAsioRecording: async (): Promise<BridgeResponse<any>> => {
     if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
     try {
-      console.log("[Bridge] stop_recording initiated via event");
-      const result: any = await emitAction('stop_recording', {});
+      console.log("[Bridge] stop_recording initiated via invoke");
+      const result = await invoke<any>('stop_recording');
       console.log("[Bridge] stop_recording result:", result);
 
       return { 
@@ -808,7 +757,7 @@ export const tauriAPI = {
         listenerRegistry.forEach(unlisten => unlisten());
         listenerRegistry.clear();
 
-        await emitAction('force_stop_all', {});
+        await invoke('force_stop_all');
         return { success: true };
     } catch(err) {
         console.error("[Bridge] force_stop_all error:", err);
@@ -1464,6 +1413,50 @@ export const tauriAPI = {
     try {
         const result = await invoke<string>('export_backstage_video', args);
         return { success: true, data: result };
+    } catch(err) {
+        return { success: false, error: String(err) };
+    }
+  },
+
+  startBackstageRecording: async (args: { videoDevice: string, audioDevice?: string | null, projectPath?: string | null }): Promise<BridgeResponse<string>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        const result = await invoke<string>('start_backstage_recording', {
+            videoDevice: args.videoDevice,
+            audioDevice: args.audioDevice ?? null,
+            projectPath: args.projectPath ?? null
+        });
+        return { success: true, data: result };
+    } catch(err) {
+        return { success: false, error: String(err) };
+    }
+  },
+
+  stopBackstageRecording: async (): Promise<BridgeResponse<string | null>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        const result = await invoke<string | null>('stop_backstage_recording');
+        return { success: true, data: result };
+    } catch(err) {
+        return { success: false, error: String(err) };
+    }
+  },
+
+  isBackstageRecording: async (): Promise<BridgeResponse<boolean>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+        const result = await invoke<boolean>('is_backstage_recording');
+        return { success: true, data: result };
+    } catch(err) {
+        return { success: false, error: String(err) };
+    }
+  },
+
+  forceStopBackstage: async (): Promise<BridgeResponse<void>> => {
+    if (!IS_TAURI) return { success: true };
+    try {
+        await invoke('force_stop_backstage');
+        return { success: true };
     } catch(err) {
         return { success: false, error: String(err) };
     }

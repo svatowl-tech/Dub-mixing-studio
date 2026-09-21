@@ -50,7 +50,6 @@ import TopHeader from './components/layout/TopHeader';
 import StyledExportOverlay from './components/layout/ExportOverlay';
 import { useAudioEngine } from './hooks/useAudioEngine';
 import { useProjectImport } from './hooks/useProjectImport';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { openStudioWindow, closeStudioWindow } from './lib/windowHelpers';
 
 export default function App() {
@@ -435,8 +434,8 @@ export default function App() {
         projectPath: '',
         videoUrl: 'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4',
         subtitles: [
-          { id: 1, start: 0.5, end: 3.5, role: 'Диктор', text: 'Добро пожаловать в студию озвучания и сведения дубляжа.', combined: 'Добро пожаловать в студию озвучания и сведения дубляжа.' },
-          { id: 2, start: 4.0, end: 8.5, role: 'Персонаж', text: 'Все этапы обработки выполняются на нативном DSP движке Rust.', combined: 'Все этапы обработки выполняются на нативном DSP движке Rust.' }
+          { id: '1', start: 0.5, end: 3.5, role: 'Диктор', text: 'Добро пожаловать в студию озвучания и сведения дубляжа.' },
+          { id: '2', start: 4.0, end: 8.5, role: 'Персонаж', text: 'Все этапы обработки выполняются на нативном DSP движке Rust.' }
         ],
         roles: ['Диктор', 'Персонаж'],
         selectedRole: 'Диктор',
@@ -465,9 +464,16 @@ export default function App() {
           deviceId: 'default',
           outputDeviceId: 'default',
           sampleRate: 48000,
-          channels: 1,
-          noiseSuppression: true,
           echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          bitDepth: 24,
+          noiseGateThreshold: -40,
+          isNoiseGateEnabled: false,
+          compressorThreshold: -18,
+          compressorRatio: 3,
+          highPassFrequency: 80,
+          isDestructive: false,
           backstageMode: 'parallel',
           isBackstageEnabled: false
         }
@@ -582,7 +588,7 @@ export default function App() {
                 ...t,
                 segments: t.segments ? t.segments.map(s => (s.filePath === filePath || s.id === segmentId) ? { 
                   ...s, 
-                  waveform: peakArray, 
+                  waveform: peakArray as number[], 
                   isExtractingWaveform: false 
                 } : s) : []
               }))
@@ -893,7 +899,7 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Ctrl+Shift+I or F12
       if ((e.ctrlKey && e.shiftKey && e.code === 'KeyI') || e.code === 'F12') {
-        if (window.electronAPI) {
+        if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
           import('@tauri-apps/api/core').then(mod => {
              mod.invoke('open_devtools').catch(console.error);
           }).catch(console.error);
@@ -905,9 +911,10 @@ export default function App() {
     // Listen for Tauri native file drop events to get full paths
     let unlisten: any;
     let isCancelled = false;
-    if (isDesktop && window.electronAPI) {
+    if (isDesktop && typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
       const setupDrop = async () => {
         try {
+          const { getCurrentWindow } = await import('@tauri-apps/api/window');
           const u = await getCurrentWindow().onDragDropEvent((event) => {
             if (isCancelled) return;
             if (event.payload.type === 'drop') {
@@ -2769,7 +2776,13 @@ export default function App() {
   }, [isPopoutOpen]);
 
   const projectContextValue = {
-    project, setProject, recentProjects, handleNewProject, handleOpenProject, handleSaveProject, onLoadProject,
+    project, setProject, recentProjects, handleNewProject, handleOpenProject, handleSaveProject, 
+    onLoadProject: (proj: Project, path?: string) => {
+      setProject(proj);
+      if (path || proj.projectPath) {
+        onLoadProject(path || proj.projectPath);
+      }
+    },
     undo, redo, canUndo, canRedo, undoDescription, redoDescription
   };
   const timelineContextValue = {
@@ -2886,7 +2899,7 @@ export default function App() {
               }}
               isLooping={isLooping}
               onToggleLoop={() => setIsLooping(!isLooping)}
-              onFitToWidth={handleFitToWidth}
+              onFitToWidth={() => handleFitToWidth()}
               isAutoHeight={isAutoHeight}
               onToggleAutoHeight={() => setIsAutoHeight(!isAutoHeight)}
               zoomLevel={zoomLevel}

@@ -107,9 +107,10 @@ export const useTimelineState = (
     }
   }, [project, duration, videoError, videoRef, referenceAudioRef]);
 
-  const handleFitToWidth = useCallback((containerWidth: number) => {
+  const handleFitToWidth = useCallback((containerWidth?: number) => {
+    const width = containerWidth || (typeof window !== 'undefined' ? window.innerWidth - 300 : 1000);
     if (duration > 0) {
-      const actualContainerWidth = containerWidth - 100; // padding
+      const actualContainerWidth = width - 100; // padding
       const newZoom = actualContainerWidth / duration;
       setZoomLevel(Math.max(10, Math.min(newZoom, 2000)));
     }

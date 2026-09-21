@@ -1,5 +1,4 @@
 use std::fs;
-// sync
 use std::path::{Path, PathBuf};
 use serde::Serialize;
 use hound;
@@ -46,18 +45,35 @@ pub fn normalize_windows_path(path_str: &str) -> String {
         s = s["file:///".len()..].to_string();
     } else if s.starts_with("file://") {
         s = s["file://".len()..].to_string();
+    } else if s.starts_with("file:") {
+        s = s["file:".len()..].to_string();
     }
 
-    // URL decode if needed (e.g. %3A -> :, %2F -> /, %D0%9E... -> Cyrillic)
+    // URL decode if needed (e.g. %20 -> space, %D0%9E... -> Cyrillic)
     if s.contains('%') {
         s = url_decode(&s);
     }
 
-    // If path starts with leading slash before Windows drive letter: "/C:/..." -> "C:/..."
+    // Handle Windows Extended Paths prefix (e.g. \\?\C:\... or \\?\UNC\server\share)
+    if s.starts_with(r"\\?\UNC\") || s.starts_with("//?/UNC/") {
+        s = format!(r"\\{}", &s[8..]);
+    } else if s.starts_with(r"\\?\") || s.starts_with(r"\\.\") || s.starts_with("//?/") || s.starts_with("//./") {
+        s = s[4..].to_string();
+    }
+
+    // If path starts with leading slash before Windows drive letter: "/C:/..." or "\C:\..." -> "C:/..."
     if (s.starts_with('/') || s.starts_with('\\')) && s.len() > 3 {
         let bytes = s.as_bytes();
         if bytes[1].is_ascii_alphabetic() && (bytes[2] == b':' || bytes[2] == b'|') {
             s = s[1..].to_string();
+        }
+    }
+
+    // Replace drive pipe syntax if present: C|/ -> C:/
+    if s.len() >= 2 {
+        let bytes = s.as_bytes();
+        if bytes[0].is_ascii_alphabetic() && bytes[1] == b'|' {
+            s.replace_range(1..2, ":");
         }
     }
 
@@ -82,7 +98,9 @@ pub fn normalize_windows_path(path_str: &str) -> String {
             if ancestor.exists() {
                 if let Ok(canon) = ancestor.canonicalize() {
                     let mut canon_str = canon.to_string_lossy().to_string();
-                    if canon_str.starts_with(r"\\?\") {
+                    if canon_str.starts_with(r"\\?\UNC\") {
+                        canon_str = format!(r"\\{}", &canon_str[8..]);
+                    } else if canon_str.starts_with(r"\\?\") {
                         canon_str = canon_str[4..].to_string();
                     }
                     let mut result_path = std::path::PathBuf::from(canon_str);
@@ -94,7 +112,8 @@ pub fn normalize_windows_path(path_str: &str) -> String {
             }
         }
     }
-    s
+
+    s.replace('\\', "/")
 }
 
 #[derive(Serialize)]
@@ -179,15 +198,19 @@ pub fn list_audio_files(folder_path: String) -> Result<Vec<AudioFileEntry>, Stri
         if let Ok(path_entry) = path_result {
             let path = path_entry.path();
             if path.is_file() {
-                let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                if ext.to_lowercase() == "wav" {
-                    // Try to get duration using hound
-                    let duration = match hound::WavReader::open(&path) {
-                        Ok(reader) => {
-                            let spec = reader.spec();
-                            reader.duration() as f64 / spec.sample_rate as f64
+                let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+                let is_audio = ["wav", "mp3", "flac", "ogg", "m4a", "aac", "wma", "aiff", "aif"].contains(&ext.as_str());
+                if is_audio {
+                    let duration = if ext == "wav" {
+                        match hound::WavReader::open(&path) {
+                            Ok(reader) => {
+                                let spec = reader.spec();
+                                reader.duration() as f64 / spec.sample_rate as f64
+                            }
+                            Err(_) => 0.0,
                         }
-                        Err(_) => 0.0,
+                    } else {
+                        0.0
                     };
 
                     entries.push(AudioFileEntry {
@@ -268,7 +291,7 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
     let ffmpeg_bin = find_ffmpeg_path();
     let mut command = std::process::Command::new(&ffmpeg_bin);
     command.hide_window();
-    command.arg("-y").arg("-i").arg(temp_path.to_str().unwrap());
+    command.arg("-y").arg("-i").arg(&temp_path);
     
     if is_backstage {
         command.args(&[
@@ -279,14 +302,12 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
             "-c:a", "aac",
             "-ar", "48000",
             "-ac", "1",
-            target_path.to_str().unwrap()
-        ]);
+        ]).arg(&target_path);
     } else {
         command.args(&[
             "-ar", "48000",
             "-ac", "1",
-            target_path.to_str().unwrap()
-        ]);
+        ]).arg(&target_path);
     }
 
     let status = command.output().map_err(|e| e.to_string())?;
@@ -298,7 +319,7 @@ pub async fn save_media_recorder_take(project_path: String, role: String, data: 
         return Err(format!("FFmpeg failed: {}", String::from_utf8_lossy(&status.stderr)));
     }
 
-    Ok(target_path.to_str().unwrap().to_string())
+    Ok(target_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -315,8 +336,6 @@ pub fn init_project_folder(path: String) -> Result<(), String> {
         }
     }
     
-    // Support legacy .dubstudio for compatibility with older takes if needed, 
-    // but the app should transition to 'takes' folder.
     let dub_dir = project_dir.join(".dubstudio");
     if !dub_dir.exists() {
         fs::create_dir_all(&dub_dir).map_err(|e| e.to_string())?;
@@ -351,112 +370,90 @@ pub fn save_project_file(app_handle: AppHandle, path: String, data: String) -> R
 }
 
 #[tauri::command]
-pub async fn copy_file_to_project(app_handle: tauri::AppHandle, src: String, dest_dir: String) -> Result<String, String> {
-    use std::fs;
-    use std::path::Path;
-    use tauri_plugin_shell::ShellExt;
-
+pub async fn copy_file(src: String, dest: String) -> Result<String, String> {
     let norm_src = normalize_windows_path(&src);
-    let norm_dest_dir = normalize_windows_path(&dest_dir);
-    let src_path = Path::new(&norm_src);
-    let file_name = src_path.file_name().ok_or("Invalid source file name")?;
-    
-    let mut dest_path = Path::new(&norm_dest_dir).join(file_name);
-    
+    let norm_dest = normalize_windows_path(&dest);
+    let dest_path = Path::new(&norm_dest);
     if let Some(parent) = dest_path.parent() {
+        if !parent.exists() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+    fs::copy(&norm_src, &norm_dest).map_err(|e| format!("Failed to copy file: {}", e))?;
+    Ok(norm_dest)
+}
+
+#[tauri::command]
+pub async fn copy_file_to_project(
+    _app_handle: tauri::AppHandle,
+    src: Option<String>,
+    dest_dir: Option<String>,
+    src_path: Option<String>,
+    dest_path: Option<String>,
+) -> Result<String, String> {
+    let actual_src = src.or(src_path).ok_or("No source path provided for copy_file_to_project")?;
+    let actual_dest = dest_dir.or(dest_path).ok_or("No destination provided for copy_file_to_project")?;
+
+    let norm_src = normalize_windows_path(&actual_src);
+    let norm_dest = normalize_windows_path(&actual_dest);
+    let src_p = Path::new(&norm_src);
+
+    if !src_p.exists() {
+        return Err(format!("Source file does not exist: {}", norm_src));
+    }
+
+    let file_name = src_p.file_name().ok_or("Invalid source file name")?;
+    
+    // Check if target is directly a file (has an extension) or a directory
+    let target_dest_p = Path::new(&norm_dest);
+    let final_dest_path = if target_dest_p.extension().is_some() {
+        PathBuf::from(&norm_dest)
+    } else {
+        target_dest_p.join(file_name)
+    };
+    
+    if let Some(parent) = final_dest_path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).map_err(|e| format!("Failed to create destination parent folder: {}", e))?;
         }
     }
 
-    let ext = src_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-    let is_audio = ["wav", "mp3", "flac", "ogg", "m4a", "aac", "wma"].contains(&ext.as_str());
+    // High-speed native copy without running FFmpeg for WAV, FLAC, MP3, OGG, AAC, M4A, etc.
+    // Audio engine & audio_buffer_manager natively decode compressed audio via Symphonia
+    // and handle sinc-resampling on the fly via rubato during playback / export.
+    fs::copy(&src_p, &final_dest_path).map_err(|e| format!("Failed to copy file to project: {}", e))?;
 
-    if is_audio {
-        let mut need_conversion = ext != "wav";
+    let dest_str = final_dest_path.to_string_lossy().to_string();
+    println!("[copy_file_to_project] Fast copied {} -> {}", norm_src, dest_str);
 
-        if !need_conversion {
-            if let Ok(ffprobe_cmd) = app_handle.shell().sidecar("ffprobe") {
-                if let Ok(output) = ffprobe_cmd.args(&[
-                    "-v", "error", "-select_streams", "a:0",
-                    "-show_entries", "stream=sample_rate",
-                    "-of", "default=noprint_wrappers=1:nokey=1",
-                    &norm_src,
-                ]).output().await {
-                    if output.status.success() {
-                        let stdout_str = String::from_utf8_lossy(&output.stdout);
-                        if let Ok(sr) = stdout_str.trim().parse::<u32>() {
-                            if sr != 48000 {
-                                need_conversion = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if need_conversion {
-            dest_path.set_extension("wav");
-            let dest_str = dest_path.to_string_lossy().to_string();
-            println!("[copy_file_to_project] Converting/resampling audio to 48000Hz WAV: {} -> {}", norm_src, dest_str);
-
-            let mut converted = false;
-            if let Ok(ffmpeg_cmd) = app_handle.shell().sidecar("ffmpeg") {
-                if let Ok(out) = ffmpeg_cmd.args(&[
-                    "-y", "-i", &norm_src,
-                    "-ar", "48000", "-c:a", "pcm_s16le", 
-                    &dest_str
-                ]).output().await {
-                    if out.status.success() {
-                        converted = true;
-                    }
-                }
-            }
-
-            if !converted {
-                let ffmpeg_bin = find_ffmpeg_path();
-                if let Ok(out) = tokio::process::Command::new(&ffmpeg_bin).hide_window().args(&[
-                    "-y", "-i", &norm_src,
-                    "-ar", "48000", "-c:a", "pcm_s16le", 
-                    &dest_str
-                ]).output().await {
-                    if out.status.success() {
-                        converted = true;
-                    }
-                }
-            }
-
-            if converted {
-                return Ok(dest_str);
-            }
-        }
-    }
-
-    // Фоллбэк, если ресемплинг не нужен или не удался
-    let fallback_dest = Path::new(&norm_dest_dir).join(file_name);
-    fs::copy(&norm_src, &fallback_dest).map_err(|e| format!("Failed to copy file: {}", e))?;
-    Ok(fallback_dest.to_str().unwrap().to_string())
+    Ok(dest_str)
 }
 
 #[tauri::command]
 pub async fn ensure_track_audio_wav(app_handle: AppHandle, file_path: String) -> Result<String, String> {
     let norm_path = normalize_windows_path(&file_path);
-    let src = std::path::PathBuf::from(&norm_path);
+    let src = PathBuf::from(&norm_path);
     if !src.exists() {
         return Err(format!("Файл аудио не найден: {}", norm_path));
     }
 
-    // Если это уже валидный WAV с правильным RIFF заголовком
+    // 1. Если исходный файл уже является валидным WAV (любой частоты дискретизации), возвращаем его сразу
     if hound::WavReader::open(&src).is_ok() {
         return Ok(norm_path);
     }
 
-    // Преобразуем в .wav в той же папке
+    // 2. Если это стандартный поддерживаемый аудиоформат (WAV, MP3, FLAC, OGG, M4A, AAC, WMA),
+    // наш движок (audio_buffer_manager + rubato) читает его нативно и ресэмплирует на лету.
+    let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    if ["wav", "mp3", "flac", "ogg", "m4a", "aac", "wma", "aiff", "aif"].contains(&ext.as_str()) {
+        return Ok(norm_path);
+    }
+
+    // 3. Для прочих нетипичных форматов преобразуем в .wav в той же папке через FFmpeg
     let mut dest = src.clone();
     dest.set_extension("wav");
     let dest_str = dest.to_string_lossy().to_string();
 
-    // Если wav уже существует и актуальнее источника
     if dest.exists() {
         if let (Ok(src_meta), Ok(dest_meta)) = (src.metadata(), dest.metadata()) {
             if let (Ok(src_mtime), Ok(dest_mtime)) = (src_meta.modified(), dest_meta.modified()) {
@@ -469,7 +466,7 @@ pub async fn ensure_track_audio_wav(app_handle: AppHandle, file_path: String) ->
         }
     }
 
-    println!("[ensure_track_audio_wav] Converting {} to 48kHz WAV -> {}", norm_path, dest_str);
+    println!("[ensure_track_audio_wav] Converting non-standard audio container {} to WAV -> {}", norm_path, dest_str);
 
     let mut converted = false;
     if let Ok(ffmpeg_cmd) = app_handle.shell().sidecar("ffmpeg") {
@@ -517,7 +514,6 @@ pub fn ensure_valid_wav_path(path: &Path) -> Result<(PathBuf, bool), String> {
 
     println!("[ensure_valid_wav_path] Файл {} не является валидным WAV. Автоматическая конвертация через FFmpeg...", norm_path_str);
 
-    // 2. Генерация пути для временного WAV файла в папке исходного файла (для экономии места на C:)
     let epoch_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -527,14 +523,12 @@ pub fn ensure_valid_wav_path(path: &Path) -> Result<(PathBuf, bool), String> {
 
     let ffmpeg_bin = find_ffmpeg_path();
     let output = std::process::Command::new(&ffmpeg_bin).hide_window()
-        .args(&[
-            "-y",
-            "-i", &norm_path_str,
-            "-ar", "44100",
-            "-ac", "2",
-            "-c:a", "pcm_s16le",
-            &temp_wav.to_string_lossy().to_string(),
-        ])
+        .arg("-y")
+        .arg("-i").arg(&src)
+        .arg("-ar").arg("48000")
+        .arg("-ac").arg("2")
+        .arg("-c:a").arg("pcm_s16le")
+        .arg(&temp_wav)
         .output();
 
     match output {
@@ -590,4 +584,3 @@ pub fn open_path(path: String) -> Result<(), String> {
     }
     Ok(())
 }
-

@@ -138,7 +138,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
             </div>
             <button
               type="button"
-              onClick={handleDownload}
+              onClick={() => handleDownload()}
               disabled={downloading}
               className="px-3 py-1 rounded-md bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs transition flex items-center gap-1.5 shrink-0 shadow-sm"
             >

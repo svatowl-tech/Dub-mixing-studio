@@ -618,9 +618,9 @@ export const SingleTrackStudioModal: React.FC = () => {
       });
 
       if (savePath && (window as any).__TAURI_INTERNALS__) {
-        await safeInvoke('copy_file_to_project', {
-          srcPath: processedPath,
-          destPath: savePath
+        await safeInvoke('copy_file', {
+          src: processedPath,
+          dest: savePath
         });
         alert('Файл успешно сохранен!');
       }

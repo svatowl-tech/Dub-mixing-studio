@@ -1,6 +1,8 @@
 import { getSafeFileUrl, toNativeLocalPath } from '../lib/utils';
 import { VSTAudioWorkletNode } from '../lib/vstHost';
 import { IOLogger } from '../lib/ioLogger';
+import { VocalBusWebAudioChain } from './vocalBusProcessor';
+import { VocalBusRackConfig } from '../types';
 
 async function callTauri(cmd: string, args?: Record<string, any>): Promise<any> {
   if (typeof window === 'undefined') return null;
@@ -120,6 +122,11 @@ export class PlaybackEngine {
   private referenceGain: GainNode | null = null;
   private dubbingGain: GainNode | null = null;
   private dubbingDelay: DelayNode | null = null;
+  private vocalBusChain: VocalBusWebAudioChain | null = null;
+  private cachedVocalBusConfig: VocalBusRackConfig | null = null;
+  private cachedVocalBusBypass: boolean = false;
+  private masterStreamDestination: MediaStreamAudioDestinationNode | null = null;
+  private vocalBusStreamDestination: MediaStreamAudioDestinationNode | null = null;
   private masterGain: GainNode | null = null;
   private boundVideoElement: HTMLMediaElement | null = null;
   private boundReferenceElement: HTMLMediaElement | null = null;
@@ -139,6 +146,10 @@ export class PlaybackEngine {
   }> = new Map();
 
   constructor() {}
+
+  private isTauriRuntime(): boolean {
+    return typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
+  }
 
   private createProcessingChain(
     ctx: AudioContext,
@@ -171,12 +182,7 @@ export class PlaybackEngine {
     let delayNode: DelayNode | undefined;
     const vstChains: Array<any> = [];
 
-    // --- 1. Noise gate ---
-    // Note: Do NOT use a downward compressor as a noise gate. Downward compressors
-    // boost quiet signals with makeup gain and squash dynamic range. A noise gate
-    // in Web Audio without worklet is bypassed cleanly to avoid severe noise floor pumping.
-
-    // --- 2. De-esser ---
+    // --- 1. De-esser ---
     if (processing.deesser?.enabled) {
       deesserNode = ctx.createBiquadFilter();
       deesserNode.type = 'peaking';
@@ -188,7 +194,7 @@ export class PlaybackEngine {
       activeInput = deesserNode;
     }
 
-    // --- 3. EQ highpass / lowpass ---
+    // --- 2. EQ highpass / lowpass ---
     if (processing.eq?.enabled) {
       if (processing.eq.highPass && processing.eq.highPass > 20) {
         hpNode = ctx.createBiquadFilter();
@@ -232,7 +238,7 @@ export class PlaybackEngine {
       }
     }
 
-    // --- 4. Compressor ---
+    // --- 3. Compressor ---
     if (processing.compressor?.enabled) {
       compressorNode = ctx.createDynamicsCompressor();
       compressorNode.threshold.value = processing.compressor.threshold ?? -18;
@@ -243,7 +249,7 @@ export class PlaybackEngine {
       activeInput = compressorNode;
     }
 
-    // --- 5. VST Plugins Rack ---
+    // --- 4. VST Plugins Rack ---
     if (processing.vstPlugins && processing.vstPlugins.length > 0) {
       for (const vst of processing.vstPlugins) {
         if (vst.bypass) continue;
@@ -267,7 +273,7 @@ export class PlaybackEngine {
       }
     }
 
-    // --- 6. Reverb ---
+    // --- 5. Reverb ---
     if (processing.reverb?.enabled) {
       reverbDryNode = ctx.createGain();
       reverbWetNode = ctx.createGain();
@@ -291,7 +297,7 @@ export class PlaybackEngine {
       activeInput = reverbOutputSum;
     }
 
-    // --- 7. Delay ---
+    // --- 6. Delay ---
     if (processing.delay?.enabled) {
       delayDryNode = ctx.createGain();
       delayWetNode = ctx.createGain();
@@ -378,10 +384,6 @@ export class PlaybackEngine {
     const ctx = await this.getContext();
     
     if (this.dubbingDelay && this.videoDelay) {
-      // Dynamic balancing of delays to handle positive/negative offsets
-      // Positive offset = Dubs play LATER (delay Dubbing)
-      // Negative offset = Video/Reference plays LATER (delay Video)
-      
       const dubbingDelaySec = offsetMs > 0 ? offsetMs / 1000 : 0;
       const videoDelaySec = offsetMs < 0 ? Math.abs(offsetMs) / 1000 : 0;
       
@@ -400,14 +402,11 @@ export class PlaybackEngine {
         sampleRate: 48000,
       });
       
-      console.log(`[PlaybackEngine] AudioContext initialized at ${this.audioContext.sampleRate}Hz`);
+      console.log(`[PlaybackEngine] AudioContext initialized at ${this.audioContext.sampleRate}Hz (Tauri Runtime: ${this.isTauriRuntime()})`);
 
       if (!this.workletInitialized) {
         try {
-          // Use the static public worklet file to avoid violating CSP/browser-side blocks in iframe previews
-          await this.audioContext.audioWorklet.addModule(
-            '/vst-processor.worklet.js'
-          );
+          await this.audioContext.audioWorklet.addModule('/vst-processor.worklet.js');
           this.workletInitialized = true;
           console.log("[PlaybackEngine] VST AudioWorklet loaded");
         } catch (err) {
@@ -418,31 +417,48 @@ export class PlaybackEngine {
       // Initialize Master Bus (Мастер-выход)
       this.masterGain = this.audioContext.createGain();
       this.masterGain.gain.value = 1.0;
-      this.masterGain.connect(this.audioContext.destination);
 
-      // Initialize Dubbing Bus (Мастер-шина вокала)
+      // В десктопном режиме Tauri ВСЕГДА отключаем прямой вывод в браузерный destination,
+      // чтобы ликвидировать дублирование звука, фазовый рассинхрон и фленджер.
+      // Весь мастер-звук идет строго через нативный движок Tauri (CPAL/ASIO).
+      if (!this.isTauriRuntime()) {
+        this.masterGain.connect(this.audioContext.destination);
+      }
+
+      // Initialize Dubbing Bus
       this.dubbingGain = this.audioContext.createGain();
-      this.dubbingDelay = this.audioContext.createDelay(4.0); // Allow up to 4s compensation
-      this.dubbingGain.connect(this.dubbingDelay);
+      this.dubbingDelay = this.audioContext.createDelay(4.0);
+      
+      this.vocalBusChain = new VocalBusWebAudioChain(this.audioContext);
+      if (this.cachedVocalBusConfig) {
+        this.vocalBusChain.updateConfig(this.cachedVocalBusConfig, this.cachedVocalBusBypass);
+      }
+
+      this.dubbingGain.connect(this.vocalBusChain.inputNode);
+      this.vocalBusChain.outputNode.connect(this.dubbingDelay);
       this.dubbingDelay.connect(this.masterGain);
 
-      // Initialize Original/Video Bus (Шина оригинального звука)
+      // Initialize Original/Video Bus
       this.videoGain = this.audioContext.createGain();
       this.videoDelay = this.audioContext.createDelay(4.0);
       this.videoGain.connect(this.videoDelay);
       this.videoDelay.connect(this.masterGain);
 
-      // Reference track uses its own gain but same delay line as video
+      // Reference track gain
       this.referenceGain = this.audioContext.createGain();
       this.referenceGain.gain.value = 0;
       this.referenceGain.connect(this.videoDelay); 
     }
+
+    if (this.isTauriRuntime() && this.masterGain && this.audioContext) {
+      try {
+        this.masterGain.disconnect(this.audioContext.destination);
+      } catch (_) {}
+    }
+
     return this.audioContext;
   }
 
-  /**
-   * Sets the volume and mute status of the Vocal Master Bus (Мастер-шина вокала).
-   */
   public setVocalBusVolume(volume: number, isMuted: boolean = false) {
     if (this.dubbingGain && this.audioContext) {
       const targetGain = isMuted ? 0 : Math.max(0, volume);
@@ -452,11 +468,23 @@ export class PlaybackEngine {
         this.dubbingGain.gain.value = targetGain;
       }
     }
+    if (this.isTauriRuntime()) {
+      callTauri('set_vocal_bus_volume', { volume: isMuted ? 0 : Math.max(0, volume) }).catch(() => {});
+    }
   }
 
-  /**
-   * Sets the volume of the Master Mix (Мастер-выход).
-   */
+  public setVocalBusDspConfig(config: VocalBusRackConfig | null | undefined, bypass: boolean = false) {
+    this.cachedVocalBusConfig = config || null;
+    this.cachedVocalBusBypass = bypass;
+    if (this.vocalBusChain) {
+      this.vocalBusChain.updateConfig(config, bypass);
+    }
+  }
+
+  public getVocalBusDspChain(): VocalBusWebAudioChain | null {
+    return this.vocalBusChain;
+  }
+
   public setMasterVolume(volume: number) {
     if (this.masterGain && this.audioContext) {
       const targetGain = Math.max(0, volume);
@@ -466,17 +494,49 @@ export class PlaybackEngine {
         this.masterGain.gain.value = targetGain;
       }
     }
+    if (this.isTauriRuntime()) {
+      callTauri('set_master_volume', { volume: Math.max(0, volume) }).catch(() => {});
+    }
   }
 
   public getCurrentTime(): number {
     return this.audioContext ? this.audioContext.currentTime : 0;
   }
 
+  public getMasterStream(): MediaStream | null {
+    if (!this.audioContext || !this.masterGain) return null;
+    if (!this.masterStreamDestination) {
+      try {
+        this.masterStreamDestination = this.audioContext.createMediaStreamDestination();
+        this.masterGain.connect(this.masterStreamDestination);
+      } catch (e) {
+        console.warn("[PlaybackEngine] Failed to connect masterStreamDestination:", e);
+      }
+    }
+    return this.masterStreamDestination?.stream || null;
+  }
+
+  public getVocalBusStream(): MediaStream | null {
+    if (!this.audioContext) return null;
+    if (!this.vocalBusStreamDestination) {
+      try {
+        this.vocalBusStreamDestination = this.audioContext.createMediaStreamDestination();
+        if (this.dubbingDelay) {
+          this.dubbingDelay.connect(this.vocalBusStreamDestination);
+        } else if (this.dubbingGain) {
+          this.dubbingGain.connect(this.vocalBusStreamDestination);
+        }
+      } catch (e) {
+        console.warn("[PlaybackEngine] Failed to connect vocalBusStreamDestination:", e);
+      }
+    }
+    return this.vocalBusStreamDestination?.stream || null;
+  }
+
   public clearCache(targetUrlOrPath?: string) {
     if (targetUrlOrPath) {
       this.bufferCache.delete(targetUrlOrPath);
       this.pendingBuffers.delete(targetUrlOrPath);
-      // Remove possible variations or raw path
       for (const [key] of this.bufferCache) {
         if (key.includes(targetUrlOrPath)) {
           this.bufferCache.delete(key);
@@ -490,10 +550,6 @@ export class PlaybackEngine {
     console.log("[PlaybackEngine] Cache cleared", targetUrlOrPath || 'ALL');
   }
 
-  /**
-   * Proactively preloads and decodes audio buffers for all project tracks into memory
-   * so playback starts instantly with 0ms buffering latency.
-   */
   public async preloadProjectBuffers(tracks: any[]): Promise<void> {
     const filePaths: string[] = [];
     const urlsToPreload: { url: string; filePath?: string }[] = [];
@@ -514,7 +570,6 @@ export class PlaybackEngine {
       callTauri('preload_playback_buffers', { filePaths: Array.from(new Set(filePaths)) }).catch(console.warn);
     }
 
-    // Preload in batches of 8 to avoid clogging the network/disk
     const chunkSize = 8;
     for (let i = 0; i < urlsToPreload.length; i += chunkSize) {
       const chunk = urlsToPreload.slice(i, i + chunkSize);
@@ -530,6 +585,10 @@ export class PlaybackEngine {
       this.boundVideoElement = video;
       this.videoSource = null as any;
       
+      // Отключаем прямой вывод звука HTML5 видеоплеера для устранения двойного воспроизведения
+      video.volume = 0;
+      video.muted = true;
+      
       const ctx = await this.getContext();
       if (!this.videoGain) {
         this.videoGain = ctx.createGain();
@@ -541,13 +600,12 @@ export class PlaybackEngine {
         this.videoDelay.delayTime.value = this.audioOffsetMs < 0 ? Math.abs(this.audioOffsetMs) / 1000 : 0;
       }
       
-      // Ensure the master bus graph is consistent
       if (this.videoGain.numberOfOutputs === 0) {
          try { this.videoGain.disconnect(); } catch(e){}
          this.videoGain.connect(this.videoDelay);
       }
       
-      console.log("[PlaybackEngine] Video element bound for native direct playback");
+      console.log("[PlaybackEngine] Video element bound and muted for native direct playback");
     } catch (e) {
       console.warn("[PlaybackEngine] Failed to bind video element:", e);
     }
@@ -561,22 +619,27 @@ export class PlaybackEngine {
       this.boundReferenceElement = audio;
       this.referenceSource = null as any;
       
+      // Отключаем прямой звук HTML5 аудио элемента
+      audio.volume = 0;
+      audio.muted = true;
+      
       const ctx = await this.getContext();
       if (!this.referenceGain) {
         this.referenceGain = ctx.createGain();
         this.referenceGain.gain.value = 0.0;
       }
       
-      // Route through videoDelay if available
       if (this.videoDelay) {
          try { this.referenceGain.disconnect(); } catch(e) {}
          this.referenceGain.connect(this.videoDelay);
       } else {
          try { this.referenceGain.disconnect(); } catch(e) {}
-         this.referenceGain.connect(ctx.destination);
+         if (!this.isTauriRuntime()) {
+           this.referenceGain.connect(ctx.destination);
+         }
       }
       
-      console.log("[PlaybackEngine] Reference audio bound for native direct playback");
+      console.log("[PlaybackEngine] Reference audio bound and muted for native direct playback");
     } catch (e) {
       console.warn("[PlaybackEngine] Failed to bind reference audio:", e);
     }
@@ -625,9 +688,7 @@ export class PlaybackEngine {
       try {
         const ctx = await this.getContext();
         
-        // Check global web cache directly to avoid CSP issues with fetch("blob:...") in web-only mode
-        // In Tauri environment, prioritize disk-based fetch via convertFileSrc to ensure processed audio is fresh!
-        const isTauriEnv = typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
+        const isTauriEnv = this.isTauriRuntime();
         const globalCache = (window as any).webFileCache;
         let fileOrBlob: Blob | File | undefined;
         if (!isTauriEnv && globalCache) {
@@ -647,7 +708,6 @@ export class PlaybackEngine {
         if (fileOrBlob) {
           arrayBuffer = await fileOrBlob.arrayBuffer();
         } else {
-          // Fallback to standard fetch
           const response = await fetch(url);
           if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
@@ -686,28 +746,33 @@ export class PlaybackEngine {
     this.scheduledSegments.clear();
     this.currentTracks = tracks;
 
-    // Start Native Rust Playback when running in Tauri desktop environment
-    if (typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__)) {
-      const nativeTracks = formatNativeTracks(tracks);
-      const hasDiskSegments = nativeTracks.some(t => t.segments.length > 0);
-      if (hasDiskSegments) {
-        this.isNativePlaying = true;
-        callTauri('start_native_playback', { tracks: nativeTracks, startTime: currentTime }).catch(err => {
-          console.warn("[PlaybackEngine] Native playback failed:", err);
-          this.isNativePlaying = false;
-        });
+    // В десктопном режиме Tauri:
+    // 1. Полностью отключаем запуск браузерных BufferSourceNode к динамикам.
+    // 2. Отключаем masterGain от destination (гарантия 0% браузерного звука).
+    // 3. Передаем управление нативному аудио-движку CPAL (Rust).
+    if (this.isTauriRuntime()) {
+      this.isNativePlaying = true;
+      if (this.masterGain) {
+        try { this.masterGain.disconnect(ctx.destination); } catch (_) {}
       }
+      const nativeTracks = formatNativeTracks(tracks);
+      try {
+        await callTauri('start_native_playback', { tracks: nativeTracks, startTime: currentTime });
+        await callTauri('transport_play');
+      } catch (err) {
+        console.warn("[PlaybackEngine] Native Tauri playback start error:", err);
+      }
+      return;
     }
     
-    // Log context latency for debugging sync issues
     const outputLatency = (ctx as any).outputLatency || 0;
-    console.log(`[PlaybackEngine] Starting playback. Context latency: ${Math.round(outputLatency * 1000)}ms`);
+    console.log(`[PlaybackEngine] Starting browser playback. Context latency: ${Math.round(outputLatency * 1000)}ms`);
     
     this.tick(currentTime, tracks);
   }
 
   private async performSync() {
-    if (!this.boundVideoElement || !this.isPlaying) return;
+    if (!this.boundVideoElement || !this.isPlaying || this.isTauriRuntime() || this.isNativePlaying) return;
     
     const ctx = await this.getContext();
     const videoTime = this.boundVideoElement.currentTime;
@@ -720,7 +785,6 @@ export class PlaybackEngine {
         return;
       }
 
-      // Cleanup finished segments
       const videoEnd = meta.seg.startTime + meta.seg.duration;
       if (videoTime > videoEnd + 0.1) {
         try { source.stop(); source.disconnect(); } catch(e) {}
@@ -736,25 +800,15 @@ export class PlaybackEngine {
         return;
       }
 
-      // Calculate how much time the Video and Audio Context have actually progressed
       const elapsedVideoTime = videoTime - meta.videoStartTime;
       const elapsedCtxTime = ctx.currentTime - meta.ctxStartTime;
-
-      // Ensure that if the video is stalled, buffering, or still preparing (e.g. at the start of playback),
-      // we do not trigger hard/soft desync corrections or infinite restart loops.
-      // We wait until both have at least minimally progressed before starting drift and sync calculations.
       const isVideoBufferingOrStarting = elapsedVideoTime < 0.5 || elapsedCtxTime < 0.5;
 
-      // Assuming basePlaybackRate = 1 for timing sync (if video is 1x).
-      // If video played at 2x, elapsedVideoTime grows 2x as fast as Ctx time,
-      // so we normalize by videoRate to find the expected Ctx time.
       const expectedElapsedCtxTime = elapsedVideoTime / videoRate;
-      
       const drift = expectedElapsedCtxTime - elapsedCtxTime;
       const driftMs = drift * 1000;
 
       if (isVideoBufferingOrStarting) {
-        // Normal baseline rate during startup or buffering phase
         source.playbackRate.setTargetAtTime(
           meta.basePlaybackRate * videoRate, 
           ctx.currentTime, 
@@ -763,14 +817,10 @@ export class PlaybackEngine {
         return;
       }
 
-      // Master Sync: Tiered Synchronization Logic with dead-band zone to prevent pitch warping
       if (Math.abs(driftMs) > 1000) {
-        // HARD SYNC: Drift exceeds 1000ms. Massive desync, restart node.
-        console.log(`[PlaybackEngine] Master Sync (Restarting) for ${segId}: ${Math.round(driftMs)}ms drift. (vTime=${videoTime.toFixed(2)}, meta.vStart=${meta.videoStartTime.toFixed(2)}, cTime=${ctx.currentTime.toFixed(2)})`);
+        console.log(`[PlaybackEngine] Master Sync (Restarting) for ${segId}: ${Math.round(driftMs)}ms drift.`);
         this.restartSegment(meta.track, meta.seg);
       } else if (Math.abs(driftMs) >= 120) {
-        // SOFT SYNC: Drift from 120ms to 1000ms. Adjust playback rate slightly.
-        // Limit speed correction to max +/- 6% (0.94x to 1.06x) to avoid audible pitch warping.
         const errorRatio = Math.max(-0.06, Math.min(0.06, drift * 0.5)); 
         const correction = 1.0 + errorRatio;
         
@@ -780,8 +830,6 @@ export class PlaybackEngine {
           0.15
         );
       } else {
-        // NORMAL: Minimal drift (< 120ms). Keep exact baseline rate.
-        // Crucial for keeping the pitch perfectly natural (exactly 1.0) under normal browser playback jitter
         source.playbackRate.setTargetAtTime(
           meta.basePlaybackRate * videoRate, 
           ctx.currentTime, 
@@ -801,13 +849,11 @@ export class PlaybackEngine {
       const meta = this.playingMetadata.get(seg.id);
       const chain = this.activeProcessingChains.get(seg.id);
       
-      // Implement micro-fade out (crossfade support)
-      const fadeOutTime = 0.01; // 10ms
+      const fadeOutTime = 0.01;
       if (gain) {
         gain.gain.setTargetAtTime(0, now, fadeOutTime / 2);
       }
       
-      // Cleanup after fade out
       setTimeout(() => {
         try { source.stop(); source.disconnect(); } catch(e) {}
         if (meta?.monoNode) { try { meta.monoNode.disconnect(); } catch(e) {} }
@@ -824,11 +870,15 @@ export class PlaybackEngine {
       this.playingMetadata.delete(seg.id);
       this.scheduledSegments.delete(seg.id);
     }
-    // tick will naturally reschedule it if it's still in the window
   }
 
   public async tick(currentVideoTime: number, tracks: any[]) {
     if (!this.isPlaying) return;
+
+    // В десктопном режиме Tauri все воспроизведение и синхронизация ведутся нативно в Rust CPAL
+    if (this.isTauriRuntime() || this.isNativePlaying) {
+      return;
+    }
 
     await this.performSync();
 
@@ -836,11 +886,9 @@ export class PlaybackEngine {
     const sessionId = this.currentSessionId;
     const now = ctx.currentTime;
     
-    // Use the most up-to-date time from the element if available to reduce latency
     const liveVideoTime = this.boundVideoElement ? this.boundVideoElement.currentTime : currentVideoTime;
     const playbackRate = this.boundVideoElement ? this.boundVideoElement.playbackRate : 1.0;
     
-    // Cleanup segments that have passed
     this.sources.forEach((source, segId) => {
       const meta = this.playingMetadata.get(segId);
       if (meta && liveVideoTime > meta.seg.startTime + meta.seg.duration + 0.1) {
@@ -869,8 +917,6 @@ export class PlaybackEngine {
 
     const lookaheadEnd = liveVideoTime + this.lookaheadSeconds * playbackRate;
 
-    // (Drift correction moved to performSync)
-
     const anySolo = tracks.some(t => t.isSolo);
     const originalTrack = tracks.find(t => {
       const n = t.name?.toLowerCase() || '';
@@ -887,8 +933,6 @@ export class PlaybackEngine {
     }
 
     if (this.boundVideoElement) {
-      // Prevent double audio playback by keeping the HTML video element muted.
-      // Audio for the original track is routed and controlled via timeline track segments.
       this.boundVideoElement.volume = 0;
       this.boundVideoElement.muted = true;
     }
@@ -902,7 +946,6 @@ export class PlaybackEngine {
     }
 
     if (this.boundReferenceElement) {
-      // Prevent double audio playback by keeping the HTML reference audio element muted.
       this.boundReferenceElement.volume = 0;
       this.boundReferenceElement.muted = true;
     }
@@ -910,12 +953,6 @@ export class PlaybackEngine {
     const activeTracks = anySolo 
       ? tracks.filter(t => t.isSolo) 
       : tracks.filter(t => !t.isMuted);
-
-    if (this.isNativePlaying) {
-      // Audio playback and real-time DSP effects are completely handled natively by the Rust audio engine.
-      // Web Audio buffer scheduling is bypassed to eliminate duplicate audio and reduce CPU overhead.
-      return;
-    }
 
     for (const track of activeTracks) {
       const lowerName = track.name?.toLowerCase() || '';
@@ -930,11 +967,8 @@ export class PlaybackEngine {
         if (seg.startTime <= lookaheadEnd && segmentEnd > liveVideoTime && !this.scheduledSegments.has(seg.id)) {
           this.scheduledSegments.add(seg.id);
           
-          // If filePath is available and valid (especially in Tauri or after processing), use getSafeFileUrl
-          // to ensure playback uses the latest processed WAV on disk instead of stale initial blobUrl
-          const isTauriRuntime = typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
           let urlToLoad: string | null = null;
-          if (isTauriRuntime && seg.filePath && !seg.filePath.startsWith('blob:') && !seg.filePath.startsWith('data:')) {
+          if (this.isTauriRuntime() && seg.filePath && !seg.filePath.startsWith('blob:') && !seg.filePath.startsWith('data:')) {
             const diskUrl = getSafeFileUrl(seg.filePath);
             urlToLoad = diskUrl || (seg as any).url || seg.blobUrl || null;
           } else {
@@ -945,47 +979,34 @@ export class PlaybackEngine {
           this.loadBuffer(urlToLoad, seg.filePath).then(buffer => {
             if (!buffer || !this.isPlaying || sessionId !== this.currentSessionId) return;
 
-            // Use the captured 'now' for start time calculation to ensure uniformity 
-            // but we might need a fresh read if Buffer loading was LONG. 
-            // However, the requirements say 'use time in the beginning of tick'.
-            
-            // Get the most precise current time and rate directly from the source if possible
             const freshCtxTime = ctx.currentTime;
             const freshVideoTime = this.boundVideoElement ? this.boundVideoElement.currentTime : liveVideoTime;
             const currentVideoRate = this.boundVideoElement ? this.boundVideoElement.playbackRate : playbackRate;
 
             if (freshVideoTime > seg.startTime + seg.duration) {
-              return; // Segment is already in the past
+              return;
             }
 
-            const schedulingDelay = 0.02; // 20ms pre-roll for smooth start
-            
+            const schedulingDelay = 0.02;
             let when: number;
             let bufferOffset: number;
             let timeOffsetInSegment: number;
 
-            // Capture the exact video time for metadata synchronization
             const audioStartVideoTime = freshVideoTime + (schedulingDelay * currentVideoRate);
 
             if (freshVideoTime > seg.startTime) {
-              // 1. Starting from the middle of the segment
               timeOffsetInSegment = freshVideoTime - seg.startTime;
-              // Add fixed pre-roll as requested
               when = freshCtxTime + schedulingDelay;
-              // User requested NOT to add schedulingDelay to buffer offset to prevent "jumping"
               bufferOffset = (seg.fileOffset || 0) + timeOffsetInSegment;
             } else {
-              // 2. Future segment
               timeOffsetInSegment = 0;
               const timeUntilStart = (seg.startTime - freshVideoTime) / currentVideoRate;
               when = freshCtxTime + timeUntilStart;
               bufferOffset = seg.fileOffset || 0;
             }
 
-            // Protect against negative offset from rounding errors.
             bufferOffset = Math.max(0, bufferOffset);
             
-            // 4. Calculate how much buffer is left to play for this segment
             const remainingBuffer = Math.max(0, buffer.duration - bufferOffset);
             const remainingTimelineDuration = Math.max(0, seg.duration - timeOffsetInSegment);
             const duration = Math.min(remainingTimelineDuration, remainingBuffer);
@@ -1002,7 +1023,6 @@ export class PlaybackEngine {
             const baseVolume = (seg.gain !== undefined ? seg.gain : 1.0) * (track.volume !== undefined ? track.volume : 1);
             const FADE_TIME = 0.003;
             
-            // Micro-fade in at start
             gainNode.gain.setValueAtTime(0, when);
             gainNode.gain.linearRampToValueAtTime(baseVolume, when + FADE_TIME);
 
@@ -1027,7 +1047,6 @@ export class PlaybackEngine {
             }
             source.start(when, Math.max(0, bufferOffset), Math.max(0, duration));
             
-            // Micro-fade out at end
             const fadeOutStart = when + duration - FADE_TIME;
             gainNode.gain.setValueAtTime(baseVolume, Math.max(when, fadeOutStart));
             gainNode.gain.linearRampToValueAtTime(0, when + duration);
@@ -1035,7 +1054,6 @@ export class PlaybackEngine {
             this.sources.set(seg.id, source);
             this.gainNodes.set(seg.id, gainNode);
 
-            // Store metadata for sync loop
             this.playingMetadata.set(seg.id, {
               videoStartTime: freshVideoTime > seg.startTime ? audioStartVideoTime : seg.startTime,
               ctxStartTime: when,
@@ -1056,9 +1074,10 @@ export class PlaybackEngine {
     this.scheduledSegments.clear();
     this.currentTracks = [];
 
-    if (this.isNativePlaying) {
+    if (this.isTauriRuntime() || this.isNativePlaying) {
       this.isNativePlaying = false;
       callTauri('stop_native_playback').catch(() => {});
+      callTauri('transport_pause').catch(() => {});
     }
     
     this.sources.forEach((source, segId) => {
@@ -1093,18 +1112,20 @@ export class PlaybackEngine {
     this.playingMetadata.clear();
   }
 
-  /**
-   * Reconciles current playback with updated tracks without stopping all audio.
-   * Efficiently handles segment splits, deletions, and volume changes.
-   */
   public async reconcile(tracks: any[]) {
     this.currentTracks = tracks;
+
+    if (this.isTauriRuntime() || this.isNativePlaying) {
+      const nativeTracks = formatNativeTracks(tracks);
+      callTauri('update_native_playback_tracks', { tracks: nativeTracks }).catch(() => {});
+      return;
+    }
+
     if (!this.isPlaying) return;
 
     const ctx = await this.getContext();
     const liveVideoTime = this.boundVideoElement ? this.boundVideoElement.currentTime : 0;
     
-    // 1. Find segments that are no longer present in tracks and stop them
     const activeSegmentIds = new Set<string>();
     tracks.forEach(track => {
       track.segments.forEach((seg: any) => activeSegmentIds.add(String(seg.id)));
@@ -1117,17 +1138,13 @@ export class PlaybackEngine {
       }
     });
 
-    // 2. Cleanup scheduledSegments set for segments that were removed but not yet playing
     this.scheduledSegments.forEach(segId => {
       if (!activeSegmentIds.has(segId)) {
         this.scheduledSegments.delete(segId);
       }
     });
 
-    // 3. Update gains and rates for existing segments
     await this.updateTracks(tracks);
-
-    // 4. Tick once to schedule any newly added segments (like the second part of a split)
     await this.tick(liveVideoTime, tracks);
     
     console.log("[PlaybackEngine] Reconciliation complete");
@@ -1137,31 +1154,36 @@ export class PlaybackEngine {
     const wasPlaying = this.isPlaying;
     this.stop();
     
-    // If was playing, we continue playing from the new position
+    this.currentTracks = tracks;
+
+    if (this.isTauriRuntime()) {
+      const nativeTracks = formatNativeTracks(tracks);
+      callTauri('transport_seek_ms', { targetMs: Math.max(0, currentTime * 1000) }).catch(() => {});
+      callTauri('seek_native_playback', { time: currentTime }).catch(() => {});
+
+      if (wasPlaying) {
+        this.isPlaying = true;
+        this.isNativePlaying = true;
+        callTauri('start_native_playback', { tracks: nativeTracks, startTime: currentTime }).catch(() => {});
+        callTauri('transport_play').catch(() => {});
+      }
+      return;
+    }
+    
     if (wasPlaying) {
       this.isPlaying = true;
       this.currentSessionId = Date.now();
-      if (typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__)) {
-        const nativeTracks = formatNativeTracks(tracks);
-        if (nativeTracks.some(t => t.segments.length > 0)) {
-          this.isNativePlaying = true;
-          callTauri('start_native_playback', { tracks: nativeTracks, startTime: currentTime }).catch(() => {});
-        }
-      }
-    } else if (this.isNativePlaying) {
-      callTauri('seek_native_playback', { time: currentTime }).catch(() => {});
     }
-    
-    this.currentTracks = tracks;
     await this.tick(currentTime, tracks);
   }
 
   public async updateTracks(tracks: any[]) {
     this.currentTracks = tracks;
 
-    if (this.isNativePlaying) {
+    if (this.isTauriRuntime() || this.isNativePlaying) {
       const nativeTracks = formatNativeTracks(tracks);
       callTauri('update_native_playback_tracks', { tracks: nativeTracks }).catch(() => {});
+      return;
     }
 
     if (!this.isPlaying) return;
@@ -1169,7 +1191,6 @@ export class PlaybackEngine {
     const ctx = await this.getContext();
     const anySolo = tracks.some(t => t.isSolo);
     
-    // Update Video/Reference gains
     const originalTrack = tracks.find(t => {
       const n = t.name?.toLowerCase() || '';
       return n.includes('оригинал') || n.includes('original');
@@ -1213,11 +1234,9 @@ export class PlaybackEngine {
 
         const source = this.sources.get(seg.id);
         if (source && this.boundVideoElement) {
-          // Update playback rate in real-time to match video speed, maintaining strictly 1.0 base rate
           source.playbackRate.setTargetAtTime(1.0 * currentPlaybackRate, now, 0.02);
         }
 
-        // --- Dynamic DSP & VST Parameter Updates in Real-time ---
         const chain = this.activeProcessingChains.get(seg.id);
         if (chain && track.processing && track.processing.enabled) {
           this.applyProcessingParams(chain, track.processing, now);
@@ -1226,23 +1245,17 @@ export class PlaybackEngine {
     });
   }
 
-  /**
-   * Applies processing parameters to an existing chain in real-time.
-   */
   private applyProcessingParams(chain: any, proc: any, now: number) {
-    // 1. Noise Gate
     if (chain.gateNode && proc.noiseGate?.enabled) {
       chain.gateNode.threshold.setTargetAtTime(proc.noiseGate.threshold ?? -45, now, 0.05);
     }
     
-    // 2. De-esser
     if (chain.deesserNode && proc.deesser?.enabled) {
       chain.deesserNode.frequency.setTargetAtTime(proc.deesser.frequency ?? 6200, now, 0.05);
       const thresh = proc.deesser.threshold ?? -12;
       chain.deesserNode.gain.setTargetAtTime(Math.min(0, thresh / 4), now, 0.05);
     }
     
-    // 3. EQ Filters
     if (chain.hpNode && proc.eq?.enabled && proc.eq.highPass) {
       chain.hpNode.frequency.setTargetAtTime(proc.eq.highPass, now, 0.05);
     }
@@ -1261,7 +1274,6 @@ export class PlaybackEngine {
       });
     }
     
-    // 4. Compressor
     if (chain.compressorNode && proc.compressor?.enabled) {
       chain.compressorNode.threshold.setTargetAtTime(proc.compressor.threshold ?? -18, now, 0.05);
       chain.compressorNode.ratio.setTargetAtTime(proc.compressor.ratio ?? 3.5, now, 0.05);
@@ -1269,14 +1281,12 @@ export class PlaybackEngine {
       chain.compressorNode.release.setTargetAtTime((proc.compressor.release ?? 200) / 1000, now, 0.05);
     }
     
-    // 5. Reverb
     if (chain.reverbDryNode && chain.reverbWetNode && proc.reverb?.enabled) {
       const wetVal = proc.reverb.wet ?? 0.12;
       chain.reverbDryNode.gain.setTargetAtTime(1.0 - wetVal, now, 0.05);
       chain.reverbWetNode.gain.setTargetAtTime(wetVal, now, 0.05);
     }
     
-    // 6. Delay
     if (chain.delayDryNode && chain.delayWetNode && chain.delayNode && chain.delayFeedbackNode && proc.delay?.enabled) {
       const wetVal = proc.delay.wet ?? 0.1;
       chain.delayDryNode.gain.setTargetAtTime(1.0 - wetVal, now, 0.05);
@@ -1285,7 +1295,6 @@ export class PlaybackEngine {
       chain.delayFeedbackNode.gain.setTargetAtTime(proc.delay.feedback ?? 0.3, now, 0.05);
     }
 
-    // 7. VST Plugins Rack
     if (chain.vstChains && proc.vstPlugins && proc.vstPlugins.length > 0) {
       proc.vstPlugins.forEach((vst: any) => {
         const vstChain = chain.vstChains?.find((vc: any) => vc.vstId === vst.id);
@@ -1314,12 +1323,7 @@ export class PlaybackEngine {
     }
   }
 
-  /**
-   * Dynamic live update for all active chains belonging to a track.
-   * Useful for real-time adjustments in the Mixer or Processing Modal.
-   */
   public updateTrackProcessingLive(trackId: string, proc: any) {
-    // Update local state copy
     if (this.currentTracks) {
       this.currentTracks = this.currentTracks.map(t => {
         if (t.id === trackId) {
@@ -1329,15 +1333,14 @@ export class PlaybackEngine {
       });
     }
 
-    // Sync directly to Rust audio engine in real time
-    if (this.isNativePlaying) {
+    if (this.isTauriRuntime() || this.isNativePlaying) {
       callTauri('update_native_playback_tracks', { tracks: formatNativeTracks(this.currentTracks) }).catch(() => {});
+      return;
     }
 
     if (!this.audioContext) return;
     const now = this.audioContext.currentTime;
     
-    // Find all active segments for this track
     this.playingMetadata.forEach((meta, segId) => {
       if (meta.track.id === trackId) {
         const chain = this.activeProcessingChains.get(segId);

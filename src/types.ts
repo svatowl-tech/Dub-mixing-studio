@@ -37,6 +37,7 @@ export interface AudioSettings {
   backstageFolderPath?: string;
   backstageMode: 'parallel' | 'manual';
   isBackstageEnabled: boolean;
+  prerollSeconds?: number;
   keyMap?: KeyMap;
   vstFolders?: string[];
   exportSettings?: {

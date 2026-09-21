@@ -32,6 +32,9 @@ import {
   VocalBusReport
 } from '../lib/dspBridge';
 import { batchProcessVstChainNative, VstProcessReport } from '../lib/vstHost';
+import { createPrefixedAudioPath, invalidateFileUrl, toNativeLocalPath, isTauriAvailable, getSafeFileUrl } from '../lib/utils';
+import { renderVocalBusOffline, audioBufferToWavBlob } from './vocalBusProcessor';
+import { playbackEngine } from './playbackEngine';
 
 export interface LoudnessMatchResult {
   updatedTracks: AudioTrack[];
@@ -1074,17 +1077,55 @@ export class MixingService {
     let nativeReports: VocalBusReport[] = [];
     let vstReports: VstProcessReport[] = [];
 
-    // Формирование пар файлов для нативного пакетного рендеринга
+    // Интерфейс для отслеживания обрабатываемых сегментов мастер-шины
+    interface ProcessingSegmentItem {
+      trackId: string;
+      segmentId: string;
+      inPath?: string;
+      outPath?: string;
+      blobUrl?: string;
+      audioBuffer?: AudioBuffer;
+    }
+
+    const segmentsToProcess: ProcessingSegmentItem[] = [];
     const filePairs: [string, string][] = [];
+
+    // Формирование списка сегментов для нативного пакетного рендеринга и веб-обработки
     tracks.forEach(t => {
-      const isDub = !t.name.toLowerCase().includes('оригинал') && 
-                    !t.name.toLowerCase().includes('original') && 
-                    !t.name.toLowerCase().includes('reference');
-      const trackPath = t.filePath || t.audioUrl || (t.segments && (t.segments[0]?.filePath || t.segments[0]?.blobUrl));
-      if (isDub && trackPath && trackPath.startsWith('/')) {
-        const outPath = trackPath.replace(/\.wav$/i, '_master_bus.wav');
-        filePairs.push([trackPath, outPath]);
-      }
+      const isOriginal = (t.name || '').toLowerCase().includes('оригинал') || 
+                         (t.name || '').toLowerCase().includes('original') || 
+                         (t.name || '').toLowerCase().includes('reference') ||
+                         t.type === 'original';
+      if (isOriginal) return;
+
+      const trackSegments = t.segments && t.segments.length > 0 
+        ? t.segments 
+        : (t.filePath || t.audioUrl ? [{ id: `${t.id}-seg-0`, startTime: 0, duration: 0, filePath: t.filePath, blobUrl: t.audioUrl }] : []);
+
+      trackSegments.forEach(seg => {
+        const rawPath = seg.filePath || t.filePath;
+        const nativePath = rawPath ? toNativeLocalPath(rawPath) : undefined;
+        
+        if (nativePath && nativePath.length > 3 && (nativePath.includes('/') || nativePath.includes('\\'))) {
+          const outPath = createPrefixedAudioPath('vocalbus', nativePath);
+          segmentsToProcess.push({
+            trackId: t.id,
+            segmentId: seg.id,
+            inPath: nativePath,
+            outPath,
+          });
+          if (!filePairs.some(([inp]) => inp === nativePath)) {
+            filePairs.push([nativePath, outPath]);
+          }
+        } else {
+          segmentsToProcess.push({
+            trackId: t.id,
+            segmentId: seg.id,
+            blobUrl: seg.blobUrl || (seg as any).url || (seg.filePath ? getSafeFileUrl(seg.filePath) : undefined),
+            audioBuffer: seg.audioBuffer,
+          });
+        }
+      });
     });
 
     if (mode === 'vstRack') {
@@ -1143,21 +1184,40 @@ export class MixingService {
 
       const isVstActive = !vstRack.bypass && activePlugins.length > 0;
       const updatedTracks = tracks.map(track => {
-        const isOriginal = track.name.toLowerCase().includes('оригинал') || 
-                           track.name.toLowerCase().includes('original') || 
-                           track.name.toLowerCase().includes('reference') ||
+        const isOriginal = (track.name || '').toLowerCase().includes('оригинал') || 
+                           (track.name || '').toLowerCase().includes('original') || 
+                           (track.name || '').toLowerCase().includes('reference') ||
                            track.type === 'original';
         if (isOriginal) return track;
+
+        const updatedSegments = (track.segments || []).map(seg => {
+          const item = segmentsToProcess.find(p => p.segmentId === seg.id);
+          if (item && item.outPath && (vstReports.length > 0 ? vstReports.some(r => r.output_file === item.outPath) : true)) {
+            invalidateFileUrl(item.inPath);
+            invalidateFileUrl(item.outPath);
+            return {
+              ...seg,
+              filePath: item.outPath,
+              backupFilePath: seg.backupFilePath || seg.filePath,
+              blobUrl: getSafeFileUrl(item.outPath),
+              processedEffectName: 'Vocal Master Bus (VST Rack)',
+            };
+          }
+          return seg;
+        });
 
         const currentProcessing = track.processing || { enabled: false };
         return {
           ...track,
+          segments: updatedSegments,
           processing: {
             ...currentProcessing,
             enabled: isVstActive,
           }
         };
       });
+
+      playbackEngine.clearCache();
 
       logs.push({
         id: `mb-vst-end-${Date.now()}`,
@@ -1319,25 +1379,80 @@ export class MixingService {
           stepId: 'vocalBusProcessing',
           status: 'success',
           title: 'Аппаратный рендеринг через Rust DSP (Rayon Parallel)',
-          message: `Успешно обработано ${nativeReports.length} дорожек в многопоточном режиме с нулевыми аллокациями памяти. Среднее время: ${nativeReports[0]?.processingTimeMs || 12} мс.`
+          message: `Успешно обработано ${nativeReports.length} файлов вокальных дорожек в многопоточном режиме. Среднее время: ${nativeReports[0]?.processingTimeMs || 12} мс.`
+        });
+        // Инвалидация кешей URL для созданных файлов
+        segmentsToProcess.forEach(item => {
+          if (item.inPath) invalidateFileUrl(item.inPath);
+          if (item.outPath) invalidateFileUrl(item.outPath);
         });
       } catch (e) {
-        console.warn('Native batchProcessMasterVocalBus error, falling back to simulated DSP parameters:', e);
+        console.warn('Native batchProcessMasterVocalBus error, falling back to Web Audio offline rendering:', e);
       }
     }
 
-    // Применение цепочки параметров к вокальным дорожкам
+    // Web-Audio офлайн обработка для браузерной среды или если нативный бэкенд недоступен
+    const needsWebRendering = !isTauriRuntime || nativeReports.length === 0;
+    if (needsWebRendering && segmentsToProcess.length > 0) {
+      let webRenderedCount = 0;
+      for (const item of segmentsToProcess) {
+        try {
+          const targetUrl = item.blobUrl || (item.inPath ? getSafeFileUrl(item.inPath) : undefined);
+          if (targetUrl) {
+            const buf = item.audioBuffer || await playbackEngine.loadBuffer(targetUrl, item.inPath);
+            if (buf) {
+              const rendered = await renderVocalBusOffline(buf, rack);
+              const wavBlob = audioBufferToWavBlob(rendered);
+              item.blobUrl = URL.createObjectURL(wavBlob);
+              item.audioBuffer = rendered;
+              webRenderedCount++;
+            }
+          }
+        } catch (err) {
+          console.warn(`[VocalBus] Web Audio offline render fallback error:`, err);
+        }
+      }
+      if (webRenderedCount > 0) {
+        logs.push({
+          id: `mb-web-render-${Date.now()}`,
+          timestamp: Date.now(),
+          stageName: '3. Сведение',
+          stepId: 'vocalBusProcessing',
+          status: 'success',
+          title: 'Студийный 6-звенный Web Audio DSP рендеринг',
+          message: `Успешно обработано ${webRenderedCount} вокальных сегментов в высоком студийном качестве (48kHz Float DSP).`
+        });
+      }
+    }
+
+    // Применение цепочки параметров к вокальным дорожкам и обновление путей сегментов
     const isMasterBusActive = !rack.bypass && (legacyChain ? !legacyChain.bypass : true);
     const isCompActive = rack.compressor.enabled;
     const isDeessActive = rack.deesser.enabled;
     const isEqActive = rack.eq.enabled;
 
     const updatedTracks = tracks.map(track => {
-      const isOriginal = track.name.toLowerCase().includes('оригинал') || 
-                         track.name.toLowerCase().includes('original') || 
-                         track.name.toLowerCase().includes('reference') ||
+      const isOriginal = (track.name || '').toLowerCase().includes('оригинал') || 
+                         (track.name || '').toLowerCase().includes('original') || 
+                         (track.name || '').toLowerCase().includes('reference') ||
                          track.type === 'original';
       if (isOriginal) return track;
+
+      const updatedSegments = (track.segments || []).map(seg => {
+        const processed = segmentsToProcess.find(p => p.segmentId === seg.id);
+        if (processed) {
+          const hasNative = isTauriRuntime && nativeReports.length > 0 && processed.outPath;
+          return {
+            ...seg,
+            filePath: hasNative ? processed.outPath : seg.filePath,
+            backupFilePath: seg.backupFilePath || seg.filePath,
+            blobUrl: processed.blobUrl || (hasNative ? getSafeFileUrl(processed.outPath) : seg.blobUrl),
+            audioBuffer: processed.audioBuffer,
+            processedEffectName: 'Vocal Master Bus (Rust DSP 6-Stage)',
+          };
+        }
+        return seg;
+      });
 
       const currentProcessing = track.processing || { enabled: false };
 
@@ -1381,9 +1496,14 @@ export class MixingService {
 
       return {
         ...track,
+        segments: updatedSegments,
         processing: updatedProcessing
       };
     });
+
+    // Очищаем кеши и синхронизируем процессор мастер-шины вокала в движке воспроизведения
+    playbackEngine.clearCache();
+    playbackEngine.setVocalBusDspConfig(rack, rack.bypass);
 
     const activeStagesCount = [
       rack.eq.enabled,

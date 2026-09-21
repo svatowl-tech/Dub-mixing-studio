@@ -75,10 +75,12 @@ export const TopHeader: React.FC<TopHeaderProps> = (props) => {
     if (window.electronAPI) {
       const folder = await window.electronAPI.openFolder();
       if (folder && folder.data && project) {
-        const settings = project.audioSettings || {};
         setProject({
           ...project,
-          audioSettings: { ...settings, backstageFolderPath: folder.data }
+          audioSettings: {
+            ...project.audioSettings,
+            backstageFolderPath: folder.data
+          }
         });
       }
     }
@@ -113,7 +115,7 @@ export const TopHeader: React.FC<TopHeaderProps> = (props) => {
       handleExportAudioBook={props.handleExportAudioBook}
       handleExportStems={props.handleExportStems}
       handleExportAllStemsZip={props.handleExportAllStemsZip}
-      onLoadProject={onLoadProject}
+      onLoadProject={(path: string) => handleOpenProject(path)}
     />
   );
 };

@@ -404,7 +404,7 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
   };
 
   // Mouse Inspection on Spectrogram
-  const handleSpectrogramMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleSpectrogramMouseMove = (e: React.MouseEvent<HTMLElement>) => {
     const canvas = spectrogramCanvasRef.current;
     if (!canvas || !activeSpec) return;
 
@@ -436,7 +436,7 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
     setHoverInfo({ time, freq, db, x, y });
   };
 
-  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleMouseDown = (e: React.MouseEvent<HTMLElement>) => {
     if (timeZoom > 1.05 && (e.button === 1 || e.altKey || e.shiftKey)) {
       setIsPanning(true);
       panStartXRef.current = e.clientX;
@@ -448,7 +448,7 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
     setIsPanning(false);
   };
 
-  const handleCanvasSeek = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasSeek = (e: React.MouseEvent<HTMLElement>) => {
     if (isPanning) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const ratio = (e.clientX - rect.left) / rect.width;
@@ -456,7 +456,7 @@ export const SynchronizedAudioVisualizer: React.FC<SynchronizedAudioVisualizerPr
     onSeek(Math.max(0, Math.min(duration, targetTime)));
   };
 
-  const handleOverviewClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleOverviewClick = (e: React.MouseEvent<HTMLElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const ratio = (e.clientX - rect.left) / rect.width;
     const clickedTime = ratio * duration;

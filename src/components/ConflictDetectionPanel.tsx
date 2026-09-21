@@ -42,25 +42,25 @@ export const ConflictDetectionPanel: React.FC<ConflictDetectionPanelProps> = ({
     setIsScanning(true);
     try {
       // Подготавливаем аудио-сегменты
-      const clips = (project.segments || []).map(seg => ({
+      const clips = (project.tracks ? project.tracks.flatMap(t => t.segments) : []).map(seg => ({
         id: seg.id,
-        trackId: seg.trackId || 'main_track',
-        characterId: seg.characterId,
-        characterName: seg.characterName,
-        startMs: Math.round(seg.startMs),
-        endMs: Math.round(seg.endMs),
-        durationMs: Math.round(seg.endMs - seg.startMs),
-        subtitleId: seg.subtitleId,
+        trackId: (seg as any).trackId || 'main_track',
+        characterId: (seg as any).characterId,
+        characterName: (seg as any).characterName,
+        startMs: Math.round((seg.startTime || 0) * 1000),
+        endMs: Math.round(((seg.startTime || 0) + (seg.duration || 0)) * 1000),
+        durationMs: Math.round((seg.duration || 0) * 1000),
+        subtitleId: (seg as any).subtitleId,
         isDialogOverlapAllowed: false,
-        isMuted: Boolean(seg.isMuted)
+        isMuted: Boolean((seg as any).isMuted)
       }));
 
       // Подготавливаем субтитры сценария
       const subtitles = (project.subtitles || []).map(sub => ({
-        id: sub.id,
-        startMs: Math.round(sub.startMs),
-        endMs: Math.round(sub.endMs),
-        characterName: sub.characterName,
+        id: String(sub.id),
+        startMs: Math.round((sub.start || 0) * 1000),
+        endMs: Math.round((sub.end || 0) * 1000),
+        characterName: sub.role,
         text: sub.text
       }));
 
@@ -80,7 +80,7 @@ export const ConflictDetectionPanel: React.FC<ConflictDetectionPanelProps> = ({
 
   useEffect(() => {
     runAnalysis();
-  }, [project.segments?.length, project.subtitles?.length]);
+  }, [project.tracks, project.subtitles?.length]);
 
   const filteredConflicts = (summary?.conflicts || []).filter(c => {
     if (selectedFilter === 'all') return true;

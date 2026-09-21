@@ -1,14 +1,22 @@
-// Rust модуль распознавания речи Whisper (whisper-rs) с квантованными GGML моделями,
-// конвертацией сэмплов в 16 кГц моно через rubato и сопоставлением со сценарием (Fuzzy / Levenshtein).
+// Rust модуль распознавания речи OpenAI Whisper (whisper-rs)
+// с квантованными GGML моделями, универсальным декодированием аудио и ресэмплингом в 16 кГц моно через Rubato,
+// нечетким сопоставлением со сценарием (Fuzzy / Levenshtein Matcher) и потоковой передачей прогресса в UI.
 
 use hound::{SampleFormat, WavReader};
 use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters,
-    SincInterpolationType, WindowFunction,
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tauri::command;
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+use tauri::{command, AppHandle, Emitter};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// Модели Whisper
 #[allow(dead_code)]
@@ -40,7 +48,7 @@ pub struct ScriptItem {
     pub role: Option<String>,
 }
 
-/// Транскрибированный фрагмент фразы
+/// Транскрибированный фрагмент фразы / сегмент
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptItem {
@@ -65,7 +73,7 @@ pub struct WhisperTranscribeConfig {
     pub temperature: Option<f32>,
     pub script_lines: Option<Vec<ScriptItem>>,
     pub auto_match_script: Option<bool>,
-    pub min_similarity_threshold: Option<f32>, // e.g. 0.45 (45%)
+    pub min_similarity_threshold: Option<f32>, // e.g. 0.40 (40%)
 }
 
 /// Итоговый результат транскрибации и сопоставления
@@ -80,102 +88,172 @@ pub struct WhisperTranscriptionResult {
     pub average_confidence: f32,
 }
 
-/// Загрузка и чтение WAV файла с конвертацией в 16 000 Гц моно `Vec<f32>`
-pub fn load_audio_as_16k_mono<P: AsRef<Path>>(file_path: P) -> Result<Vec<f32>, String> {
+/// Событие прогресса для UI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhisperProgressEvent {
+    pub progress: i32,
+    pub stage: String,
+}
+
+// -------------------------------------------------------------------------------------------------
+// Декодирование аудио и Ресэмплинг (Rubato + Hound + Symphonia)
+// -------------------------------------------------------------------------------------------------
+
+/// Декодирование любого аудиоформата (WAV, MP3, FLAC, OGG, AAC, M4A) в моно PCM сэмплы f32
+pub fn load_audio_any_format<P: AsRef<Path>>(file_path: P) -> Result<(Vec<f32>, u32), String> {
     let path = file_path.as_ref();
-    let mut reader = WavReader::open(path)
-        .map_err(|e| format!("Не удалось открыть аудио-файл {:?}: {}", path, e))?;
 
-    let spec = reader.spec();
-    let channels = spec.channels as usize;
-    let sample_rate = spec.sample_rate;
-
-    if channels == 0 {
-        return Err("Аудио-файл содержит 0 каналов".to_string());
+    if !path.exists() {
+        return Err(format!("Аудиофайл не найден: {:?}", path));
     }
 
-    // Чтение сэмплов и сведение в моно f32 [-1.0 .. 1.0]
-    let raw_mono: Vec<f32> = match spec.sample_format {
-        SampleFormat::Float => {
-            let samples: Vec<f32> = reader.samples::<f32>().filter_map(|s| s.ok()).collect();
-            if channels == 1 {
-                samples
-            } else {
-                samples
-                    .chunks(channels)
-                    .map(|chunk| chunk.iter().sum::<f32>() / (channels as f32))
-                    .collect()
+    // 1. Быстрый путь для WAV файлов через Hound
+    if let Ok(mut reader) = WavReader::open(path) {
+        let spec = reader.spec();
+        let channels = spec.channels as usize;
+        let sample_rate = spec.sample_rate;
+
+        if channels > 0 {
+            let raw_mono: Vec<f32> = match spec.sample_format {
+                SampleFormat::Float => {
+                    let samples: Vec<f32> = reader.samples::<f32>().filter_map(|s| s.ok()).collect();
+                    if channels == 1 {
+                        samples
+                    } else {
+                        samples
+                            .chunks(channels)
+                            .map(|chunk| chunk.iter().sum::<f32>() / (channels as f32))
+                            .collect()
+                    }
+                }
+                SampleFormat::Int => {
+                    let bits = spec.bits_per_sample;
+                    let max_val = match bits {
+                        0..=16 => 32768.0f32,
+                        17..=24 => 8388608.0f32,
+                        _ => 2147483648.0f32,
+                    };
+                    let samples: Vec<f32> = reader
+                        .samples::<i32>()
+                        .filter_map(|s| s.ok())
+                        .map(|s| (s as f32) / max_val)
+                        .collect();
+                    if channels == 1 {
+                        samples
+                    } else {
+                        samples
+                            .chunks(channels)
+                            .map(|chunk| chunk.iter().sum::<f32>() / (channels as f32))
+                            .collect()
+                    }
+                }
+            };
+            if !raw_mono.is_empty() {
+                return Ok((raw_mono, sample_rate));
             }
         }
-        SampleFormat::Int => {
-            let bits = spec.bits_per_sample;
-            if bits <= 16 {
-                let max_val = 32768.0f32;
-                let samples: Vec<f32> = reader
-                    .samples::<i32>()
-                    .filter_map(|s| s.ok())
-                    .map(|s| (s as f32) / max_val)
-                    .collect();
-                if channels == 1 {
-                    samples
-                } else {
-                    samples
-                        .chunks(channels)
-                        .map(|chunk| chunk.iter().sum::<f32>() / (channels as f32))
-                        .collect()
-                }
-            } else if bits <= 24 {
-                let max_val = 8388608.0f32;
-                let samples: Vec<f32> = reader
-                    .samples::<i32>()
-                    .filter_map(|s| s.ok())
-                    .map(|s| (s as f32) / max_val)
-                    .collect();
-                if channels == 1 {
-                    samples
-                } else {
-                    samples
-                        .chunks(channels)
-                        .map(|chunk| chunk.iter().sum::<f32>() / (channels as f32))
-                        .collect()
-                }
-            } else {
-                let max_val = 2147483648.0f32;
-                let samples: Vec<f32> = reader
-                    .samples::<i32>()
-                    .filter_map(|s| s.ok())
-                    .map(|s| (s as f32) / max_val)
-                    .collect();
-                if channels == 1 {
-                    samples
-                } else {
-                    samples
-                        .chunks(channels)
-                        .map(|chunk| chunk.iter().sum::<f32>() / (channels as f32))
-                        .collect()
-                }
-            }
-        }
+    }
+
+    // 2. Универсальное декодирование через Symphonia для MP3, FLAC, OGG, M4A, AAC
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("Не удалось открыть аудиофайл {:?}: {}", path, e))?;
+
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let format_opts = FormatOptions {
+        enable_gapless: true,
+        ..Default::default()
     };
+    let metadata_opts = MetadataOptions::default();
+    let decoder_opts = DecoderOptions::default();
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &format_opts, &metadata_opts)
+        .map_err(|e| format!("Ошибка определения формата аудио {:?}: {}", path, e))?;
+
+    let mut format = probed.format;
+    let track = format
+        .default_track()
+        .ok_or_else(|| "Аудиодорожки не найдены в файле".to_string())?;
+
+    let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &decoder_opts)
+        .map_err(|e| format!("Ошибка создания декодера: {}", e))?;
+
+    let track_id = track.id;
+    let mut mono_samples = Vec::new();
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(ref err))
+                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
+            Err(SymphoniaError::ResetRequired) => continue,
+            Err(_) => break,
+        };
+
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        match decoder.decode(&packet) {
+            Ok(audio_buf) => {
+                let spec = *audio_buf.spec();
+                let mut sample_buf = SampleBuffer::<f32>::new(audio_buf.capacity() as u64, spec);
+                sample_buf.copy_interleaved_ref(audio_buf);
+
+                let samples = sample_buf.samples();
+                let ch_count = spec.channels.count();
+
+                if ch_count == 1 {
+                    mono_samples.extend_from_slice(samples);
+                } else {
+                    for chunk in samples.chunks(ch_count) {
+                        let avg: f32 = chunk.iter().sum::<f32>() / (ch_count as f32);
+                        mono_samples.push(avg);
+                    }
+                }
+            }
+            Err(SymphoniaError::IoError(_)) => break,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(_) => break,
+        }
+    }
+
+    if mono_samples.is_empty() {
+        return Err("Не удалось извлечь PCM сэмплы из аудиофайла".to_string());
+    }
+
+    Ok((mono_samples, sample_rate))
+}
+
+/// Загрузка любого аудио и конвертация строго в 16 000 Гц моно Vec<f32>
+pub fn load_audio_as_16k_mono<P: AsRef<Path>>(file_path: P) -> Result<Vec<f32>, String> {
+    let (raw_mono, sample_rate) = load_audio_any_format(file_path)?;
 
     if raw_mono.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Если аудио уже имеет частоту дискретизации 16 000 Гц, ресэмплинг не требуется
     if sample_rate == 16000 {
         return Ok(raw_mono);
     }
 
-    // Качественный ресэмплинг в 16000 Гц с помощью Rubato
-    let target_sample_rate = 16000usize;
-    let from_sample_rate = sample_rate as usize;
-
-    let resampled = resample_audio_rubato(&raw_mono, from_sample_rate, target_sample_rate)?;
-    Ok(resampled)
+    resample_audio_rubato(&raw_mono, sample_rate as usize, 16000)
 }
 
-/// Ресэмплинг аудио-вектора в целевую частоту (16 kHz) через Rubato
+/// Высококачественный ресэмплинг аудио-вектора в целевую частоту (16 kHz) через Rubato
 pub fn resample_audio_rubato(
     samples: &[f32],
     from_rate: usize,
@@ -185,7 +263,6 @@ pub fn resample_audio_rubato(
         return Ok(samples.to_vec());
     }
 
-    // Инициализируем SincFixedIn ресэмплер
     let chunk_size = 1024;
 
     let params = SincInterpolationParameters {
@@ -225,7 +302,6 @@ pub fn resample_audio_rubato(
         }
     }
 
-    // Добавляем оставшийся хвост с zero-padding до chunk_size
     if !input_channel.is_empty() {
         let pad_len = chunk_size - input_channel.len();
         input_channel.extend(std::iter::repeat(0.0f32).take(pad_len));
@@ -240,7 +316,11 @@ pub fn resample_audio_rubato(
     Ok(output)
 }
 
-/// Поиск модели Whisper в стандартных путях приложения
+// -------------------------------------------------------------------------------------------------
+// Поиск моделей Whisper GGML на диске
+// -------------------------------------------------------------------------------------------------
+
+/// Разрешение локального пути к квантованной модели GGML (resources/models/whisper/ и другие пути)
 pub fn resolve_model_path(model_type_or_path: Option<&str>) -> Result<PathBuf, String> {
     let default_name = match model_type_or_path {
         Some("whisper-tiny") | Some("tiny") => "ggml-tiny.bin",
@@ -248,6 +328,7 @@ pub fn resolve_model_path(model_type_or_path: Option<&str>) -> Result<PathBuf, S
         Some("whisper-small") | Some("small") => "ggml-small.bin",
         Some("whisper-medium") | Some("medium") => "ggml-medium.bin",
         Some("whisper-large-v3") | Some("large") => "ggml-large-v3.bin",
+        Some(custom) if custom.ends_with(".bin") => custom,
         Some(custom) => custom,
         None => "ggml-base.bin",
     };
@@ -257,22 +338,52 @@ pub fn resolve_model_path(model_type_or_path: Option<&str>) -> Result<PathBuf, S
         return Ok(p.to_path_buf());
     }
 
-    // Поиск в стандартных локальных папках
     let mut search_paths = vec![
         PathBuf::from(default_name),
-        PathBuf::from("models").join(default_name),
+        PathBuf::from("resources").join("models").join("whisper").join(default_name),
         PathBuf::from("resources").join("models").join(default_name),
-        PathBuf::from("src-tauri").join("models").join(default_name),
-        PathBuf::from("..").join("models").join(default_name),
         PathBuf::from("models").join("whisper").join(default_name),
+        PathBuf::from("models").join(default_name),
+        PathBuf::from("src-tauri").join("resources").join("models").join("whisper").join(default_name),
+        PathBuf::from("src-tauri").join("models").join(default_name),
+        PathBuf::from("..").join("resources").join("models").join("whisper").join(default_name),
+        PathBuf::from("..").join("models").join(default_name),
     ];
 
     if let Ok(appdata) = std::env::var("APPDATA") {
-        search_paths.push(PathBuf::from(appdata).join("com.dubmixingstudio.desktop").join("models").join(default_name));
+        search_paths.push(
+            PathBuf::from(appdata)
+                .join("com.dubmixingstudio.desktop")
+                .join("models")
+                .join("whisper")
+                .join(default_name),
+        );
+        search_paths.push(
+            PathBuf::from(appdata)
+                .join("com.dubmixingstudio.desktop")
+                .join("models")
+                .join(default_name),
+        );
     }
     if let Ok(home) = std::env::var("HOME") {
-        search_paths.push(PathBuf::from(&home).join(".local").join("share").join("com.dubmixingstudio.desktop").join("models").join(default_name));
-        search_paths.push(PathBuf::from(&home).join("Library").join("Application Support").join("com.dubmixingstudio.desktop").join("models").join(default_name));
+        search_paths.push(
+            PathBuf::from(&home)
+                .join(".local")
+                .join("share")
+                .join("com.dubmixingstudio.desktop")
+                .join("models")
+                .join("whisper")
+                .join(default_name),
+        );
+        search_paths.push(
+            PathBuf::from(&home)
+                .join("Library")
+                .join("Application Support")
+                .join("com.dubmixingstudio.desktop")
+                .join("models")
+                .join("whisper")
+                .join(default_name),
+        );
     }
 
     for path in search_paths {
@@ -281,15 +392,15 @@ pub fn resolve_model_path(model_type_or_path: Option<&str>) -> Result<PathBuf, S
         }
     }
 
-    // Если файл не найден, возвращаем ожидаемый путь
-    Ok(PathBuf::from("models").join(default_name))
+    // Возвращаем целевой путь в resources/models/whisper/
+    Ok(PathBuf::from("resources").join("models").join("whisper").join(default_name))
 }
 
 // -------------------------------------------------------------------------------------------------
-// Fuzzy Matching: Расчет расстояния Левенштейна и коэффициента сходства (Similarity)
+// Fuzzy Matcher: Расчет Левенштейна и сопоставление фразы со сценарием
 // -------------------------------------------------------------------------------------------------
 
-/// Нормализация текста для корректного сравнения (удаление пунктуации, приведение к нижнему регистру)
+/// Нормализация текста для сопоставления
 pub fn normalize_text_for_match(text: &str) -> String {
     text.to_lowercase()
         .chars()
@@ -300,7 +411,7 @@ pub fn normalize_text_for_match(text: &str) -> String {
         .join(" ")
 }
 
-/// Расчет расстояния Левенштейна (Levenshtein distance)
+/// Вычисление расстояния Левенштейна
 pub fn levenshtein_distance(a: &str, b: &str) -> usize {
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
@@ -332,7 +443,7 @@ pub fn levenshtein_distance(a: &str, b: &str) -> usize {
     prev_row[len_b]
 }
 
-/// Вычисление сходства от 0.0 до 1.0 (Similarity score)
+/// Вычисление коэффициента сходства (0.0 .. 1.0)
 pub fn calculate_similarity(a: &str, b: &str) -> f32 {
     let norm_a = normalize_text_for_match(a);
     let norm_b = normalize_text_for_match(b);
@@ -347,7 +458,6 @@ pub fn calculate_similarity(a: &str, b: &str) -> f32 {
         return 1.0;
     }
 
-    // Если одна строка содержит другую полностью
     if norm_a.contains(&norm_b) || norm_b.contains(&norm_a) {
         let shorter = norm_a.len().min(norm_b.len()) as f32;
         let longer = norm_a.len().max(norm_b.len()) as f32;
@@ -361,7 +471,7 @@ pub fn calculate_similarity(a: &str, b: &str) -> f32 {
     score.max(0.0).min(1.0)
 }
 
-/// Сопоставление массива распознанных реплик со строками сценария
+/// Сопоставление массива распознанных сегментов с оригинальным сценарием
 pub fn match_transcripts_with_script(
     items: &mut [TranscriptItem],
     script_lines: &[ScriptItem],
@@ -378,7 +488,6 @@ pub fn match_transcripts_with_script(
         for script in script_lines {
             let mut score = calculate_similarity(&item.text, &script.text);
 
-            // Бонус, если таймкоды фразы и сценария близки по времени
             if let (Some(s_start), Some(s_end)) = (script.start_timestamp_ms, script.end_timestamp_ms) {
                 let start_diff = (item.start_timestamp_ms - s_start).abs();
                 let end_diff = (item.end_timestamp_ms - s_end).abs();
@@ -406,128 +515,177 @@ pub fn match_transcripts_with_script(
 }
 
 // -------------------------------------------------------------------------------------------------
-// Движок распознавания речи (Whisper Transcriber)
+// Движок инференса OpenAI Whisper (whisper-rs)
 // -------------------------------------------------------------------------------------------------
 
-/// Внутренняя функция транскрибации аудио сэмплов через Whisper
+/// Вычисление средней уверенности (confidence) для сегмента Whisper
+fn get_segment_confidence(state: &whisper_rs::WhisperState, segment_idx: i32) -> f32 {
+    if let Ok(num_tokens) = state.full_n_tokens(segment_idx) {
+        if num_tokens > 0 {
+            let mut sum_p = 0.0f32;
+            let mut count = 0;
+            for t in 0..num_tokens {
+                if let Ok(prob) = state.full_get_token_prob(segment_idx, t) {
+                    sum_p += prob;
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                return (sum_p / count as f32).clamp(0.0, 1.0);
+            }
+        }
+    }
+    0.92
+}
+
+/// Функция запуска локального инференса Whisper с трансляцией прогресса в UI
 pub fn run_whisper_transcription(
+    app_handle: Option<&AppHandle>,
     audio_path: &str,
     config: WhisperTranscribeConfig,
 ) -> Result<WhisperTranscriptionResult, String> {
-    // 1. Загрузка и ресэмплинг в 16 kHz моно f32
+    // Вспомогательная функция отправки прогресса в UI
+    let emit_progress = |pct: i32, stage_str: &str| {
+        if let Some(handle) = app_handle {
+            let _ = handle.emit(
+                "whisper-progress",
+                WhisperProgressEvent {
+                    progress: pct,
+                    stage: stage_str.to_string(),
+                },
+            );
+        }
+    };
+
+    emit_progress(5, "Загрузка и ресэмплинг аудио");
+
+    // 1. Чтение и ресэмплинг входного аудио в 16 000 Гц моно Vec<f32>
     let p = Path::new(audio_path);
     if !p.exists() {
-        return Err(format!("Файл аудио не найден: {}", audio_path));
+        return Err(format!("Аудиофайл не найден: {}", audio_path));
     }
 
     let samples = load_audio_as_16k_mono(p)?;
     if samples.is_empty() {
-        return Ok(WhisperTranscriptionResult {
-            audio_path: audio_path.to_string(),
-            duration_ms: 0,
-            items: Vec::new(),
-            full_text: String::new(),
-            model_used: "none".to_string(),
-            average_confidence: 0.0,
-        });
+        return Err("Загруженный аудиофайл пуст или не содержит сэмплов".to_string());
     }
 
     let duration_ms = ((samples.len() as f64 / 16000.0) * 1000.0) as i64;
+    emit_progress(15, "Поиск локальной модели Whisper GGML");
 
-    // 2. Определение пути к GGML модели
+    // 2. Разрешение пути к бинарной модели GGML
     let model_type_str = config.model_type.as_deref().or(config.model_path.as_deref());
     let model_path = resolve_model_path(model_type_str)?;
+
+    if !model_path.exists() {
+        return Err(format!(
+            "Файл модели Whisper GGML не найден по пути: {:?}. Пожалуйста, скачайте модель (например, ggml-base.bin или ggml-small.bin) в директорию resources/models/whisper/",
+            model_path
+        ));
+    }
+
     let model_name = model_path
         .file_name()
         .and_then(|f| f.to_str())
         .unwrap_or("ggml-base.bin")
         .to_string();
 
-    // 3. Вызов Whisper (whisper.cpp)
-    // Примечание: При наличии библиотеки whisper-rs выполняется нативный вызов WhisperContext.
-    // Если бинарная модель не найдена на диске, формируется аккуратный распознанный сегмент с подсказками сценария.
-    let mut transcript_items: Vec<TranscriptItem> = Vec::new();
+    let model_path_str = model_path
+        .to_str()
+        .ok_or_else(|| format!("Некорректный путь к модели: {:?}", model_path))?;
 
-    #[cfg(feature = "whisper-rs")]
-    {
-        let lang = config.language.as_deref().unwrap_or("ru");
-        let n_threads = config.n_threads.unwrap_or(4).max(1);
+    emit_progress(25, "Инициализация WhisperContext и загрузка модели");
 
-        if model_path.exists() {
-            use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
-            let ctx = WhisperContext::new_with_params(
-                model_path.to_str().ok_or("Неверный путь к модели")?,
-                WhisperContextParameters::default(),
-            )
-            .map_err(|e| format!("Ошибка загрузки GGML модели Whisper: {}", e))?;
+    // 3. Создание WhisperContext и WhisperState с обработкой ошибок памяти
+    let ctx_params = WhisperContextParameters::default();
+    let ctx = WhisperContext::new_with_params(model_path_str, ctx_params)
+        .map_err(|e| format!(" Ошибка загрузки модели Whisper из {:?}: {}", model_path, e))?;
 
-            let mut state = ctx.create_state().map_err(|e| format!("Ошибка создания стейта Whisper: {}", e))?;
-            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    let mut state = ctx.create_state().map_err(|e| {
+        format!(
+            " Ошибка выделения памяти/создания WhisperState для инференса: {}",
+            e
+        )
+    })?;
 
-            params.set_n_threads(n_threads);
-            params.set_language(Some(lang));
-            params.set_print_progress(false);
-            params.set_print_realtime(false);
-            params.set_print_timestamps(false);
-            params.set_translate(config.translate.unwrap_or(false));
+    // 4. Настройка параметров инференса (Язык: "ru", Word-level timestamps, треды)
+    let lang = config.language.as_deref().unwrap_or("ru");
+    let n_threads = config.n_threads.unwrap_or(4).max(1);
 
-            if let Some(temp) = config.temperature {
-                params.set_temperature(temp);
-            }
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_n_threads(n_threads);
+    params.set_language(Some(lang));
+    params.set_token_timestamps(true); // Word-level timestamps
+    params.set_split_on_word(true);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_translate(config.translate.unwrap_or(false));
 
-            state.full(params, &samples[..]).map_err(|e| format!("Ошибка инференса Whisper: {}", e))?;
+    if let Some(temp) = config.temperature {
+        params.set_temperature(temp);
+    }
 
-            let num_segments = state.full_n_segments().map_err(|e| format!("Ошибка чтения сегментов: {}", e))?;
-            for i in 0..num_segments {
-                if let Ok(text) = state.full_get_segment_text(i) {
-                    let start_t = state.full_get_segment_t0(i).unwrap_or(0) * 10; // whisper timestamp is in 10ms units
-                    let end_t = state.full_get_segment_t1(i).unwrap_or(0) * 10;
-                    let trimmed = text.trim().to_string();
-                    if !trimmed.is_empty() {
-                        transcript_items.push(TranscriptItem {
-                            text: trimmed,
-                            start_timestamp_ms: start_t,
-                            end_timestamp_ms: end_t,
-                            confidence: 0.92,
-                            matched_script_id: None,
-                            matched_script_text: None,
-                            match_similarity: None,
-                        });
-                    }
-                }
+    // Потоковая передача прогресса инференса
+    if let Some(handle) = app_handle {
+        let handle_clone = handle.clone();
+        params.set_progress_callback_safe(move |pct| {
+            let mapped_pct = 25 + ((pct as f32 / 100.0) * 65.0) as i32; // Масштабируем 0..100% в диапазон 25..90%
+            let _ = handle_clone.emit(
+                "whisper-progress",
+                WhisperProgressEvent {
+                    progress: mapped_pct,
+                    stage: format!("Инференс Whisper: {}%", pct),
+                },
+            );
+        });
+    }
+
+    emit_progress(30, "Запуск распознавания речи Whisper...");
+
+    // 5. Выполнение локального инференса
+    state
+        .full(params, &samples[..])
+        .map_err(|e| format!(" Ошибка во время выполнения инференса Whisper: {}", e))?;
+
+    emit_progress(90, "Извлечение распознанных сегментов");
+
+    // 6. Извлечение результатов распознавания
+    let num_segments = state
+        .full_n_segments()
+        .map_err(|e| format!("Ошибка чтения сегментов из WhisperState: {}", e))?;
+
+    let mut transcript_items = Vec::with_capacity(num_segments as usize);
+
+    for i in 0..num_segments {
+        if let Ok(text) = state.full_get_segment_text(i) {
+            let start_t = state.full_get_segment_t0(i).unwrap_or(0) * 10; // whisper timestamp unit is 10ms
+            let end_t = state.full_get_segment_t1(i).unwrap_or(0) * 10;
+            let trimmed = text.trim().to_string();
+
+            if !trimmed.is_empty() {
+                let confidence = get_segment_confidence(&state, i);
+
+                transcript_items.push(TranscriptItem {
+                    text: trimmed,
+                    start_timestamp_ms: start_t,
+                    end_timestamp_ms: end_t,
+                    confidence: (confidence * 100.0).round() / 100.0,
+                    matched_script_id: None,
+                    matched_script_text: None,
+                    match_similarity: None,
+                });
             }
         }
     }
 
-    // Если прямая библиотека не скомпилирована или в fallback-режиме
-    if transcript_items.is_empty() {
-        let default_text = if let Some(ref lines) = config.script_lines {
-            if let Some(first) = lines.first() {
-                first.text.clone()
-            } else {
-                format!("[Фраза {} мс]", duration_ms)
-            }
-        } else {
-            format!("[Фраза {} мс]", duration_ms)
-        };
-
-        transcript_items.push(TranscriptItem {
-            text: default_text,
-            start_timestamp_ms: 0,
-            end_timestamp_ms: duration_ms,
-            confidence: 0.90,
-            matched_script_id: None,
-            matched_script_text: None,
-            match_similarity: None,
-        });
-    }
-
-    // 4. Автоматическое сопоставление со сценарием (Fuzzy Levenshtein Match)
+    // 7. Сопоставление с оригинальным сценарием (Fuzzy Matcher)
     let auto_match = config.auto_match_script.unwrap_or(true);
-    let min_sim = config.min_similarity_threshold.unwrap_or(0.35);
+    let min_sim = config.min_similarity_threshold.unwrap_or(0.40);
 
     if auto_match {
         if let Some(ref script_lines) = config.script_lines {
+            emit_progress(95, "Нечеткое сопоставление со сценарием (Fuzzy Matcher)");
             match_transcripts_with_script(&mut transcript_items, script_lines, min_sim);
         }
     }
@@ -544,6 +702,8 @@ pub fn run_whisper_transcription(
         0.0
     };
 
+    emit_progress(100, "Распознавание завершено");
+
     Ok(WhisperTranscriptionResult {
         audio_path: audio_path.to_string(),
         duration_ms,
@@ -558,15 +718,18 @@ pub fn run_whisper_transcription(
 // Tauri V2 Commands
 // -------------------------------------------------------------------------------------------------
 
-/// Tauri команда: Распознавание речи через Whisper и сопоставление со сценарием
+/// Tauri команда: Локальное распознавание речи через Whisper и сопоставление со сценарием
 #[command]
 pub async fn transcribe_and_match_script(
+    app_handle: AppHandle,
     audio_path: String,
     config: WhisperTranscribeConfig,
 ) -> Result<WhisperTranscriptionResult, String> {
-    tokio::task::spawn_blocking(move || run_whisper_transcription(&audio_path, config))
-        .await
-        .map_err(|e| format!("Ошибка выполнения фоновой задачи Whisper: {}", e))?
+    tokio::task::spawn_blocking(move || {
+        run_whisper_transcription(Some(&app_handle), &audio_path, config)
+    })
+    .await
+    .map_err(|e| format!("Ошибка фонового потока Whisper: {}", e))?
 }
 
 // -------------------------------------------------------------------------------------------------
