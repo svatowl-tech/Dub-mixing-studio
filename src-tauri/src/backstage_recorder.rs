@@ -9,7 +9,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -271,18 +271,22 @@ pub async fn stop_backstage_recording(
 ) -> Result<Option<String>, String> {
     log_info("--- [Backstage] Остановка видеозаписи ---");
 
-    let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
+    let (child, video_path) = {
+        let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
 
-    if !recorder.is_recording.load(Ordering::SeqCst) {
-        log_debug("[Backstage] Видеозапись не активна");
-        return Ok(None);
-    }
+        if !recorder.is_recording.load(Ordering::SeqCst) {
+            log_debug("[Backstage] Видеозапись не активна");
+            return Ok(None);
+        }
 
-    recorder.is_recording.store(false, Ordering::SeqCst);
+        recorder.is_recording.store(false, Ordering::SeqCst);
 
-    let mut child = recorder.child.take();
-    let video_path = recorder.current_video_path.take();
-    recorder.start_time = None;
+        let child = recorder.child.take();
+        let video_path = recorder.current_video_path.take();
+        recorder.start_time = None;
+
+        (child, video_path)
+    };
 
     if let Some(mut c) = child {
         log_debug("[Backstage] Отправка команды мягкого завершения 'q' в stdin FFmpeg");
