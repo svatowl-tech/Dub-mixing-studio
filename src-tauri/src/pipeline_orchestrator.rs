@@ -629,8 +629,12 @@ async fn run_native_pipeline(
                     dub_audio.sample_rate,
                     orig_str,
                     &phase2_input.to_string_lossy(),
+                    &aligned_voice_out.to_string_lossy(),
                     Some(align_cfg),
                 ) {
+                    let lag = analysis.detected_lag_ms.unwrap_or(analysis.detected_offset_ms);
+                    let ratio = analysis.average_stretch_ratio.unwrap_or(analysis.stretch_ratio);
+
                     emit_telemetry(
                         &app,
                         &handle,
@@ -638,10 +642,10 @@ async fn run_native_pipeline(
                         "Шаг 2.2: Smart Alignment (GCC-PHAT + DTW + WSOLA)",
                         55.0,
                         50.0,
-                        &format!("Коррекция задержки: {:.1} мс, растяжение: {:.2}x", analysis.detected_lag_ms, analysis.average_stretch_ratio),
+                        &format!("Коррекция задержки: {:.1} мс, растяжение: {:.2}x", lag, ratio),
                     );
 
-                    let stretched = wsola_time_stretch(&dub_audio.samples, analysis.average_stretch_ratio, dub_audio.sample_rate);
+                    let stretched = wsola_time_stretch(&dub_audio.samples, ratio, dub_audio.sample_rate);
                     let _ = crate::smart_align::save_mono_wav_24bit(&aligned_voice_out, &stretched, dub_audio.sample_rate);
                 }
             }

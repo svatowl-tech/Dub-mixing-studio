@@ -919,8 +919,8 @@ pub fn perform_smart_alignment_analysis(
 /// Tauri V2 Команда вычисления смарт-выравнивания дубляжа с оригиналом
 #[command]
 pub async fn calculate_smart_alignment(
-    app: AppHandle,
-    cache_state: Option<State<'_, AudioBufferCache>>,
+    _app: AppHandle,
+    cache_state: State<'_, AudioBufferCache>,
     original_path: Option<String>,
     dub_path: Option<String>,
     output_path: Option<String>,
@@ -938,7 +938,7 @@ pub async fn calculate_smart_alignment(
 
     let out_str = output_path.unwrap_or_else(|| dub_str.clone());
 
-    let cache_opt = cache_state.map(|s| s.inner().clone());
+    let cache_opt = Some(cache_state.inner().clone());
 
     tokio::task::spawn_blocking(move || {
         let orig_buf = resolve_audio_samples(&orig_str, cache_opt.as_ref())
@@ -965,8 +965,8 @@ pub async fn calculate_smart_alignment(
 /// Выравнивание и сохранение готового аудиоклипа на диск
 #[command]
 pub async fn align_vocal_clip(
-    app: AppHandle,
-    cache_state: Option<State<'_, AudioBufferCache>>,
+    _app: AppHandle,
+    cache_state: State<'_, AudioBufferCache>,
     original_clip_path: String,
     dubbed_clip_path: String,
     output_path: String,
@@ -976,7 +976,7 @@ pub async fn align_vocal_clip(
     let dub_path = dubbed_clip_path.clone();
     let out_path = output_path.clone();
     let cfg = config.unwrap_or_default();
-    let cache_opt = cache_state.map(|s| s.inner().clone());
+    let cache_opt = Some(cache_state.inner().clone());
 
     tokio::task::spawn_blocking(move || {
         let orig_audio = resolve_audio_samples(&orig_path, cache_opt.as_ref())?;

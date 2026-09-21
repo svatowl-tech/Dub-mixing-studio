@@ -885,7 +885,7 @@ impl Vst3SlotDsp {
                 if let Some(loaded) = host_state.loaded_plugins.get(inst_id) {
                     if let Some(instance_arc) = &loaded.instance {
                         if let Ok(mut inst) = instance_arc.lock() {
-                            inst.set_sample_rate(sample_rate as f32);
+                            inst.sample_rate = sample_rate as f64;
                             // Создаем копию для dry/wet смешивания
                             let dry_copy = buffer.to_vec();
                             // Обработка блока сэмплов через VST
