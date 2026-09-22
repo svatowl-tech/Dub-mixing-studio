@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use zip::write::FileOptions;
 use zip::ZipWriter;
 
-use crate::audio_buffer_manager::{read_audio_file_any_format, CachedTrackBuffer};
+use crate::audio_buffer_manager::{load_audio_file_sync, read_audio_file_any_format, CachedTrackBuffer};
 use crate::db::AppState;
 use crate::file_io::{find_ffmpeg_path, normalize_windows_path};
 use crate::logger::{log_error, log_info};
