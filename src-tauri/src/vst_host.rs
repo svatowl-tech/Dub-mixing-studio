@@ -661,7 +661,7 @@ pub async fn load_plugin(
 
         // Obtain IAudioProcessor
         let mut processor: *mut c_void = std::ptr::null_mut();
-        let proc_res = (((*comp_vtbl).unknown.query_interface)(component, &IAUDIO_PROCESSOR_IID, &mut processor));
+        let proc_res = ((*comp_vtbl).unknown.query_interface)(component, &IAUDIO_PROCESSOR_IID, &mut processor);
         if proc_res != K_RESULT_OK || processor.is_null() {
             return Err("IComponent does not implement IAudioProcessor".to_string());
         }
