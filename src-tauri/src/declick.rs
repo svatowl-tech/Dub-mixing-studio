@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::f32::consts::PI;
-use hound::{WavReader, WavWriter, WavSpec, SampleFormat};
+use hound::{WavWriter, WavSpec, SampleFormat};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 

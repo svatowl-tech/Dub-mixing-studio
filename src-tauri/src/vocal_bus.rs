@@ -8,7 +8,7 @@ use rubato::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::audio_buffer_manager::{load_audio_file_sync, read_audio_file_any_format};
+use crate::audio_buffer_manager::read_audio_file_any_format;
 use crate::file_io::normalize_windows_path;
 use crate::logger::{log_debug, log_error, log_info};
 

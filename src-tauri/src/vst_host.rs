@@ -922,6 +922,7 @@ pub async fn set_plugin_state(
     Ok(())
 }
 
+#[allow(unused_variables)]
 #[tauri::command]
 pub async fn open_plugin_editor(
     window: tauri::Window,

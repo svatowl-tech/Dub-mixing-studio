@@ -24,10 +24,10 @@ use tokio_util::sync::CancellationToken;
 use zip::write::FileOptions;
 use zip::ZipWriter;
 
-use crate::audio_buffer_manager::{load_audio_file_sync, read_audio_file_any_format, CachedTrackBuffer};
+use crate::audio_buffer_manager::{read_audio_file_any_format, CachedTrackBuffer};
 use crate::db::AppState;
 use crate::file_io::{find_ffmpeg_path, normalize_windows_path};
-use crate::logger::{log_debug, log_error, log_info};
+use crate::logger::{log_error, log_info};
 use crate::process_utils::CommandExtHide;
 
 // ----------------------------------------------------------------------------
@@ -1378,36 +1378,36 @@ pub async fn render_voiceover_mix(
     // Если Clean_VO файл не был загружен напрямую, рендерим из данных проекта
     if vo_stereo.is_empty() {
         if let Some(ref pjson) = request.project_json {
-            if let Ok(proj_data) = serde_json::from_str::<ExportProjectData>(pjson) {
+            if let Ok(mut proj_data) = serde_json::from_str::<ExportProjectData>(pjson) {
                 log_info("[VoiceoverMix] Рендеринг Clean VO из треков проекта...");
-                let dub_tracks: Vec<ExportTrack> = proj_data
-                    .tracks
-                    .into_iter()
-                    .filter(|t| {
-                        let n = t.name.to_lowercase();
-                        !n.contains("оригинал") && !n.contains("original") && !n.contains("reference")
-                    })
-                    .collect();
+                proj_data.tracks.retain(|t| {
+                    let n = t.name.to_lowercase();
+                    !n.contains("оригинал") && !n.contains("original") && !n.contains("reference")
+                });
 
-                let (dub_segments, dub_dur) = prepare_project_tracks(
-                    dub_tracks,
-                    proj_data.project_path.as_deref(),
-                    proj_data.audio_offset_ms.unwrap_or(0),
-                );
+                let (prep_tracks, total_frames, unique_paths) =
+                    prepare_project_tracks(&proj_data, &output_norm, false);
 
-                let total_frames = (dub_dur * EXPORT_SAMPLE_RATE as f64).ceil() as usize;
-                let mut rendered = vec![0.0f32; total_frames * 2];
-                let num_blocks = (total_frames + BLOCK_FRAMES - 1) / BLOCK_FRAMES;
+                if total_frames > 0 && !prep_tracks.is_empty() {
+                    let all_segments: Vec<PreparedSegment> = prep_tracks
+                        .into_iter()
+                        .flat_map(|t| t.segments)
+                        .collect();
+                    let audio_cache = preload_audio_files_parallel(&unique_paths);
 
-                for b in 0..num_blocks {
-                    let start_f = b * BLOCK_FRAMES;
-                    let count_f = BLOCK_FRAMES.min(total_frames - start_f);
-                    let mut block = vec![0.0f32; count_f * 2];
-                    render_segments_into_block(&dub_segments, start_f, count_f, &mut block);
-                    let out_idx = start_f * 2;
-                    rendered[out_idx..out_idx + count_f * 2].copy_from_slice(&block);
+                    let mut rendered = vec![0.0f32; total_frames * 2];
+                    let num_blocks = (total_frames + BLOCK_FRAMES - 1) / BLOCK_FRAMES;
+
+                    for b in 0..num_blocks {
+                        let start_f = (b * BLOCK_FRAMES) as i64;
+                        let count_f = BLOCK_FRAMES.min(total_frames - b * BLOCK_FRAMES);
+                        let mut block = vec![0.0f32; count_f * 2];
+                        render_segments_into_block(start_f, count_f, &all_segments, &audio_cache, &mut block);
+                        let out_idx = (b * BLOCK_FRAMES) * 2;
+                        rendered[out_idx..out_idx + count_f * 2].copy_from_slice(&block);
+                    }
+                    vo_stereo = rendered;
                 }
-                vo_stereo = rendered;
             }
         }
     }
