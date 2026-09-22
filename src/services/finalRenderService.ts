@@ -923,7 +923,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
       t.id === 'reference-track'
     );
     const origTrackVol = originalTrack && !originalTrack.isMuted ? (originalTrack.volume ?? 0.20) : 0.20;
-    const origAudioPath = originalTrack?.segments?.[0]?.filePath || project.originalAudioPath || `${defaultDestFolder}/takes/original_audio.wav`;
+    const origAudioPath = originalTrack?.segments?.[0]?.filePath || project.originalAudioPath || project.referenceAudioPath || `${defaultDestFolder}/takes/original_audio.wav`;
 
     const exportTracks = project.tracks.map(t => {
       const isOrig = t.type === 'original' || t.name.toLowerCase().includes('оригинал') || t.name.toLowerCase().includes('original') || t.name.toLowerCase().includes('reference') || t.name.toLowerCase().includes('звуки');

@@ -94,6 +94,7 @@ export interface Project {
   videoUrl?: string;
   videoPath?: string; // Local path for Electron
   referenceAudioPath?: string; // Path to reference audio for shadowing
+  originalAudioPath?: string; // Path to extracted or linked original audio
   documentPath?: string; // Path to .txt or .pdf
   documentContent?: string; // Cached content for .txt
   projectPath?: string; // Root folder for project files
