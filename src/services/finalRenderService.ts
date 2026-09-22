@@ -1,9 +1,9 @@
 import { 
   Project, AudioTrack, AudioSegment, SubtitleLine, FinalMixConfig, 
   QualityControlIssue, FinalRenderResult, MixingAuditEntry,
-  QaAuditReport, QaIncident, MasteringStats
+  QaAuditReport, QaIncident, MasteringStats, MixingType
 } from '../types';
-import { toNativeLocalPath } from '../lib/utils';
+import { toNativeLocalPath, getSafeFileUrl } from '../lib/utils';
 
 /**
  * Service for Stage 4: Final Mix & Render (Финальный рендер и экспорт)
@@ -908,35 +908,90 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
       return new Blob([buffer], { type: 'audio/wav' });
     };
 
-    // 1. Export actual master audio mix using electronAPI / exportAudio engine if available
+    // 1. Export actual master audio mix using Tauri backend or electronAPI
     const api = typeof window !== 'undefined' ? (window as any).electronAPI : null;
-    if (api && api.exportAudio) {
-      try {
-        const vocalBusMultiplier = project.vocalBusVolume ?? 1.0;
-        const exportTracks = project.tracks.map(t => {
-          const isOrig = t.type === 'original' || t.name.toLowerCase().includes('оригинал') || t.name.toLowerCase().includes('original') || t.name.toLowerCase().includes('reference') || t.name.toLowerCase().includes('звуки');
-          const effectiveVolume = isOrig ? t.volume : t.volume * vocalBusMultiplier;
-          const effectiveMuted = isOrig ? t.isMuted : (t.isMuted || !!project.vocalBusMuted);
-          return {
-            id: t.id,
-            name: t.name,
-            volume: effectiveVolume,
-            isMuted: effectiveMuted,
-            isSolo: t.isSolo,
-            segments: t.segments.map(s => ({
-              id: s.id || `seg-${Date.now()}-${Math.random()}`,
-              filePath: toNativeLocalPath(s.filePath),
-              startTime: s.startTime,
-              duration: s.duration,
-              fileOffset: s.fileOffset || 0,
-              fileDuration: s.fileDuration || s.duration,
-              gain: s.gain,
-              panning: s.panning,
-              playbackRate: s.playbackRate,
-            })).filter(s => s.filePath !== '')
-          };
-        });
+    const vocalBusMultiplier = project.vocalBusVolume ?? 1.0;
+    const isDubbingMode = 
+      project.mixingType === MixingType.DUBBING || 
+      project.activePresetId === 'preset-dubbing' ||
+      (project.activePresetId && project.activePresetId.toLowerCase().includes('dubbing'));
 
+    const originalTrack = project.tracks.find(t => 
+      t.type === 'original' || 
+      t.name.toLowerCase().includes('оригинал') || 
+      t.name.toLowerCase().includes('original') ||
+      t.id === 'reference-track'
+    );
+    const origTrackVol = originalTrack && !originalTrack.isMuted ? (originalTrack.volume ?? 0.20) : 0.20;
+    const origAudioPath = originalTrack?.segments?.[0]?.filePath || project.originalAudioPath || `${defaultDestFolder}/takes/original_audio.wav`;
+
+    const exportTracks = project.tracks.map(t => {
+      const isOrig = t.type === 'original' || t.name.toLowerCase().includes('оригинал') || t.name.toLowerCase().includes('original') || t.name.toLowerCase().includes('reference') || t.name.toLowerCase().includes('звуки');
+      const effectiveVolume = isOrig ? t.volume : t.volume * vocalBusMultiplier;
+      const effectiveMuted = isOrig ? t.isMuted : (t.isMuted || !!project.vocalBusMuted);
+      return {
+        id: t.id,
+        name: t.name,
+        volume: effectiveVolume,
+        isMuted: effectiveMuted,
+        isSolo: t.isSolo,
+        segments: t.segments.map(s => ({
+          id: s.id || `seg-${Date.now()}-${Math.random()}`,
+          filePath: toNativeLocalPath(s.filePath),
+          startTime: s.startTime,
+          duration: s.duration,
+          fileOffset: s.fileOffset || 0,
+          fileDuration: s.fileDuration || s.duration,
+          gain: s.gain,
+          panning: s.panning,
+          playbackRate: s.playbackRate,
+        })).filter(s => s.filePath !== '')
+      };
+    });
+
+    if (isTauri) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        if (!isDubbingMode) {
+          // В режиме «Закадр» / «Рекаст» используем честное сведение без даккинга:
+          const voMixRes = await invoke<any>('render_voiceover_mix', {
+            request: {
+              projectPath: project.projectPath,
+              originalAudioPath: toNativeLocalPath(origAudioPath),
+              outputPath: toNativeLocalPath(masterAudioPathOnDisk),
+              originalTrackVolume: origTrackVol,
+              vocalBusVolume: vocalBusMultiplier,
+              projectJson: JSON.stringify({
+                projectPath: project.projectPath,
+                tracks: exportTracks,
+                audioOffsetMs: project.audioOffsetMs || 0
+              })
+            }
+          });
+          if (voMixRes && voMixRes.success) {
+            masterAudioUrl = getSafeFileUrl(masterAudioPathOnDisk);
+          }
+        } else {
+          // В режиме «Дубляж»
+          const res = await invoke<any>('export_audio', {
+            projectJson: JSON.stringify({
+              projectPath: project.projectPath,
+              tracks: exportTracks,
+              audioOffsetMs: project.audioOffsetMs || 0
+            }),
+            outputPath: toNativeLocalPath(masterAudioPathOnDisk),
+            format: 'wav',
+            bitDepth: '24'
+          });
+          if (res && res.success) {
+            masterAudioUrl = getSafeFileUrl(masterAudioPathOnDisk);
+          }
+        }
+      } catch (tauriExportErr) {
+        console.warn('[FinalRenderService] Tauri master audio export error:', tauriExportErr);
+      }
+    } else if (api && api.exportAudio) {
+      try {
         const res = await api.exportAudio({
           projectJson: JSON.stringify({
             projectPath: project.projectPath,
@@ -949,7 +1004,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
         });
 
         if (res && res.success) {
-          const { getSafeFileUrl } = await import('../lib/utils');
           masterAudioUrl = getSafeFileUrl(masterAudioPathOnDisk);
         }
       } catch (audioExportErr) {
@@ -1007,12 +1061,38 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
     const sourceVideoDiskPath = toNativeLocalPath(project.videoPath || project.videoUrl);
     const targetVideoPath = `${defaultDestFolder}/${videoFileName}`;
 
+    // Если в проекте выбран «Полный дубляж» (Dubbing), оригинальный голос должен глушиться (bgVolume = 0.0),
+    // но если выбран «Закадр» (Voiceover) или «Рекаст», оригинальный звук обязан присутствовать с заданным уровнем (0.15–0.30 / ~-18dB)
+    let bgVolume = 0.0;
+    if (isDubbingMode) {
+      bgVolume = 0.0;
+    } else {
+      if (originalTrack && !originalTrack.isMuted) {
+        bgVolume = typeof originalTrack.volume === 'number' ? originalTrack.volume : 0.20;
+      } else if (!originalTrack) {
+        bgVolume = 0.20;
+      }
+    }
+
+    // Проверяем наличие отдельной M&E дорожки
+    const meTrack = project.tracks.find(t => 
+      t.type === 'music' || 
+      t.type === 'effects' || 
+      t.name.toLowerCase().includes('m&e') || 
+      t.name.toLowerCase().includes('музыка') || 
+      t.name.toLowerCase().includes('эффект')
+    );
+    let originalAudioOrVideoPath = sourceVideoDiskPath;
+    if (meTrack && meTrack.segments && meTrack.segments.length > 0 && meTrack.segments[0].filePath) {
+      originalAudioOrVideoPath = toNativeLocalPath(meTrack.segments[0].filePath);
+    }
+
     if (api && api.renderFinalVideo && sourceVideoDiskPath) {
       try {
         const renderRes = await api.renderFinalVideo({
-          originalVideo: sourceVideoDiskPath,
+          originalVideo: originalAudioOrVideoPath || sourceVideoDiskPath,
           masterDub: masterAudioPathOnDisk,
-          bgVolume: 0.0,
+          bgVolume,
           dubVolume: 1.0,
           outputPath: targetVideoPath,
           title: project.name || 'DubStudio Project',
@@ -1021,7 +1101,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
 
         if (renderRes && renderRes.success) {
           finalVideoPathOnDisk = targetVideoPath;
-          const { getSafeFileUrl } = await import('../lib/utils');
           videoUrl = getSafeFileUrl(finalVideoPathOnDisk);
         }
       } catch (renderErr) {
@@ -1033,14 +1112,25 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
     if (!videoUrl && isTauri && project.id && sourceVideoDiskPath) {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
-        const audioTracksPayload = [{
+        const audioTracksPayload: any[] = [{
           filePath: masterAudioPathOnDisk,
-          title: 'Дубляж [Студия]',
+          title: isDubbingMode ? 'Дубляж [Студия]' : 'Закадровый перевод [Студия]',
           language: 'rus',
           codec: config.renderSettings?.audioCodec === 'pcm' ? 'flac' : 'aac',
           bitrateKbps: config.renderSettings?.audioBitrateKbps || 320,
           isDefault: true
         }];
+
+        if (sourceVideoDiskPath && !isDubbingMode && bgVolume > 0) {
+          audioTracksPayload.push({
+            filePath: sourceVideoDiskPath,
+            title: 'Оригинальная дорожка (Фон)',
+            language: 'und',
+            codec: 'aac',
+            bitrateKbps: 256,
+            isDefault: false
+          });
+        }
 
         const nativeRes = await invoke<{
           success: boolean;
@@ -1076,7 +1166,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
 
         if (nativeRes && nativeRes.success) {
           finalVideoPathOnDisk = nativeRes.outputFilePath;
-          const { getSafeFileUrl } = await import('../lib/utils');
           videoUrl = getSafeFileUrl(finalVideoPathOnDisk);
         }
       } catch (nativeErr) {

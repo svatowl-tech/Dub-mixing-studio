@@ -380,16 +380,28 @@ export interface PrepProcessingConfig {
   // Спектральное выравнивание (Module 1.2: Авто-EQ на основе спектрального анализа)
   spectralBalancing: {
     enabled: boolean;
+    bypass?: boolean;
+    hpfCutoff?: number; // Срез низких частот (Гц, дефолт 60)
+    lpfCutoff?: number; // Срез высоких частот (Гц, дефолт 20000)
+    reduceResonances?: boolean; // Подавление узких резонансных частот
   };
 
   // Выравниватель речи (Module 1.3: Компрессия и гейтирование)
   speechLeveler: {
     enabled: boolean;
+    bypass?: boolean;
+    thresholdDb?: number; // Порог компрессии (dB, дефолт -12.0)
+    ratio?: number; // Степень сжатия (дефолт 3.44)
+    gateThresholdDb?: number; // Порог гейта в паузах (dB, дефолт -45.0)
   };
 
   // Точечная очистка (Module 1.4: De-esser, Plosives, Clicks)
   vocalSpotCleaning: {
     enabled: boolean;
+    bypass?: boolean;
+    deEsserEnabled?: boolean; // Подавление свистящих
+    plosivesEnabled?: boolean; // Подавление задувов микрофона
+    clicksEnabled?: boolean; // Удаление щелчков
   };
 
   // Приведение АЧХ к одному знаменателю (EQ Matching / Tone profiling / Neural Voice Matching)
@@ -1613,6 +1625,7 @@ declare global {
       createProxyVideo: (videoPath: string, projectPath: string) => Promise<BridgeResponse<string>>;
       openSubtitles: () => Promise<BridgeResponse<{ path: string, name: string, parsed: { roles: string[], subtitles: any[] } }>>;
       extractAudioPeaks: (videoPath: string, projectPath: string) => Promise<BridgeResponse<{ filePath: string, peaks: Float32Array, duration: number }>>;
+      ensureOriginalAudio: (projectPath: string, videoPath: string) => Promise<BridgeResponse<string>>;
       saveTake: (data: { projectPath: string, role: string, startTime: number, audioData: Uint8Array }) => Promise<BridgeResponse<{ filePath: string, peaks: Float32Array }>>;
       exportAudio: (options: any) => Promise<BridgeResponse<{ success: boolean }>>;
       renderFinalVideo: (options: {

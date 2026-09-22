@@ -10,6 +10,7 @@ use std::thread;
 use tauri::{AppHandle, Emitter, State, Manager};
 use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
 use crate::logger::log_debug;
+#[cfg(target_os = "windows")]
 use crate::process_utils::CommandExtHide;
 
 // --- DATA STRUCTURES ---

@@ -89,12 +89,24 @@ export const createDefaultPhase1 = (type: MixingType) => ({
   },
   spectralBalancing: {
     enabled: true, // Включено: срез <60 Гц и >20 кГц, приведение к усредненной кривой
+    bypass: false,
+    hpfCutoff: 60,
+    lpfCutoff: 20000,
+    reduceResonances: true,
   },
   speechLeveler: {
     enabled: true, // Включено: компрессия + гейтирование пауз после шумодава
+    bypass: false,
+    thresholdDb: -12.0,
+    ratio: 3.44,
+    gateThresholdDb: -45.0,
   },
   vocalSpotCleaning: {
     enabled: true, // Включено: точечное подавление DSR, деплосив и кликов
+    bypass: false,
+    deEsserEnabled: true,
+    plosivesEnabled: true,
+    clicksEnabled: true,
   },
   eqMatching: {
     enabled: true, // Включено: выравнивание АЧХ под дикторский стандарт

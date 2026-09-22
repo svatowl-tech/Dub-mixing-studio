@@ -96,7 +96,7 @@ use ducking_engine::{apply_adaptive_ducking, calculate_ducking_envelope_preview}
 use eq_matching::match_eq_profile;
 use export_engine::{
     batch_export, cancel_export, export_all_stems, export_audio, export_audio_book,
-    export_backstage_video, export_stems, quick_preview_export,
+    export_backstage_video, export_stems, quick_preview_export, render_voiceover_mix,
 };
 use file_io::{
     copy_file, copy_file_to_project, ensure_track_audio_wav, get_file_info, init_project_folder,
@@ -183,7 +183,8 @@ use waveform_bucket_engine::{
     compute_waveform_buckets_from_peaks, compute_waveform_render_buckets,
 };
 use waveform_engine::{
-    extract_audio_peaks_bin, generate_waveform_peaks, generate_waveform_peaks_from_pcm,
+    ensure_original_audio_extracted, extract_audio_peaks_bin, generate_waveform_peaks,
+    generate_waveform_peaks_from_pcm,
 };
 use whisper_engine::transcribe_and_match_script;
 
@@ -357,6 +358,7 @@ fn main() {
             quick_preview_export,
             batch_export,
             export_audio_book,
+            render_voiceover_mix,
             analyze_voice_tracks,
             load_track_analysis,
             process_intelligent_normalization_with_clips,
@@ -479,7 +481,8 @@ fn main() {
             compute_waveform_buckets_from_peaks,
             parse_subtitle_file_native,
             match_transcription_with_script,
-            classify_project_cues
+            classify_project_cues,
+            ensure_original_audio_extracted
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

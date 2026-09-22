@@ -526,8 +526,9 @@ export default function App() {
     if (project) {
       playbackEngine.setAudioOffset(project.audioOffsetMs || 0);
       playbackEngine.setPlayOriginalTrackSegments(!!project.audioSettings?.playOriginalTrackSegments);
+      playbackEngine.ensureOriginalAudioLoaded(project);
     }
-  }, [project?.id, project?.audioOffsetMs, project?.audioSettings?.playOriginalTrackSegments]);
+  }, [project?.id, project?.audioOffsetMs, project?.audioSettings?.playOriginalTrackSegments, project?.tracks]);
 
   useEffect(() => {
     return () => {
@@ -2559,6 +2560,7 @@ export default function App() {
 
   useEffect(() => {
     if (videoRef.current && project) {
+      playbackEngine.ensureOriginalAudioLoaded(project);
       playbackEngine.bindVideoElement(videoRef.current);
       if (referenceAudioRef.current) {
         playbackEngine.bindReferenceAudio(referenceAudioRef.current);

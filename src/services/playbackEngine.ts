@@ -17,15 +17,13 @@ async function callTauri(cmd: string, args?: Record<string, any>): Promise<any> 
   }
 }
 
-function formatNativeTracks(tracks: any[]) {
-  return (tracks || []).map(t => ({
-    id: String(t.id),
-    name: String(t.name || ''),
-    volume: typeof t.volume === 'number' ? t.volume : 1.0,
-    isMuted: Boolean(t.isMuted),
-    isSolo: Boolean(t.isSolo),
-    processing: t.processing || null,
-    segments: (t.segments || [])
+function formatNativeTracks(tracks: any[], originalAudioPath?: string | null) {
+  let hasOriginalTrack = false;
+  const formatted = (tracks || []).map(t => {
+    const isOrig = t.type === 'original' || (t.name || '').toLowerCase().includes('оригинал') || (t.name || '').toLowerCase().includes('original');
+    if (isOrig) hasOriginalTrack = true;
+
+    let segments = (t.segments || [])
       .map((s: any) => {
         const rawPath = s.filePath || s.blobUrl || '';
         const nativePath = toNativeLocalPath(rawPath);
@@ -40,8 +38,65 @@ function formatNativeTracks(tracks: any[]) {
           detectedFx: s.detectedFx || null,
         };
       })
-      .filter((s: any) => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:'))
-  }));
+      .filter((s: any) => s.filePath && !s.filePath.startsWith('blob:') && !s.filePath.startsWith('data:'));
+
+    // Если это трек оригинала, но у него нет сегментов, а путь к original_audio.wav известен,
+    // автоматически подставляем сегмент
+    if (isOrig && segments.length === 0 && originalAudioPath) {
+      const nativeOrigPath = toNativeLocalPath(originalAudioPath);
+      if (nativeOrigPath && !nativeOrigPath.startsWith('blob:') && !nativeOrigPath.startsWith('data:')) {
+        segments = [{
+          id: `orig_auto_seg_${t.id}`,
+          filePath: nativeOrigPath,
+          startTime: 0,
+          duration: 36000,
+          fileOffset: 0,
+          gain: 1.0,
+          panning: 0.0,
+          detectedFx: null,
+        }];
+      }
+    }
+
+    return {
+      id: String(t.id),
+      name: String(t.name || ''),
+      type: t.type || (isOrig ? 'original' : 'voice'),
+      volume: typeof t.volume === 'number' ? t.volume : 1.0,
+      isMuted: Boolean(t.isMuted),
+      isSolo: Boolean(t.isSolo),
+      processing: t.processing || null,
+      segments
+    };
+  });
+
+  // Если трека с типом 'original' вообще нет в списке, но есть originalAudioPath, добавляем отдельную системную дорожку
+  if (!hasOriginalTrack && originalAudioPath) {
+    const nativeOrigPath = toNativeLocalPath(originalAudioPath);
+    if (nativeOrigPath && !nativeOrigPath.startsWith('blob:')) {
+      formatted.unshift({
+        id: 'system_original_track',
+        name: 'Оригинал (System)',
+        type: 'original',
+        volume: 1.0,
+        isMuted: false,
+        isSolo: false,
+        processing: null,
+        segments: [{
+          id: 'system_orig_seg',
+          filePath: nativeOrigPath,
+          startTime: 0,
+          duration: 36000,
+          fileOffset: 0,
+          gain: 1.0,
+          panning: 0.0,
+          detectedFx: null,
+        }]
+      });
+    }
+  }
+
+  return formatted;
 }
 
 function makeDistortionCurve(amount: number): Float32Array {
@@ -133,6 +188,8 @@ export class PlaybackEngine {
   private audioOffsetMs = 0; 
   private currentTracks: any[] = [];
   private playOriginalTrackSegments = false;
+  private originalAudioExists = false;
+  private originalAudioPath: string | null = null;
   private workletInitialized = false;
   private isNativePlaying = false;
   private playingMetadata: Map<string, {
@@ -149,6 +206,108 @@ export class PlaybackEngine {
 
   private isTauriRuntime(): boolean {
     return typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
+  }
+
+  public async ensureOriginalAudioLoaded(project: any): Promise<string | null> {
+    if (!project) return null;
+    let foundPath: string | null = null;
+
+    // 1. Поиск в существующих дорожках проекта
+    const origTrack = (project.tracks || []).find((t: any) => 
+      t.type === 'original' || (t.name && (t.name.toLowerCase().includes('оригинал') || t.name.toLowerCase().includes('original')))
+    );
+    if (origTrack && origTrack.segments && origTrack.segments.length > 0) {
+      for (const seg of origTrack.segments) {
+        if (seg.filePath) {
+          foundPath = seg.filePath;
+          break;
+        }
+      }
+    }
+
+    // 2. Поиск по стандартным путям проекта
+    if (!foundPath && project.projectPath) {
+      const pPath = project.projectPath.replace(/\\/g, '/');
+      const takesWav = `${pPath}/takes/original_audio.wav`;
+      const rootWav = `${pPath}/original_audio.wav`;
+
+      if (this.isTauriRuntime()) {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core');
+          const existsTakes = await invoke<boolean>('check_file_exists', { path: takesWav }).catch(() => false);
+          if (existsTakes) {
+            foundPath = takesWav;
+          } else {
+            const existsRoot = await invoke<boolean>('check_file_exists', { path: rootWav }).catch(() => false);
+            if (existsRoot) {
+              foundPath = rootWav;
+            } else if (project.videoPath || project.videoUrl) {
+              const vPath = toNativeLocalPath(project.videoPath || project.videoUrl);
+              if (vPath) {
+                const extractedPath = await invoke<string>('ensure_original_audio_extracted', { 
+                  projectPath: project.projectPath, 
+                  videoPath: vPath 
+                }).catch(() => null);
+                if (extractedPath) {
+                  foundPath = extractedPath;
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('[PlaybackEngine] Check original audio path error:', e);
+        }
+      } else {
+        const globalCache = (window as any).webFileCache;
+        if (globalCache && (globalCache.has(takesWav) || globalCache.has('original_audio.wav'))) {
+          foundPath = takesWav;
+        }
+      }
+    }
+
+    this.originalAudioPath = foundPath;
+    this.originalAudioExists = Boolean(foundPath);
+    console.log(`[PlaybackEngine] Original audio check: exists=${this.originalAudioExists}, path=${foundPath || 'none'}`);
+    
+    this.syncVideoMuteState(project.tracks);
+    return foundPath;
+  }
+
+  public syncVideoMuteState(tracks?: any[]) {
+    const activeTracks = tracks || this.currentTracks || [];
+    const anySolo = activeTracks.some((t: any) => t.isSolo);
+    const originalTrack = activeTracks.find((t: any) => 
+      t.type === 'original' || (t.name && (t.name.toLowerCase().includes('оригинал') || t.name.toLowerCase().includes('original')))
+    );
+
+    const isOriginalActive = anySolo 
+      ? (originalTrack?.isSolo || false) 
+      : !(originalTrack?.isMuted || false);
+    const targetVolume = isOriginalActive ? (originalTrack?.volume ?? 1.0) : 0.0;
+
+    if (this.boundVideoElement) {
+      if (this.originalAudioExists && (this.isTauriRuntime() || this.playOriginalTrackSegments)) {
+        // Если original_audio.wav существует и воспроизводится через нативный аудио-движок или Web Audio рэк,
+        // элемент <video> мьютится для избежания эхо
+        this.boundVideoElement.volume = 0;
+        this.boundVideoElement.muted = true;
+      } else {
+        // Если файл original_audio.wav еще не создан или не найден, элемент <video> НЕ ДОЛЖЕН мьютиться,
+        // чтобы звук оригинала шел напрямую из видеофайла с регулировкой громкости из дорожки «Оригинал»
+        this.boundVideoElement.muted = !isOriginalActive || targetVolume === 0;
+        this.boundVideoElement.volume = Math.max(0, Math.min(1.0, targetVolume));
+      }
+    }
+
+    if (this.boundReferenceElement) {
+      if (this.originalAudioExists && (this.isTauriRuntime() || this.playOriginalTrackSegments)) {
+        this.boundReferenceElement.volume = 0;
+        this.boundReferenceElement.muted = true;
+      } else {
+        this.boundReferenceElement.muted = !isOriginalActive || targetVolume === 0;
+        this.boundReferenceElement.volume = Math.max(0, Math.min(1.0, targetVolume));
+      }
+    }
   }
 
   private createProcessingChain(
@@ -579,15 +738,14 @@ export class PlaybackEngine {
 
   public async bindVideoElement(video: HTMLMediaElement) {
     if (this.boundVideoElement === video) return;
-    console.log("[PlaybackEngine] Binding video element for native direct routing...");
+    console.log("[PlaybackEngine] Binding video element for audio routing...");
     
     try {
       this.boundVideoElement = video;
       this.videoSource = null as any;
       
-      // Отключаем прямой вывод звука HTML5 видеоплеера для устранения двойного воспроизведения
-      video.volume = 0;
-      video.muted = true;
+      // Синхронизируем громкость и мьют в зависимости от наличия original_audio.wav
+      this.syncVideoMuteState();
       
       const ctx = await this.getContext();
       if (!this.videoGain) {
@@ -605,7 +763,7 @@ export class PlaybackEngine {
          this.videoGain.connect(this.videoDelay);
       }
       
-      console.log("[PlaybackEngine] Video element bound and muted for native direct playback");
+      console.log(`[PlaybackEngine] Video element bound. Audio exists in engine: ${this.originalAudioExists}, muted: ${video.muted}`);
     } catch (e) {
       console.warn("[PlaybackEngine] Failed to bind video element:", e);
     }
@@ -613,15 +771,13 @@ export class PlaybackEngine {
 
   public async bindReferenceAudio(audio: HTMLMediaElement) {
     if (this.boundReferenceElement === audio) return;
-    console.log("[PlaybackEngine] Binding reference audio for native direct routing...");
+    console.log("[PlaybackEngine] Binding reference audio for audio routing...");
     
     try {
       this.boundReferenceElement = audio;
       this.referenceSource = null as any;
       
-      // Отключаем прямой звук HTML5 аудио элемента
-      audio.volume = 0;
-      audio.muted = true;
+      this.syncVideoMuteState();
       
       const ctx = await this.getContext();
       if (!this.referenceGain) {
@@ -639,7 +795,7 @@ export class PlaybackEngine {
          }
       }
       
-      console.log("[PlaybackEngine] Reference audio bound and muted for native direct playback");
+      console.log(`[PlaybackEngine] Reference audio bound. Audio exists in engine: ${this.originalAudioExists}, muted: ${audio.muted}`);
     } catch (e) {
       console.warn("[PlaybackEngine] Failed to bind reference audio:", e);
     }
@@ -745,6 +901,7 @@ export class PlaybackEngine {
     this.startVideoTime = currentTime;
     this.scheduledSegments.clear();
     this.currentTracks = tracks;
+    this.syncVideoMuteState(tracks);
 
     // В десктопном режиме Tauri:
     // 1. Полностью отключаем запуск браузерных BufferSourceNode к динамикам.
@@ -755,7 +912,7 @@ export class PlaybackEngine {
       if (this.masterGain) {
         try { this.masterGain.disconnect(ctx.destination); } catch (_) {}
       }
-      const nativeTracks = formatNativeTracks(tracks);
+      const nativeTracks = formatNativeTracks(tracks, this.originalAudioPath);
       try {
         await callTauri('start_native_playback', { tracks: nativeTracks, startTime: currentTime });
         await callTauri('transport_play');
@@ -932,11 +1089,6 @@ export class PlaybackEngine {
       this.videoGain.gain.setTargetAtTime(targetVolume, now, 0.03);
     }
 
-    if (this.boundVideoElement) {
-      this.boundVideoElement.volume = 0;
-      this.boundVideoElement.muted = true;
-    }
-
     if (this.referenceGain) {
       const isRefActive = anySolo
         ? (referenceTrack?.isSolo || false)
@@ -945,10 +1097,8 @@ export class PlaybackEngine {
       this.referenceGain.gain.setTargetAtTime(targetVolume, now, 0.03);
     }
 
-    if (this.boundReferenceElement) {
-      this.boundReferenceElement.volume = 0;
-      this.boundReferenceElement.muted = true;
-    }
+    // Синхронизируем громкость и мьют HTML5 видео/аудио
+    this.syncVideoMuteState(tracks);
 
     const activeTracks = anySolo 
       ? tracks.filter(t => t.isSolo) 
@@ -956,8 +1106,8 @@ export class PlaybackEngine {
 
     for (const track of activeTracks) {
       const lowerName = track.name?.toLowerCase() || '';
-      const isOriginalOrRef = lowerName.includes('оригинал') || lowerName.includes('original') || track.id === 'reference-track' || lowerName.includes('reference');
-      if (isOriginalOrRef && !this.playOriginalTrackSegments) {
+      const isOriginalOrRef = track.type === 'original' || lowerName.includes('оригинал') || lowerName.includes('original') || track.id === 'reference-track' || lowerName.includes('reference');
+      if (isOriginalOrRef && !this.playOriginalTrackSegments && !this.originalAudioExists) {
         continue;
       }
 
@@ -1156,8 +1306,9 @@ export class PlaybackEngine {
     
     this.currentTracks = tracks;
 
+    this.syncVideoMuteState(tracks);
     if (this.isTauriRuntime()) {
-      const nativeTracks = formatNativeTracks(tracks);
+      const nativeTracks = formatNativeTracks(tracks, this.originalAudioPath);
       callTauri('transport_seek_ms', { targetMs: Math.max(0, currentTime * 1000) }).catch(() => {});
       callTauri('seek_native_playback', { time: currentTime }).catch(() => {});
 
@@ -1179,9 +1330,10 @@ export class PlaybackEngine {
 
   public async updateTracks(tracks: any[]) {
     this.currentTracks = tracks;
+    this.syncVideoMuteState(tracks);
 
     if (this.isTauriRuntime() || this.isNativePlaying) {
-      const nativeTracks = formatNativeTracks(tracks);
+      const nativeTracks = formatNativeTracks(tracks, this.originalAudioPath);
       callTauri('update_native_playback_tracks', { tracks: nativeTracks }).catch(() => {});
       return;
     }

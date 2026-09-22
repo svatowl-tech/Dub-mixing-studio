@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use rayon::prelude::*;
@@ -369,6 +369,164 @@ pub fn generate_waveform_peaks_internal(
     Ok(calculate_rms_peaks_parallel(&samples, points))
 }
 
+/// Helper to extract original audio track from video to target WAV path using FFmpeg sidecar (with fallback)
+async fn extract_audio_from_video_ffmpeg(
+    app_handle: &AppHandle,
+    video_path: &str,
+    dest_path: &Path,
+) -> Result<(), String> {
+    let norm_video = crate::file_io::normalize_windows_path(video_path);
+    let dest_str = crate::file_io::normalize_windows_path(&dest_path.to_string_lossy());
+
+    let mut extracted = false;
+    if let Ok(ffmpeg_cmd) = app_handle.shell().sidecar("ffmpeg") {
+        if let Ok(output) = ffmpeg_cmd
+            .args(&[
+                "-y",
+                "-i",
+                &norm_video,
+                "-vn",
+                "-ac",
+                "2",
+                "-ar",
+                "48000",
+                "-c:a",
+                "pcm_s16le",
+                &dest_str,
+            ])
+            .output()
+            .await
+        {
+            if output.status.success() {
+                extracted = true;
+            } else {
+                log_debug(&format!(
+                    "FFmpeg sidecar extraction failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+    }
+
+    if !extracted {
+        let ffmpeg_bin = crate::file_io::find_ffmpeg_path();
+        let output = tokio::process::Command::new(&ffmpeg_bin)
+            .hide_window()
+            .args(&[
+                "-y",
+                "-i",
+                &norm_video,
+                "-vn",
+                "-ac",
+                "2",
+                "-ar",
+                "48000",
+                "-c:a",
+                "pcm_s16le",
+                &dest_str,
+            ])
+            .output()
+            .await
+            .map_err(|e| format!("Не удалось запустить FFmpeg ({}): {}", ffmpeg_bin, e))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "Ошибка извлечения original_audio.wav через FFmpeg: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Tauri command to ensure original_audio.wav is extracted and exists in {project_path}/takes/
+#[tauri::command]
+pub async fn ensure_original_audio_extracted(
+    app_handle: AppHandle,
+    project_path: String,
+    video_path: String,
+) -> Result<String, String> {
+    let norm_project_path = crate::file_io::normalize_windows_path(&project_path);
+    let norm_video_path = crate::file_io::normalize_windows_path(&video_path);
+
+    log_debug(&format!(
+        "ensure_original_audio_extracted: project_path={}, video_path={}",
+        norm_project_path, norm_video_path
+    ));
+
+    let proj_p = Path::new(&norm_project_path);
+    let takes_dir = if proj_p.ends_with("takes") {
+        proj_p.to_path_buf()
+    } else {
+        proj_p.join("takes")
+    };
+
+    if !takes_dir.exists() {
+        std::fs::create_dir_all(&takes_dir).map_err(|e| {
+            format!(
+                "Не удалось создать директорию takes {:?}: {}",
+                takes_dir, e
+            )
+        })?;
+    }
+
+    let target_wav = takes_dir.join("original_audio.wav");
+    let dest_str = crate::file_io::normalize_windows_path(&target_wav.to_string_lossy());
+
+    let is_valid = if target_wav.exists() {
+        match std::fs::metadata(&target_wav) {
+            Ok(meta) => meta.len() > 1024,
+            Err(_) => false,
+        }
+    } else {
+        false
+    };
+
+    if !is_valid {
+        if !Path::new(&norm_video_path).exists() {
+            return Err(format!(
+                "Исходный видеофайл не найден: {}",
+                norm_video_path
+            ));
+        }
+
+        log_debug(&format!(
+            "Extracting original audio track from {} to {}",
+            norm_video_path, dest_str
+        ));
+
+        extract_audio_from_video_ffmpeg(&app_handle, &norm_video_path, &target_wav).await?;
+
+        if !target_wav.exists() {
+            return Err(format!(
+                "Файл {} не был создан после выполнения FFmpeg",
+                dest_str
+            ));
+        }
+
+        let meta = std::fs::metadata(&target_wav)
+            .map_err(|e| format!("Не удалось прочитать метаданные {}: {}", dest_str, e))?;
+        if meta.len() <= 1024 {
+            return Err(format!(
+                "Файл {} пуст или поврежден ({} байт)",
+                dest_str,
+                meta.len()
+            ));
+        }
+
+        // Also duplicate to project root if project_path was root directory
+        if !proj_p.ends_with("takes") {
+            let root_wav = proj_p.join("original_audio.wav");
+            if !root_wav.exists() {
+                let _ = std::fs::copy(&target_wav, &root_wav);
+            }
+        }
+    }
+
+    Ok(dest_str)
+}
+
 #[tauri::command]
 pub async fn extract_audio_peaks_bin(
     app_handle: AppHandle,
@@ -382,11 +540,70 @@ pub async fn extract_audio_peaks_bin(
         norm_file_path, norm_output_dir
     ));
 
+    // 1. If output_dir is provided, guarantee {output_dir}/takes/ exists and extract original_audio.wav
+    let decode_target_path = if !norm_output_dir.trim().is_empty() {
+        let out_p = Path::new(&norm_output_dir);
+        let takes_dir = if out_p.ends_with("takes") {
+            out_p.to_path_buf()
+        } else {
+            out_p.join("takes")
+        };
+
+        if !takes_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(&takes_dir) {
+                log_debug(&format!("Failed to create takes dir {:?}: {}", takes_dir, e));
+            }
+        }
+
+        let target_wav = takes_dir.join("original_audio.wav");
+        let dest_str = crate::file_io::normalize_windows_path(&target_wav.to_string_lossy());
+
+        let needs_extract = if target_wav.exists() {
+            std::fs::metadata(&target_wav)
+                .map(|m| m.len() <= 1024)
+                .unwrap_or(true)
+        } else {
+            true
+        };
+
+        if needs_extract {
+            log_debug(&format!("Extracting original_audio.wav to: {}", dest_str));
+            extract_audio_from_video_ffmpeg(&app_handle, &norm_file_path, &target_wav).await?;
+        }
+
+        // Verification check before proceeding: ensure file exists and is > 1024 bytes
+        if !target_wav.exists() {
+            return Err(format!("Файл original_audio.wav не найден по пути {}", dest_str));
+        }
+
+        let meta = std::fs::metadata(&target_wav)
+            .map_err(|e| format!("Не удалось получить метаданные {}: {}", dest_str, e))?;
+        if meta.len() <= 1024 {
+            return Err(format!(
+                "Файл {} пуст или поврежден ({} байт)",
+                dest_str,
+                meta.len()
+            ));
+        }
+
+        // Also duplicate to project root if output_dir is project root
+        if !out_p.ends_with("takes") {
+            let root_wav = out_p.join("original_audio.wav");
+            if !root_wav.exists() {
+                let _ = std::fs::copy(&target_wav, &root_wav);
+            }
+        }
+
+        dest_str
+    } else {
+        norm_file_path.clone()
+    };
+
     let video_duration = get_video_duration(&app_handle, &norm_file_path).await.ok();
 
-    let norm_path_clone = norm_file_path.clone();
+    let target_path_clone = decode_target_path.clone();
     let (samples, sample_rate) = tokio::task::spawn_blocking(move || {
-        decode_audio_file_sync(&norm_path_clone)
+        decode_audio_file_sync(&target_path_clone)
     })
     .await
     .map_err(|e| format!("Task execution error: {}", e))??;

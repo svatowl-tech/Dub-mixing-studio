@@ -330,6 +330,90 @@ pub fn load_audio_file_sync(file_path: &str) -> Result<CachedTrackBuffer, String
     }
 }
 
+/// Универсальное чтение аудиофайла любого формата (WAV, FLAC, MP3, OGG, AAC, M4A)
+/// с автоматическим декодированием в плоский interleaved f32 PCM вектор.
+/// Возвращает кортеж: (samples: Vec<f32>, sample_rate: u32, channels: u16).
+pub fn read_audio_file_any_format(path: &Path) -> Result<(Vec<f32>, u32, u16), String> {
+    let norm_path_str = normalize_windows_path(&path.to_string_lossy());
+    let normalized_path = Path::new(&norm_path_str);
+    if !normalized_path.exists() {
+        return Err(format!("Аудиофайл не найден: {}", norm_path_str));
+    }
+
+    let ext = normalized_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // 1. Для WAV файлов сначала пробуем прямое быстрое чтение через hound
+    if ext == "wav" {
+        if let Ok(mut reader) = hound::WavReader::open(normalized_path) {
+            let spec = reader.spec();
+            if spec.channels > 0 && spec.sample_rate > 0 {
+                let sample_rate = spec.sample_rate;
+                let channels = spec.channels;
+                let samples_res: Result<Vec<f32>, _> = match spec.sample_format {
+                    SampleFormat::Float => reader.samples::<f32>().collect(),
+                    SampleFormat::Int => match spec.bits_per_sample {
+                        16 => reader.samples::<i16>().map(|s| s.map(|v| v as f32 / 32768.0)).collect(),
+                        24 => reader.samples::<i32>().map(|s| s.map(|v| v as f32 / 8388608.0)).collect(),
+                        32 => reader.samples::<i32>().map(|s| s.map(|v| v as f32 / 2147483648.0)).collect(),
+                        8  => reader.samples::<i8>().map(|s| s.map(|v| v as f32 / 128.0)).collect(),
+                        _  => reader.samples::<i16>().map(|s| s.map(|v| v as f32 / 32768.0)).collect(),
+                    },
+                };
+
+                if let Ok(samples) = samples_res {
+                    if !samples.is_empty() {
+                        return Ok((samples, sample_rate, channels));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Если это FLAC, MP3, OGG, AAC или hound выдал ошибку (например, no RIFF tag),
+    // декодируем через symphonia
+    match load_compressed_symphonia(normalized_path) {
+        Ok(buffer) => match buffer.data {
+            AudioBufferData::PcmFloat { samples, sample_rate, channels, .. } => {
+                if !samples.is_empty() {
+                    return Ok((samples, sample_rate, channels));
+                }
+            }
+            _ => {
+                let total_samples = buffer.total_frames * (buffer.channels as usize);
+                let samples = buffer.get_slice(0, total_samples);
+                if !samples.is_empty() {
+                    return Ok((samples, buffer.sample_rate, buffer.channels));
+                }
+            }
+        },
+        Err(err) => {
+            log_debug(&format!(
+                "[AudioBufferManager] Symphonia decoding fallback for {}: {}",
+                norm_path_str, err
+            ));
+        }
+    }
+
+    // 3. Дополнительный резервный фолбэк на waveform_engine decoder (Symphonia + FFmpeg pipe)
+    match crate::waveform_engine::decode_audio_file_sync(&norm_path_str) {
+        Ok((samples, sample_rate)) if !samples.is_empty() => {
+            log_info(&format!(
+                "[AudioBufferManager] Успешно загружен аудиофайл через fallback waveform_engine: {}",
+                norm_path_str
+            ));
+            Ok((samples, sample_rate, 1))
+        }
+        _ => Err(format!(
+            "Не удалось прочитать аудиофайл {}: неподдерживаемый формат или поврежденный файл",
+            norm_path_str
+        )),
+    }
+}
+
 /// Быстрая Zero-Copy инициализация WAV файлов через memmap2
 fn load_wav_mmap(file_path: &Path) -> Result<CachedTrackBuffer, String> {
     let file = File::open(file_path).map_err(|e| format!("Не удалось открыть файл: {}", e))?;

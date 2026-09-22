@@ -79,7 +79,9 @@ pub struct AlignmentResult {
     pub max_deviation_percent: Option<f64>,
 }
 
+#[allow(dead_code)]
 pub type AlignResult = AlignmentResult;
+#[allow(dead_code)]
 pub type AlignmentAdjustment = AlignmentResult;
 
 /// Конфигурация параметров Smart Align
@@ -336,6 +338,7 @@ pub fn calculate_gcc_phat_lag(
 // УРОВЕНЬ 2: VAD И ВЫДЕЛЕНИЕ ГЛАСНЫХ ЯДЕР (Vowel Kernels)
 // ============================================================================
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct VadFrameInfo {
     pub is_speech: bool,

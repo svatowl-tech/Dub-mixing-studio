@@ -54,6 +54,7 @@ custom-protocol = ["tauri/custom-protocol"]
 asio = ["cpal/asio"]
 
 [profile.release]
-lto = true
+lto = "thin"
 codegen-units = 1
 panic = "unwind"
+debug = 0

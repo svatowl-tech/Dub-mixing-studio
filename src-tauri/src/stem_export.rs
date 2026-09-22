@@ -8,13 +8,14 @@ use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use chrono::{Datelike, Local, Timelike};
-use hound::{SampleFormat, WavReader};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::audio_buffer_manager::load_audio_file_sync;
 use crate::db::AppState;
+use crate::file_io::normalize_windows_path;
 use crate::logger::log_debug;
 
 // ----------------------------------------------------------------------------
@@ -400,25 +401,15 @@ impl SegmentFileReader {
             return Err(format!("Файл не найден: {}", self.source.file_path.display()));
         }
 
-        let mut reader = WavReader::open(&self.source.file_path)
-            .map_err(|e| format!("Ошибка чтения WAV {}: {}", self.source.file_path.display(), e))?;
+        let path_str = normalize_windows_path(&self.source.file_path.to_string_lossy());
+        let cached = load_audio_file_sync(&path_str)
+            .map_err(|e| format!("Ошибка чтения аудио {}: {}", self.source.file_path.display(), e))?;
 
-        let spec = reader.spec();
-        self.reader_sample_rate = spec.sample_rate;
-        self.reader_channels = spec.channels as usize;
+        self.reader_sample_rate = cached.sample_rate;
+        self.reader_channels = cached.channels as usize;
 
-        let raw: Vec<f32> = match spec.sample_format {
-            SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap_or(0.0)).collect(),
-            SampleFormat::Int => {
-                if spec.bits_per_sample == 16 {
-                    reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / 32768.0).collect()
-                } else if spec.bits_per_sample == 24 || spec.bits_per_sample == 32 {
-                    reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 2147483648.0).collect()
-                } else {
-                    Vec::new()
-                }
-            }
-        };
+        let total_samples = cached.total_frames * self.reader_channels;
+        let raw = cached.get_slice(0, total_samples);
 
         self.cached_samples = Some(raw);
         Ok(())

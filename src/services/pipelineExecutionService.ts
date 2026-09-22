@@ -183,6 +183,135 @@ export class PipelineExecutionService {
           return;
         }
 
+        if (stepId === 'spectralBalancing') {
+          setStepExecution(prev => ({
+            ...prev,
+            [stepId]: {
+              ...prev[stepId],
+              progress: 30,
+              log: 'Анализ спектра и выравнивание частотного баланса (HPF 60Hz, LPF 20kHz)...'
+            }
+          }));
+
+          const res = await AudioDspService.applySpectralBalancingAsync(
+            (project as any).projectPath || '',
+            project.tracks
+          );
+          project = { ...project, tracks: res.updatedTracks };
+          onUpdateProject({ tracks: res.updatedTracks });
+          playbackEngine.clearCache();
+          await playbackEngine.updateTracks(res.updatedTracks);
+
+          setStepExecution(prev => ({
+            ...prev,
+            [stepId]: {
+              status: 'success',
+              progress: 100,
+              log: res.logSummary,
+              hasRollback: true
+            }
+          }));
+
+          addAuditLogs(res.detailedLogs.map((msg, i) => ({
+            id: `audit-specbalance-${Date.now()}-${i}`,
+            timestamp: Date.now(),
+            stageName: '1. Предобработка',
+            stepId: 'spectralBalancing',
+            status: 'success',
+            title: 'Спектральное выравнивание 1.2',
+            message: msg
+          })));
+
+          showToast(res.logSummary);
+          return;
+        }
+
+        if (stepId === 'speechLeveler') {
+          setStepExecution(prev => ({
+            ...prev,
+            [stepId]: {
+              ...prev[stepId],
+              progress: 30,
+              log: 'Компрессия динамического диапазона и гейтирование пауз...'
+            }
+          }));
+
+          const res = await AudioDspService.applySpeechLevelerAsync(
+            (project as any).projectPath || '',
+            project.tracks
+          );
+          project = { ...project, tracks: res.updatedTracks };
+          onUpdateProject({ tracks: res.updatedTracks });
+          playbackEngine.clearCache();
+          await playbackEngine.updateTracks(res.updatedTracks);
+
+          setStepExecution(prev => ({
+            ...prev,
+            [stepId]: {
+              status: 'success',
+              progress: 100,
+              log: res.logSummary,
+              hasRollback: true
+            }
+          }));
+
+          addAuditLogs(res.detailedLogs.map((msg, i) => ({
+            id: `audit-speechlevel-${Date.now()}-${i}`,
+            timestamp: Date.now(),
+            stageName: '1. Предобработка',
+            stepId: 'speechLeveler',
+            status: 'success',
+            title: 'Speech Leveler 1.3',
+            message: msg
+          })));
+
+          showToast(res.logSummary);
+          return;
+        }
+
+        if (stepId === 'vocalSpotCleaning') {
+          setStepExecution(prev => ({
+            ...prev,
+            [stepId]: {
+              ...prev[stepId],
+              progress: 30,
+              log: 'Точечное подавление деэссера, взрывных согласных и щелчков...'
+            }
+          }));
+
+          const res = await AudioDspService.applyVocalSpotCleaningAsync(
+            (project as any).projectPath || '',
+            project.tracks
+          );
+          project = { ...project, tracks: res.updatedTracks };
+          onUpdateProject({ tracks: res.updatedTracks });
+          playbackEngine.clearCache();
+          await playbackEngine.updateTracks(res.updatedTracks);
+
+          setStepExecution(prev => ({
+            ...prev,
+            [stepId]: {
+              status: 'success',
+              progress: 100,
+              log: res.logSummary,
+              hasRollback: true
+            }
+          }));
+
+          addAuditLogs(res.detailedLogs.map((msg, i) => ({
+            id: `audit-spotclean-${Date.now()}-${i}`,
+            timestamp: Date.now(),
+            stageName: '1. Предобработка',
+            stepId: 'vocalSpotCleaning',
+            status: 'success',
+            title: 'Точечная очистка 1.4',
+            message: msg
+          })));
+
+          showToast(res.logSummary);
+          return;
+        }
+
         if (stepId === 'normalization') {
           // Гарантируем наличие свежего анализа перед нормализацией и эквализацией
           const analysisRes = await AudioDspService.analyzeProjectVoiceTracksAsync(

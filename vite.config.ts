@@ -29,14 +29,16 @@ export default defineConfig(({mode}) => {
     build: {
       rollupOptions: {
         output: {
-          manualChunks(id) {
-            if (id.includes('node_modules')) {
-              return id.toString().split('node_modules/')[1].split('/')[0].toString();
-            }
-          }
-        }
+          manualChunks: {
+            'vendor-react': ['react', 'react-dom'],
+            'vendor-motion': ['framer-motion'],
+            'vendor-documents': ['pdfjs-dist', 'mammoth', 'epubjs'],
+            'vendor-media': ['wavesurfer.js', 'ass-compiler'],
+            'vendor-icons': ['lucide-react'],
+          },
+        },
       },
-      chunkSizeWarningLimit: 1000,
+      chunkSizeWarningLimit: 1500,
     },
   };
 });

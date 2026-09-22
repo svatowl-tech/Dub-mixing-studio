@@ -1,9 +1,16 @@
 use std::f32::consts::PI;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+use hound::{SampleFormat, WavSpec, WavWriter};
 use rayon::prelude::*;
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
 use serde::{Deserialize, Serialize};
+
+use crate::audio_buffer_manager::{load_audio_file_sync, read_audio_file_any_format};
+use crate::file_io::normalize_windows_path;
+use crate::logger::{log_debug, log_error, log_info};
 
 // ============================================================================
 // 1. КОНФИГУРАЦИОННЫЕ СТРУКТУРЫ РЭКА МАСТЕР-ШИНЫ ВОКАЛА (VOCAL BUS RACK)
@@ -954,10 +961,134 @@ impl VocalBusRack {
 }
 
 // ============================================================================
-// 5. ВЫСОКОУРОВНЕВЫЙ МНОГОПОТОЧНЫЙ ПАЙПЛАЙН ДЛЯ WAV-ФАЙЛОВ И БАТЧЕЙ (RAYON)
+// 5. ВЫСОКОУРОВНЕВЫЙ МНОГОПОТОЧНЫЙ ПАЙПЛАЙН ДЛЯ АУДИОФАЙЛОВ И БАТЧЕЙ (RAYON)
 // ============================================================================
 
-/// Обрабатывает WAV-файл через цепочку мастер-шины вокала
+/// Высокоточный sinc-ресэмплинг многоканального интерливед-аудио в целевую частоту дискретизации (rubato)
+pub fn resample_interleaved(
+    samples: &[f32],
+    channels: usize,
+    from_rate: u32,
+    to_rate: u32,
+) -> Result<Vec<f32>, String> {
+    if from_rate == to_rate || samples.is_empty() {
+        return Ok(samples.to_vec());
+    }
+    if channels == 0 {
+        return Err("Число каналов не может быть 0".to_string());
+    }
+
+    let num_frames = samples.len() / channels;
+    let mut channel_buffers: Vec<Vec<f32>> = vec![Vec::with_capacity(num_frames); channels];
+    for chunk in samples.chunks_exact(channels) {
+        for ch in 0..channels {
+            channel_buffers[ch].push(chunk[ch]);
+        }
+    }
+
+    let chunk_size = 1024;
+    let params = SincInterpolationParameters {
+        sinc_len: 128,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 128,
+        window: WindowFunction::BlackmanHarris2,
+    };
+
+    let mut resampler = SincFixedIn::<f32>::new(
+        to_rate as f64 / from_rate as f64,
+        2.0,
+        params,
+        chunk_size,
+        channels,
+    )
+    .map_err(|e| format!("Ошибка инициализации Rubato Resampler: {}", e))?;
+
+    let total_in_frames = channel_buffers[0].len();
+    let mut out_channels: Vec<Vec<f32>> = vec![Vec::new(); channels];
+    let mut offset = 0;
+
+    while offset < total_in_frames {
+        let current_chunk_size = chunk_size.min(total_in_frames - offset);
+        let mut in_chunk: Vec<Vec<f32>> = Vec::with_capacity(channels);
+        for ch in 0..channels {
+            let mut buf = vec![0.0_f32; chunk_size];
+            for i in 0..current_chunk_size {
+                buf[i] = channel_buffers[ch][offset + i];
+            }
+            in_chunk.push(buf);
+        }
+
+        let out_chunk = resampler
+            .process(&in_chunk, None)
+            .map_err(|e| format!("Ошибка ресэмплинга: {}", e))?;
+
+        for ch in 0..channels {
+            out_channels[ch].extend_from_slice(&out_chunk[ch]);
+        }
+        offset += current_chunk_size;
+    }
+
+    let out_frames = out_channels[0].len();
+    let mut interleaved = Vec::with_capacity(out_frames * channels);
+    for f in 0..out_frames {
+        for ch in 0..channels {
+            interleaved.push(out_channels[ch][f]);
+        }
+    }
+
+    Ok(interleaved)
+}
+
+/// Загружает аудио любого формата (WAV, FLAC, MP3, OGG, AAC, M4A) в плоский интерливед f32 буфер
+pub fn load_audio_any_format(input_path: &Path) -> Result<(Vec<f32>, u32, usize), String> {
+    if !input_path.exists() {
+        return Err(format!("Файл не найден: {}", input_path.display()));
+    }
+
+    // Читаем через универсальную функцию read_audio_file_any_format (WAV mmap / Symphonia)
+    match read_audio_file_any_format(input_path) {
+        Ok((samples, sample_rate, channels)) if !samples.is_empty() => {
+            return Ok((samples, sample_rate, channels as usize));
+        }
+        Err(err) => {
+            log_debug(&format!(
+                "[VocalBus] read_audio_file_any_format не смог открыть {}: {}, пробуем waveform_engine fallback...",
+                input_path.display(), err
+            ));
+        }
+        _ => {}
+    }
+
+    let norm_path = normalize_windows_path(&input_path.to_string_lossy());
+
+    // Фолбэк на декодер waveform_engine (Symphonia + FFmpeg pipe)
+    match crate::waveform_engine::decode_audio_file_sync(&norm_path) {
+        Ok((samples, sample_rate)) => {
+            if !samples.is_empty() {
+                log_info(&format!(
+                    "[VocalBus] Успешно загружен аудиофайл через fallback декодер: {}",
+                    norm_path
+                ));
+                return Ok((samples, sample_rate, 1));
+            }
+        }
+        Err(err) => {
+            log_error(&format!(
+                "[VocalBus] Все методы декодирования провалены для {}: {}",
+                norm_path, err
+            ));
+        }
+    }
+
+    Err(format!(
+        "Не удалось декодировать аудиофайл {}: формат не поддерживается или файл поврежден",
+        input_path.display()
+    ))
+}
+
+/// Обрабатывает аудиофайл любого формата (WAV, FLAC, MP3, OGG, AAC, M4A) через цепочку мастер-шины вокала
+/// и сохраняет результат в стандартный Broadcast WAV (24-bit / 48kHz)
 pub fn process_vocal_bus_wav(
     input_path: &Path,
     output_path: &Path,
@@ -965,40 +1096,38 @@ pub fn process_vocal_bus_wav(
 ) -> Result<VocalBusReport, String> {
     let start_time = Instant::now();
 
-    if !input_path.exists() {
-        return Err(format!("Файл не найден: {}", input_path.display()));
-    }
+    let (raw_samples, in_sample_rate, channels) = load_audio_any_format(input_path)?;
 
-    let mut reader = WavReader::open(input_path)
-        .map_err(|e| format!("Ошибка открытия WAV {}: {}", input_path.display(), e))?;
-
-    let spec = reader.spec();
-    let sample_rate = spec.sample_rate;
-    let channels = spec.channels as usize;
-
-    if channels == 0 || sample_rate == 0 {
+    if channels == 0 || in_sample_rate == 0 {
         return Err("Недопустимые параметры аудиопотока".to_string());
     }
 
-    // Чтение всех сэмплов в нормализованный float f32
-    let raw_samples: Vec<f32> = match spec.sample_format {
-        SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap_or(0.0)).collect(),
-        SampleFormat::Int => match spec.bits_per_sample {
-            16 => reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / 32768.0).collect(),
-            24 => reader.samples::<i32>().map(|s| (s.unwrap_or(0) >> 8) as f32 / 8388608.0).collect(),
-            32 => reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 2147483648.0).collect(),
-            _ => reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / 32768.0).collect(),
-        },
-    };
-
-    let total_samples = raw_samples.len();
-    if total_samples == 0 {
+    if raw_samples.is_empty() {
         return Err("Аудиофайл пуст".to_string());
     }
 
+    // Приведение к вещательному стандарту Broadcast WAV: 48 kHz
+    let target_sample_rate: u32 = 48000;
+    let (mut processed_samples, actual_sample_rate) = if in_sample_rate != target_sample_rate {
+        match resample_interleaved(&raw_samples, channels, in_sample_rate, target_sample_rate) {
+            Ok(resampled) => (resampled, target_sample_rate),
+            Err(err) => {
+                log_error(&format!(
+                    "[VocalBus] Ошибка ресэмплинга ({} -> {}): {}, продолжаем с исходной частотой {}",
+                    in_sample_rate, target_sample_rate, err, in_sample_rate
+                ));
+                (raw_samples, in_sample_rate)
+            }
+        }
+    } else {
+        (raw_samples, in_sample_rate)
+    };
+
+    let total_samples = processed_samples.len();
+
     // Измерение исходного пика
     let mut initial_peak: f32 = 0.0;
-    for &s in &raw_samples {
+    for &s in &processed_samples {
         let abs = s.abs();
         if abs > initial_peak {
             initial_peak = abs;
@@ -1006,10 +1135,8 @@ pub fn process_vocal_bus_wav(
     }
     let initial_peak_db = 20.0 * initial_peak.max(1e-6).log10();
 
-    let mut processed_samples = raw_samples;
-
-    // Инициализация DSP-рэка
-    let mut rack = VocalBusRack::new(sample_rate as f32, channels, config.clone());
+    // Инициализация DSP-рэка на рабочей частоте дискретизации
+    let mut rack = VocalBusRack::new(actual_sample_rate as f32, channels, config.clone());
 
     // Горячий цикл обработки интерливед-данных
     rack.process_interleaved(&mut processed_samples, channels);
@@ -1038,14 +1165,14 @@ pub fn process_vocal_bus_wav(
         total_clamped += ch.limiter_clamped_count;
     }
 
-    // Сохранение результирующего WAV-файла
+    // Сохранение результирующего стандартного Broadcast WAV (24-bit / 48kHz)
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
     let out_spec = WavSpec {
-        channels: spec.channels,
-        sample_rate: spec.sample_rate,
+        channels: channels as u16,
+        sample_rate: actual_sample_rate,
         bits_per_sample: 24,
         sample_format: SampleFormat::Int,
     };
@@ -1061,14 +1188,14 @@ pub fn process_vocal_bus_wav(
 
     writer.finalize().map_err(|e| e.to_string())?;
 
-    let duration_sec = total_samples as f64 / (sample_rate as f64 * channels as f64);
+    let duration_sec = total_samples as f64 / (actual_sample_rate as f64 * channels as f64);
     let processing_time_ms = start_time.elapsed().as_millis() as u64;
 
     Ok(VocalBusReport {
         input_path: input_path.to_string_lossy().to_string(),
         output_path: output_path.to_string_lossy().to_string(),
-        sample_rate,
-        channels: spec.channels,
+        sample_rate: actual_sample_rate,
+        channels: channels as u16,
         total_samples,
         duration_sec,
         initial_peak_db,

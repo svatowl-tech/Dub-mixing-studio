@@ -101,10 +101,6 @@ pub async fn start_backstage_recording(
     // 1. Сборка аргументов FFmpeg в зависимости от платформы
     #[cfg(windows)]
     let mut cmd = {
-        use std::os::windows::io::AsRawHandle;
-        use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::System::Threading::{SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS};
-
         let log_path = std::env::temp_dir().join(format!("backstage_ffmpeg_{}.log", epoch_ms));
         let stderr_file = fs::File::create(&log_path)
             .unwrap_or_else(|_| fs::File::create("nul").unwrap());

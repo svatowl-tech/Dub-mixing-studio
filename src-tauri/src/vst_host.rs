@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{c_void, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -8,18 +8,13 @@ use walkdir::WalkDir;
 use rayon::prelude::*;
 use libloading::Library;
 
-// Native Windows API imports for HWND embedding
-#[cfg(target_os = "windows")]
-use windows::Win32::Foundation::HWND;
-#[cfg(target_os = "windows")]
-use windows::Win32::UI::WindowsAndMessaging::{SetParent, ShowWindow, SW_SHOW};
-
 // ============================================================================
 // Steinberg VST3 API C/COM Binary Layout Definitions
 // ============================================================================
 
 pub type TResult = i32;
 pub const K_RESULT_OK: TResult = 0;
+#[allow(dead_code)]
 pub const K_RESULT_FALSE: TResult = 1;
 
 #[repr(C)]
@@ -40,14 +35,18 @@ impl TGuid {
 }
 
 // Steinberg VST3 Interface IIDs
+#[allow(dead_code)]
 pub const IUNKNOWN_IID: TGuid = TGuid::new(0x00000000, 0x00000000, 0xC0000000, 0x00000046);
+#[allow(dead_code)]
 pub const IPLUGIN_FACTORY_IID: TGuid = TGuid::new(0x4A42444F, 0x4E412F41, 0x56535420, 0x46616374);
 pub const ICOMPONENT_IID: TGuid = TGuid::new(0x7B81E29F, 0xCEE14915, 0x8B2129A8, 0xE982D1B2);
 pub const IAUDIO_PROCESSOR_IID: TGuid = TGuid::new(0x42043F99, 0xB72C4147, 0xAB932828, 0x47A78716);
 pub const IEDIT_CONTROLLER_IID: TGuid = TGuid::new(0xDCD764D0, 0xF5004A32, 0xA9937E00, 0x29CD07D7);
+#[allow(dead_code)]
 pub const IPLUG_VIEW_IID: TGuid = TGuid::new(0x5BEE8B29, 0xCA9C46CE, 0x82A1C6A0, 0xA0A34991);
 
 // Standard Category CID for Audio Effect Plugins
+#[allow(dead_code)]
 pub const K_AUDIO_EFFECT_CLASS: &str = "Audio Module Class";
 
 #[repr(C)]
@@ -211,6 +210,7 @@ pub struct PluginMetadata {
 }
 
 pub struct Vst3Instance {
+    #[allow(dead_code)]
     pub library: Arc<Library>,
     pub factory: *mut c_void,
     pub component: *mut c_void,
@@ -218,6 +218,7 @@ pub struct Vst3Instance {
     pub controller: Option<*mut c_void>,
     pub plug_view: Option<*mut c_void>,
     pub sample_rate: f64,
+    #[allow(dead_code)]
     pub block_size: usize,
 }
 

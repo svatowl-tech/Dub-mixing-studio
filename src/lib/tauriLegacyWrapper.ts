@@ -393,7 +393,9 @@ export const tauriAPI = {
   // --- AUDIO PEAKS AND SAVING ---
   extractAudioPeaks: async (videoPath: string, projectPath: string): Promise<BridgeResponse<{ filePath: string, peaks: Float32Array, duration: number }>> => {
     if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
-    const wavPath = `${projectPath}/original_audio.wav`.replace(/\\/g, '/');
+    const takesWav = (projectPath.endsWith('/takes') || projectPath.endsWith('\\takes'))
+      ? `${projectPath}/original_audio.wav`.replace(/\\/g, '/')
+      : `${projectPath}/takes/original_audio.wav`.replace(/\\/g, '/');
     
     try {
       const response = await invoke<number[] | Uint8Array | ArrayBuffer>('extract_audio_peaks_bin', {
@@ -403,10 +405,15 @@ export const tauriAPI = {
       const peaks = bufferToFloat32Array(response);
       const duration = peaks.length / 50.0;
       
-      return { success: true, data: { filePath: wavPath, peaks, duration } };
+      return { success: true, data: { filePath: takesWav, peaks, duration } };
     } catch(err) {
       console.warn("extract_audio_peaks_bin failed, trying direct peak generation fallback:", err);
       try {
+        // Guarantee original_audio.wav is physically extracted to takes/
+        await invoke('ensure_original_audio_extracted', { projectPath, videoPath }).catch(e => {
+          console.warn("ensure_original_audio_extracted fallback warning:", e);
+        });
+
         const info = await invoke<any>('get_file_info', { path: videoPath });
         const duration = info?.duration || 0;
         const points = Math.max(100, Math.floor((duration || 30) * 50));
@@ -414,7 +421,7 @@ export const tauriAPI = {
         const peaks = new Float32Array(rawPeaks);
         return {
           success: true,
-          data: { filePath: wavPath, peaks, duration: duration || (peaks.length / 50.0) }
+          data: { filePath: takesWav, peaks, duration: duration || (peaks.length / 50.0) }
         };
       } catch (directErr) {
         console.error("Direct waveform extraction failed:", directErr);
@@ -423,6 +430,16 @@ export const tauriAPI = {
           error: `Ошибка извлечения формы волны: ${String(directErr || err)}`
         };
       }
+    }
+  },
+
+  ensureOriginalAudio: async (projectPath: string, videoPath: string): Promise<BridgeResponse<string>> => {
+    if (!IS_TAURI) return { success: false, error: 'Not in Tauri' };
+    try {
+      const filePath = await invoke<string>('ensure_original_audio_extracted', { projectPath, videoPath });
+      return { success: true, data: filePath };
+    } catch(err) {
+      return { success: false, error: String(err) };
     }
   },
 

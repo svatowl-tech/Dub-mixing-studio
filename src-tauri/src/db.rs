@@ -22,7 +22,7 @@ use sqlx::{
 use tauri::State;
 use tokio::sync::Mutex;
 
-use crate::logger::{log_debug, log_error, log_info};
+use crate::logger::{log_debug, log_info};
 
 // ============================================================================
 // 1. APPLICATION STATE

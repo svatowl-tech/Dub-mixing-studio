@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
-use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+use hound::{SampleFormat, WavSpec, WavWriter};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use crate::audio_buffer_manager::read_audio_file_any_format;
 
 /// Конфигурация выравнивателя громкости речи (Speech Vocal Leveler / AGC)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,52 +244,32 @@ pub fn process_channel(
     (output_samples, max_boost_seen_db, max_cut_seen_db.abs(), speech_ratio)
 }
 
-/// Чтение сэмплов из WAV файла
+/// Чтение сэмплов из аудиофайла любого формата (WAV, FLAC, MP3, OGG, AAC, M4A)
 pub fn read_wav(path: &Path) -> Result<(Vec<Vec<f32>>, WavSpec), String> {
-    let (wav_path, is_temp) = crate::file_io::ensure_valid_wav_path(path)?;
-    let res = (|| -> Result<(Vec<Vec<f32>>, WavSpec), String> {
-        let mut reader = WavReader::open(&wav_path)
-            .map_err(|e| format!("Не удалось открыть WAV файл {}: {}", wav_path.display(), e))?;
-        let spec = reader.spec();
-
-        let channels = spec.channels as usize;
-        let mut channel_buffers: Vec<Vec<f32>> = vec![Vec::new(); channels];
-
-        match spec.sample_format {
-            SampleFormat::Float => {
-                let mut ch = 0;
-                for s in reader.samples::<f32>() {
-                    channel_buffers[ch].push(s.unwrap_or(0.0));
-                    ch = (ch + 1) % channels;
-                }
-            }
-            SampleFormat::Int => {
-                let scale = match spec.bits_per_sample {
-                    16 => 32768.0_f32,
-                    24 => 8388608.0_f32,
-                    32 => 2147483648.0_f32,
-                    8  => 128.0_f32,
-                    b => return Err(format!("Неподдерживаемая разрядность сэмпла: {} бит", b)),
-                };
-                let mut ch = 0;
-                for s in reader.samples::<i32>() {
-                    channel_buffers[ch].push(s.unwrap_or(0) as f32 / scale);
-                    ch = (ch + 1) % channels;
-                }
-            }
-        }
-
-        Ok((channel_buffers, spec))
-    })();
-
-    if is_temp {
-        let _ = std::fs::remove_file(&wav_path);
+    let (interleaved_samples, sample_rate, channels_u16) = read_audio_file_any_format(path)?;
+    let channels = channels_u16 as usize;
+    if channels == 0 || sample_rate == 0 {
+        return Err("Недопустимый аудиофайл: 0 каналов или 0 sample rate".to_string());
     }
 
-    res
+    let total_frames = interleaved_samples.len() / channels;
+    let mut channel_buffers: Vec<Vec<f32>> = vec![Vec::with_capacity(total_frames); channels];
+    for (i, &s) in interleaved_samples.iter().enumerate() {
+        let ch = i % channels;
+        channel_buffers[ch].push(s);
+    }
+
+    let spec = WavSpec {
+        channels: channels_u16,
+        sample_rate,
+        bits_per_sample: 24,
+        sample_format: SampleFormat::Int,
+    };
+
+    Ok((channel_buffers, spec))
 }
 
-/// Запись аудиоданных в файл формата 32-bit Float WAV
+/// Запись аудиоданных в стандартный Broadcast WAV (24-bit PCM)
 pub fn write_wav(
     output_path: &Path,
     channels: &[Vec<f32>],
@@ -300,13 +281,16 @@ pub fn write_wav(
     }
 
     let num_channels = channels.len();
+    if num_channels == 0 {
+        return Err("Нет аудиоканалов для записи".to_string());
+    }
     let num_samples = channels[0].len();
 
     let spec = WavSpec {
         channels: num_channels as u16,
         sample_rate,
-        bits_per_sample: 32,
-        sample_format: SampleFormat::Float,
+        bits_per_sample: 24,
+        sample_format: SampleFormat::Int,
     };
 
     let mut writer = WavWriter::create(output_path, spec)
@@ -314,7 +298,9 @@ pub fn write_wav(
 
     for i in 0..num_samples {
         for ch in 0..num_channels {
-            writer.write_sample(channels[ch][i])
+            let clamped = channels[ch][i].clamp(-1.0, 1.0);
+            let sample_i24 = (clamped * 8388607.0).round() as i32;
+            writer.write_sample(sample_i24)
                 .map_err(|e| format!("Ошибка записи сэмпла в WAV: {}", e))?;
         }
     }

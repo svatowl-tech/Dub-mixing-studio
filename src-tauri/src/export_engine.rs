@@ -10,10 +10,10 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
-use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+use hound::{SampleFormat, WavSpec, WavWriter};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use zip::write::FileOptions;
 use zip::ZipWriter;
 
-use crate::audio_buffer_manager::{load_audio_file_sync, CachedTrackBuffer};
+use crate::audio_buffer_manager::{load_audio_file_sync, read_audio_file_any_format, CachedTrackBuffer};
 use crate::db::AppState;
 use crate::file_io::{find_ffmpeg_path, normalize_windows_path};
 use crate::logger::{log_debug, log_error, log_info};
@@ -74,6 +74,7 @@ pub async fn cancel_export() -> Result<bool, String> {
 // ----------------------------------------------------------------------------
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ РАЗРЕШЕНИЯ ПУТЕЙ И ДИРЕКТОРИЙ
 // ----------------------------------------------------------------------------
+#[allow(dead_code)]
 pub fn get_spacious_temp_dir(project_path_opt: Option<&str>, suffix: &str) -> PathBuf {
     if let Some(path_str) = project_path_opt {
         let norm = normalize_windows_path(path_str);
@@ -151,6 +152,7 @@ fn default_gain() -> f64 {
     1.0
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportSegmentData {
@@ -221,6 +223,7 @@ pub struct PreparedSegment {
     pub right_pan_gain: f32,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct PreparedTrack {
     pub id: String,
@@ -1236,4 +1239,268 @@ pub async fn export_backstage_video(
     }
 
     Ok(output_path)
+}
+
+// ============================================================================
+// ПРЯМОЕ СВЕДЕНИЕ ЗАКАДРОВОГО ОЗВУЧИВАНИЯ (VOICEOVER MIX) БЕЗ ДАККИНГА
+// ============================================================================
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceoverMixRequest {
+    pub project_path: Option<String>,
+    pub original_audio_path: Option<String>,
+    pub clean_vo_path: Option<String>,
+    pub output_path: String,
+    pub original_track_volume: Option<f32>, // fader: default 0.20 (-14 dB)
+    pub vocal_bus_volume: Option<f32>,      // fader: default 1.0 (0 dB)
+    pub project_json: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceoverMixResult {
+    pub success: bool,
+    pub output_path: String,
+    pub duration_seconds: f64,
+    pub max_peak_db: f32,
+    pub original_volume_applied: f32,
+    pub vocal_volume_applied: f32,
+    pub message: String,
+}
+
+/// Прямое сведение закадрового перевода: наложение голосов на непрерывную фоновую дорожку оригинала
+/// без сайдчейн-даккинга с True-Peak лимитером (-1.0 dBTP).
+#[tauri::command]
+pub async fn render_voiceover_mix(
+    app_handle: AppHandle,
+    request: VoiceoverMixRequest,
+) -> Result<VoiceoverMixResult, String> {
+    log_info(&format!(
+        "[VoiceoverMix] Старт прямого сведения. Out: '{}', OrigVol: {:?}, VoVol: {:?}",
+        request.output_path, request.original_track_volume, request.vocal_bus_volume
+    ));
+
+    let _ = app_handle.emit("export-progress", 5.0);
+
+    let output_norm = normalize_windows_path(&request.output_path);
+
+    // 1. Поиск и чтение дорожки оригинала
+    let orig_path = if let Some(ref p) = request.original_audio_path {
+        let norm = normalize_windows_path(p);
+        if Path::new(&norm).exists() {
+            Some(norm)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let resolved_orig_path = orig_path.or_else(|| {
+        if let Some(ref proj_path) = request.project_path {
+            let p1 = Path::new(proj_path).join("takes").join("original_audio.wav");
+            if p1.exists() {
+                return Some(p1.to_string_lossy().to_string());
+            }
+            let p2 = Path::new(proj_path).join("original_audio.wav");
+            if p2.exists() {
+                return Some(p2.to_string_lossy().to_string());
+            }
+        }
+        None
+    });
+
+    let (orig_pcm, orig_channels) = if let Some(ref path) = resolved_orig_path {
+        log_info(&format!("[VoiceoverMix] Загрузка оригинального аудио: {}", path));
+        match read_audio_file_any_format(Path::new(path)) {
+            Ok((samples, _sr, ch)) => (samples, ch as usize),
+            Err(e) => {
+                log_error(&format!("[VoiceoverMix] Ошибка чтения оригинального аудио: {}", e));
+                (Vec::new(), 2)
+            }
+        }
+    } else {
+        log_info("[VoiceoverMix] Оригинальная дорожка не найдена (будет использован чистый голос).");
+        (Vec::new(), 2)
+    };
+
+    // Приведение дорожки оригинала к стерео (2 канала)
+    let orig_stereo: Vec<f32> = if orig_pcm.is_empty() {
+        Vec::new()
+    } else if orig_channels == 1 {
+        let mut st = Vec::with_capacity(orig_pcm.len() * 2);
+        for &s in &orig_pcm {
+            st.push(s);
+            st.push(s);
+        }
+        st
+    } else if orig_channels >= 2 {
+        let frames = orig_pcm.len() / orig_channels;
+        let mut st = Vec::with_capacity(frames * 2);
+        for f in 0..frames {
+            st.push(orig_pcm[f * orig_channels]);
+            st.push(orig_pcm[f * orig_channels + 1]);
+        }
+        st
+    } else {
+        orig_pcm
+    };
+
+    let _ = app_handle.emit("export-progress", 30.0);
+
+    // 2. Чтение или рендеринг дорожки Clean_VO
+    let mut vo_stereo: Vec<f32> = Vec::new();
+
+    if let Some(ref clean_p) = request.clean_vo_path {
+        let norm = normalize_windows_path(clean_p);
+        if Path::new(&norm).exists() {
+            log_info(&format!("[VoiceoverMix] Загрузка Clean VO: {}", norm));
+            if let Ok((samples, _sr, ch)) = read_audio_file_any_format(Path::new(&norm)) {
+                if ch == 1 {
+                    vo_stereo.reserve(samples.len() * 2);
+                    for &s in &samples {
+                        vo_stereo.push(s);
+                        vo_stereo.push(s);
+                    }
+                } else if ch >= 2 {
+                    let frames = samples.len() / ch as usize;
+                    vo_stereo.reserve(frames * 2);
+                    for f in 0..frames {
+                        vo_stereo.push(samples[f * ch as usize]);
+                        vo_stereo.push(samples[f * ch as usize + 1]);
+                    }
+                }
+            }
+        }
+    }
+
+    // Если Clean_VO файл не был загружен напрямую, рендерим из данных проекта
+    if vo_stereo.is_empty() {
+        if let Some(ref pjson) = request.project_json {
+            if let Ok(proj_data) = serde_json::from_str::<ExportProjectData>(pjson) {
+                log_info("[VoiceoverMix] Рендеринг Clean VO из треков проекта...");
+                let dub_tracks: Vec<ExportTrack> = proj_data
+                    .tracks
+                    .into_iter()
+                    .filter(|t| {
+                        let n = t.name.to_lowercase();
+                        !n.contains("оригинал") && !n.contains("original") && !n.contains("reference")
+                    })
+                    .collect();
+
+                let (dub_segments, dub_dur) = prepare_project_tracks(
+                    dub_tracks,
+                    proj_data.project_path.as_deref(),
+                    proj_data.audio_offset_ms.unwrap_or(0),
+                );
+
+                let total_frames = (dub_dur * EXPORT_SAMPLE_RATE as f64).ceil() as usize;
+                let mut rendered = vec![0.0f32; total_frames * 2];
+                let num_blocks = (total_frames + BLOCK_FRAMES - 1) / BLOCK_FRAMES;
+
+                for b in 0..num_blocks {
+                    let start_f = b * BLOCK_FRAMES;
+                    let count_f = BLOCK_FRAMES.min(total_frames - start_f);
+                    let mut block = vec![0.0f32; count_f * 2];
+                    render_segments_into_block(&dub_segments, start_f, count_f, &mut block);
+                    let out_idx = start_f * 2;
+                    rendered[out_idx..out_idx + count_f * 2].copy_from_slice(&block);
+                }
+                vo_stereo = rendered;
+            }
+        }
+    }
+
+    let _ = app_handle.emit("export-progress", 60.0);
+
+    // 3. Выравнивание буферов по длине и прямое суммирование с True-Peak лимитером
+    let orig_frames = orig_stereo.len() / 2;
+    let vo_frames = vo_stereo.len() / 2;
+    let total_frames = orig_frames.max(vo_frames);
+
+    if total_frames == 0 {
+        return Err("Нет аудиоданных для сведения (пустые дорожки)".to_string());
+    }
+
+    let orig_gain = request.original_track_volume.unwrap_or(0.20);
+    let vo_gain = request.vocal_bus_volume.unwrap_or(1.0);
+
+    // Потолок True-Peak -1.0 dBTP (~0.89125)
+    let ceiling = 10.0f32.powf(-1.0 / 20.0);
+    let threshold = 0.75 * ceiling;
+    let span = ceiling - threshold;
+
+    let mut master_pcm = Vec::with_capacity(total_frames * 2);
+    let mut max_abs_peak = 0.0f32;
+
+    for f in 0..total_frames {
+        let idx = f * 2;
+        let vo_l = vo_stereo.get(idx).copied().unwrap_or(0.0) * vo_gain;
+        let vo_r = vo_stereo.get(idx + 1).copied().unwrap_or(0.0) * vo_gain;
+        let orig_l = orig_stereo.get(idx).copied().unwrap_or(0.0) * orig_gain;
+        let orig_r = orig_stereo.get(idx + 1).copied().unwrap_or(0.0) * orig_gain;
+
+        let sum_l = vo_l + orig_l;
+        let sum_r = vo_r + orig_r;
+
+        for &sum_sample in &[sum_l, sum_r] {
+            let abs_s = sum_sample.abs();
+            if abs_s > max_abs_peak {
+                max_abs_peak = abs_s;
+            }
+
+            let limited = if abs_s <= threshold {
+                sum_sample
+            } else {
+                let sign = sum_sample.signum();
+                let excess = abs_s - threshold;
+                let compressed = threshold + span * (excess / span).tanh();
+                sign * compressed.min(ceiling)
+            };
+            master_pcm.push(limited);
+        }
+    }
+
+    let _ = app_handle.emit("export-progress", 85.0);
+
+    // 4. Запись в 24-bit PCM Broadcast WAV (48 kHz Stereo)
+    if let Some(parent) = Path::new(&output_norm).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let spec = create_wav_spec("24");
+    let mut writer = WavWriter::create(&output_norm, spec)
+        .map_err(|e| format!("Не удалось создать выходной мастер-файл: {}", e))?;
+    write_pcm_to_wav(&mut writer, &master_pcm, "24")?;
+    writer.finalize().map_err(|e| format!("Ошибка финализации WAV: {}", e))?;
+
+    let dur_sec = total_frames as f64 / EXPORT_SAMPLE_RATE as f64;
+    let peak_db = if max_abs_peak > 0.0 {
+        20.0 * max_abs_peak.log10()
+    } else {
+        -96.0
+    };
+
+    let _ = app_handle.emit("export-progress", 100.0);
+
+    log_info(&format!(
+        "[VoiceoverMix] Сведение завершено успешно. Файл: '{}', Длительность: {:.2}s, True-Peak: {:.2} dBTP",
+        output_norm, dur_sec, peak_db
+    ));
+
+    Ok(VoiceoverMixResult {
+        success: true,
+        output_path: output_norm,
+        duration_seconds: dur_sec,
+        max_peak_db: peak_db,
+        original_volume_applied: orig_gain,
+        vocal_volume_applied: vo_gain,
+        message: format!(
+            "Закадровый микс успешно сформирован: {:.2} сек. Баланс: Оригинал {:.0}%, Голоса {:.0}%.",
+            dur_sec,
+            orig_gain * 100.0,
+            vo_gain * 100.0
+        ),
+    })
 }

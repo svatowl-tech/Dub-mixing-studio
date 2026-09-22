@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
-use hound::{WavReader, WavWriter, SampleFormat};
+use hound::{WavWriter, WavSpec, SampleFormat};
+use crate::audio_buffer_manager::read_audio_file_any_format;
 use crate::track_analysis::{TrackAnalysisReport, WaveformClassification};
 use crate::logger::log_info;
 
@@ -86,24 +87,8 @@ fn process_single_clip_intelligently(
         return Err(format!("Clip file not found: {}", norm_path));
     }
 
-    let mut reader = WavReader::open(p).map_err(|e| e.to_string())?;
-    let spec = reader.spec();
-    let sample_rate = spec.sample_rate;
-    let channels = spec.channels;
-
-    let mut samples: Vec<f32> = match spec.sample_format {
-        SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap_or(0.0)).collect(),
-        SampleFormat::Int => {
-            let bits = spec.bits_per_sample;
-            if bits <= 16 {
-                reader.samples::<i16>().map(|s| s.unwrap_or(0) as f32 / 32768.0).collect()
-            } else if bits <= 24 {
-                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / 8388608.0).collect()
-            } else {
-                reader.samples::<i32>().map(|s| s.unwrap_or(0) as f32 / i32::MAX as f32).collect()
-            }
-        }
-    };
+    let (mut samples, sample_rate, channels_u16) = read_audio_file_any_format(p)?;
+    let channels = channels_u16;
 
     let speech_target_db = -24.0f32;
     let quiet_target_db = -35.0f32;
@@ -185,9 +170,18 @@ fn process_single_clip_intelligently(
     let file_stem = p.file_stem().unwrap().to_str().unwrap();
     let output_path = output_dir.join(format!("{}_intnorm_{}.wav", file_stem, timestamp));
     
-    let mut writer = WavWriter::create(&output_path, spec).map_err(|e| e.to_string())?;
+    let out_spec = WavSpec {
+        channels: channels_u16,
+        sample_rate,
+        bits_per_sample: 24,
+        sample_format: SampleFormat::Int,
+    };
+
+    let mut writer = WavWriter::create(&output_path, out_spec).map_err(|e| e.to_string())?;
     for &s in &samples {
-        writer.write_sample(s).map_err(|e| e.to_string())?;
+        let clamped = s.clamp(-1.0, 1.0);
+        let sample_i24 = (clamped * 8388607.0).round() as i32;
+        writer.write_sample(sample_i24).map_err(|e| e.to_string())?;
     }
     writer.finalize().map_err(|e| e.to_string())?;
 

@@ -66,6 +66,7 @@ pub struct AudioEffectConfig {
     pub dereverb_model: Option<String>,
     pub dereverb_strength: Option<f64>,
     // Separation specific
+    #[allow(dead_code)]
     #[serde(rename = "separationModel")]
     pub separation_model: Option<String>,
 }

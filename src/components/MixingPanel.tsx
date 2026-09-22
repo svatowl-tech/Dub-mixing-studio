@@ -769,6 +769,63 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
           message: msg
         })));
         showToast(res.logSummary);
+      } else if (effectType === 'spectralBalancing') {
+        const res = await AudioDspService.applySpectralBalancingAsync(
+          (project as any).projectPath || '',
+          project.tracks,
+          selectedSegment?.trackId
+        );
+        onUpdateProject({ tracks: res.updatedTracks });
+        playbackEngine.clearCache();
+        await playbackEngine.updateTracks(res.updatedTracks);
+        addAuditLogs(res.detailedLogs.map((msg, i) => ({
+          id: `audit-specbal-${Date.now()}-${i}`,
+          timestamp: Date.now(),
+          stageName: '1. Предобработка',
+          stepId: 'spectralBalancing',
+          status: 'success',
+          title: 'Спектральное выравнивание 1.2',
+          message: msg
+        })));
+        showToast(res.logSummary);
+      } else if (effectType === 'speechLeveler') {
+        const res = await AudioDspService.applySpeechLevelerAsync(
+          (project as any).projectPath || '',
+          project.tracks,
+          selectedSegment?.trackId
+        );
+        onUpdateProject({ tracks: res.updatedTracks });
+        playbackEngine.clearCache();
+        await playbackEngine.updateTracks(res.updatedTracks);
+        addAuditLogs(res.detailedLogs.map((msg, i) => ({
+          id: `audit-speechlevel-${Date.now()}-${i}`,
+          timestamp: Date.now(),
+          stageName: '1. Предобработка',
+          stepId: 'speechLeveler',
+          status: 'success',
+          title: 'Speech Leveler 1.3',
+          message: msg
+        })));
+        showToast(res.logSummary);
+      } else if (effectType === 'vocalSpotCleaning') {
+        const res = await AudioDspService.applyVocalSpotCleaningAsync(
+          (project as any).projectPath || '',
+          project.tracks,
+          selectedSegment?.trackId
+        );
+        onUpdateProject({ tracks: res.updatedTracks });
+        playbackEngine.clearCache();
+        await playbackEngine.updateTracks(res.updatedTracks);
+        addAuditLogs(res.detailedLogs.map((msg, i) => ({
+          id: `audit-spotclean-${Date.now()}-${i}`,
+          timestamp: Date.now(),
+          stageName: '1. Предобработка',
+          stepId: 'vocalSpotCleaning',
+          status: 'success',
+          title: 'Точечная очистка 1.4',
+          message: msg
+        })));
+        showToast(res.logSummary);
       } else if (effectType === 'normalization') {
         const targetLufs = activePreset.phase1.normalization.targetLufs ?? -16.0;
         let lastNativeNorm: NormalizationStats | null = null;
@@ -3947,9 +4004,277 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                             {renderProcessingActions('peakAdjustment', 'Применить подстройку по пику', 'bg-cyan-600 hover:bg-cyan-500')}
                           </div>
                         );
-                      }
+                      } else if (stepKey === "spectralBalancing") {
+                        stepName = "1.2 Спектральное выравнивание (Авто-EQ)";
+                        stepDesc = "Автоматическая коррекция спектра и усреднение АЧХ по дикторскому стандарту";
+                        stepIcon = <Wand2 className="w-3.5 h-3.5 text-indigo-400" />;
+                        stepBypass = activePreset.phase1.spectralBalancing?.bypass ?? false;
+                        handleBypassToggle = () => updatePhase1({
+                          spectralBalancing: {
+                            ...activePreset.phase1.spectralBalancing,
+                            enabled: !(activePreset.phase1.spectralBalancing?.enabled ?? true),
+                            bypass: !stepBypass
+                          }
+                        });
+                        stepElement = (
+                          <div className="space-y-4 animate-fade-in text-xs">
+                            <div className="text-[10px] text-zinc-400 leading-normal bg-zinc-950/40 p-2.5 rounded-lg border border-white/5 space-y-1">
+                              <p>
+                                <strong className="text-indigo-400">Модуль 1.2: Спектральное выравнивание</strong> анализирует частотный спектр актерских дорожек и приводит их к эталонной кривой:
+                              </p>
+                              <p>
+                                Срезает низкочастотный гул (HPF 60Hz), убирает ультразвуковой мусор (LPF 20kHz) и мягко сглаживает резкие формантные резонансы без разрушения естественного тембра.
+                              </p>
+                            </div>
 
-                      if (stepKey === "normalization") {
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="p-2.5 bg-zinc-950/20 rounded-lg border border-white/5 space-y-1.5">
+                                <div className="flex justify-between items-center text-[10px]">
+                                  <span className="text-zinc-400 font-medium">HPF Срез (НЧ):</span>
+                                  <span className="text-indigo-400 font-bold">{activePreset.phase1.spectralBalancing?.hpfCutoff ?? 60} Гц</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min="40"
+                                  max="120"
+                                  step="5"
+                                  value={activePreset.phase1.spectralBalancing?.hpfCutoff ?? 60}
+                                  onChange={(e) => updatePhase1({
+                                    spectralBalancing: {
+                                      ...activePreset.phase1.spectralBalancing,
+                                      enabled: true,
+                                      hpfCutoff: parseInt(e.target.value)
+                                    }
+                                  })}
+                                  className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                                />
+                              </div>
+
+                              <div className="p-2.5 bg-zinc-950/20 rounded-lg border border-white/5 space-y-1.5">
+                                <div className="flex justify-between items-center text-[10px]">
+                                  <span className="text-zinc-400 font-medium">LPF Срез (ВЧ):</span>
+                                  <span className="text-indigo-400 font-bold">{((activePreset.phase1.spectralBalancing?.lpfCutoff ?? 20000) / 1000).toFixed(1)} кГц</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min="15000"
+                                  max="22000"
+                                  step="500"
+                                  value={activePreset.phase1.spectralBalancing?.lpfCutoff ?? 20000}
+                                  onChange={(e) => updatePhase1({
+                                    spectralBalancing: {
+                                      ...activePreset.phase1.spectralBalancing,
+                                      enabled: true,
+                                      lpfCutoff: parseInt(e.target.value)
+                                    }
+                                  })}
+                                  className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                                />
+                              </div>
+                            </div>
+
+                            <label className="flex items-center gap-2 p-2 bg-zinc-950/20 rounded-lg border border-white/5 cursor-pointer hover:bg-zinc-900/30 transition-colors">
+                              <input
+                                type="checkbox"
+                                checked={activePreset.phase1.spectralBalancing?.reduceResonances ?? true}
+                                onChange={(e) => updatePhase1({
+                                  spectralBalancing: {
+                                    ...activePreset.phase1.spectralBalancing,
+                                    enabled: true,
+                                    reduceResonances: e.target.checked
+                                  }
+                                })}
+                                className="rounded border-zinc-700 bg-zinc-900 text-indigo-600 focus:ring-0 w-3.5 h-3.5"
+                              />
+                              <div className="flex flex-col">
+                                <span className="text-[10px] font-medium text-zinc-300">Подавление узких резонансных частот</span>
+                                <span className="text-[9px] text-zinc-500">Авто-детекция резонансов помещения и микрофона</span>
+                              </div>
+                            </label>
+
+                            {renderProcessingActions('spectralBalancing', 'Применить спектральное выравнивание', 'bg-indigo-600 hover:bg-indigo-500')}
+                          </div>
+                        );
+                      } else if (stepKey === "speechLeveler") {
+                        stepName = "1.3 Выравниватель речи (Speech Leveler)";
+                        stepDesc = "Компрессия динамического диапазона и гейтирование пауз";
+                        stepIcon = <Sliders className="w-3.5 h-3.5 text-amber-400" />;
+                        stepBypass = activePreset.phase1.speechLeveler?.bypass ?? false;
+                        handleBypassToggle = () => updatePhase1({
+                          speechLeveler: {
+                            ...activePreset.phase1.speechLeveler,
+                            enabled: !(activePreset.phase1.speechLeveler?.enabled ?? true),
+                            bypass: !stepBypass
+                          }
+                        });
+                        stepElement = (
+                          <div className="space-y-4 animate-fade-in text-xs">
+                            <div className="text-[10px] text-zinc-400 leading-normal bg-zinc-950/40 p-2.5 rounded-lg border border-white/5 space-y-1">
+                              <p>
+                                <strong className="text-amber-400">Модуль 1.3: Speech Leveler</strong> уплотняет актерскую речь, сглаживая перепады между шепотом и эмоциональными выкриками:
+                              </p>
+                              <p>
+                                Использует адаптивную компрессию (порог -12 dB, соотношение 3.44:1) и интеллектуальный гейт для аккуратного подавления фонового шума в паузах между репликами.
+                              </p>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="p-2.5 bg-zinc-950/20 rounded-lg border border-white/5 space-y-1.5">
+                                <div className="flex justify-between items-center text-[10px]">
+                                  <span className="text-zinc-400 font-medium">Порог компрессии:</span>
+                                  <span className="text-amber-400 font-bold">{activePreset.phase1.speechLeveler?.thresholdDb ?? -12.0} dB</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min="-24"
+                                  max="-6"
+                                  step="0.5"
+                                  value={activePreset.phase1.speechLeveler?.thresholdDb ?? -12.0}
+                                  onChange={(e) => updatePhase1({
+                                    speechLeveler: {
+                                      ...activePreset.phase1.speechLeveler,
+                                      enabled: true,
+                                      thresholdDb: parseFloat(e.target.value)
+                                    }
+                                  })}
+                                  className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                                />
+                              </div>
+
+                              <div className="p-2.5 bg-zinc-950/20 rounded-lg border border-white/5 space-y-1.5">
+                                <div className="flex justify-between items-center text-[10px]">
+                                  <span className="text-zinc-400 font-medium">Соотношение (Ratio):</span>
+                                  <span className="text-amber-400 font-bold">{(activePreset.phase1.speechLeveler?.ratio ?? 3.44).toFixed(2)}:1</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min="1.5"
+                                  max="6.0"
+                                  step="0.1"
+                                  value={activePreset.phase1.speechLeveler?.ratio ?? 3.44}
+                                  onChange={(e) => updatePhase1({
+                                    speechLeveler: {
+                                      ...activePreset.phase1.speechLeveler,
+                                      enabled: true,
+                                      ratio: parseFloat(e.target.value)
+                                    }
+                                  })}
+                                  className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="p-2.5 bg-zinc-950/20 rounded-lg border border-white/5 space-y-1.5">
+                              <div className="flex justify-between items-center text-[10px]">
+                                <span className="text-zinc-400 font-medium">Порог гейта в паузах:</span>
+                                <span className="text-amber-400 font-bold">{activePreset.phase1.speechLeveler?.gateThresholdDb ?? -45.0} dB</span>
+                              </div>
+                              <input
+                                type="range"
+                                min="-60"
+                                max="-30"
+                                step="1"
+                                value={activePreset.phase1.speechLeveler?.gateThresholdDb ?? -45.0}
+                                onChange={(e) => updatePhase1({
+                                  speechLeveler: {
+                                    ...activePreset.phase1.speechLeveler,
+                                    enabled: true,
+                                    gateThresholdDb: parseFloat(e.target.value)
+                                  }
+                                })}
+                                className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                              />
+                            </div>
+
+                            {renderProcessingActions('speechLeveler', 'Применить Speech Leveler', 'bg-amber-600 hover:bg-amber-500')}
+                          </div>
+                        );
+                      } else if (stepKey === "vocalSpotCleaning") {
+                        stepName = "1.4 Точечная очистка голоса (Spot Cleaning)";
+                        stepDesc = "Комплексное устранение сибилянтов, задувов микрофона и кликов";
+                        stepIcon = <Sparkles className="w-3.5 h-3.5 text-emerald-400" />;
+                        stepBypass = activePreset.phase1.vocalSpotCleaning?.bypass ?? false;
+                        handleBypassToggle = () => updatePhase1({
+                          vocalSpotCleaning: {
+                            ...activePreset.phase1.vocalSpotCleaning,
+                            enabled: !(activePreset.phase1.vocalSpotCleaning?.enabled ?? true),
+                            bypass: !stepBypass
+                          }
+                        });
+                        stepElement = (
+                          <div className="space-y-4 animate-fade-in text-xs">
+                            <div className="text-[10px] text-zinc-400 leading-normal bg-zinc-950/40 p-2.5 rounded-lg border border-white/5 space-y-1">
+                              <p>
+                                <strong className="text-emerald-400">Модуль 1.4: Точечная очистка</strong> выполняет тонкую хирургическую чистку речевых артефактов без потери естественности звучания:
+                              </p>
+                              <p>
+                                Подавляет резкие свистящие звуки (De-Esser), гасит взрывные удары воздуха от согласных 'П' и 'Б' (De-Plosive) и устраняет микроклики слюны (De-Click).
+                              </p>
+                            </div>
+
+                            <div className="space-y-2">
+                              <label className="flex items-center gap-2 p-2 bg-zinc-950/20 rounded-lg border border-white/5 cursor-pointer hover:bg-zinc-900/30 transition-colors">
+                                <input
+                                  type="checkbox"
+                                  checked={activePreset.phase1.vocalSpotCleaning?.deEsserEnabled ?? true}
+                                  onChange={(e) => updatePhase1({
+                                    vocalSpotCleaning: {
+                                      ...activePreset.phase1.vocalSpotCleaning,
+                                      enabled: true,
+                                      deEsserEnabled: e.target.checked
+                                    }
+                                  })}
+                                  className="rounded border-zinc-700 bg-zinc-900 text-emerald-600 focus:ring-0 w-3.5 h-3.5"
+                                />
+                                <div className="flex flex-col">
+                                  <span className="text-[10px] font-medium text-zinc-300">Адаптивный De-Esser (подавление сибилянтов)</span>
+                                  <span className="text-[9px] text-zinc-500">Смягчение резких 'С', 'Ш', 'Щ', 'Ц'</span>
+                                </div>
+                              </label>
+
+                              <label className="flex items-center gap-2 p-2 bg-zinc-950/20 rounded-lg border border-white/5 cursor-pointer hover:bg-zinc-900/30 transition-colors">
+                                <input
+                                  type="checkbox"
+                                  checked={activePreset.phase1.vocalSpotCleaning?.plosivesEnabled ?? true}
+                                  onChange={(e) => updatePhase1({
+                                    vocalSpotCleaning: {
+                                      ...activePreset.phase1.vocalSpotCleaning,
+                                      enabled: true,
+                                      plosivesEnabled: e.target.checked
+                                    }
+                                  })}
+                                  className="rounded border-zinc-700 bg-zinc-900 text-emerald-600 focus:ring-0 w-3.5 h-3.5"
+                                />
+                                <div className="flex flex-col">
+                                  <span className="text-[10px] font-medium text-zinc-300">De-Plosive (гашение взрывных задувов)</span>
+                                  <span className="text-[9px] text-zinc-500">Устранение ударов воздуха по мембране микрофона ('П', 'Б')</span>
+                                </div>
+                              </label>
+
+                              <label className="flex items-center gap-2 p-2 bg-zinc-950/20 rounded-lg border border-white/5 cursor-pointer hover:bg-zinc-900/30 transition-colors">
+                                <input
+                                  type="checkbox"
+                                  checked={activePreset.phase1.vocalSpotCleaning?.clicksEnabled ?? true}
+                                  onChange={(e) => updatePhase1({
+                                    vocalSpotCleaning: {
+                                      ...activePreset.phase1.vocalSpotCleaning,
+                                      enabled: true,
+                                      clicksEnabled: e.target.checked
+                                    }
+                                  })}
+                                  className="rounded border-zinc-700 bg-zinc-900 text-emerald-600 focus:ring-0 w-3.5 h-3.5"
+                                />
+                                <div className="flex flex-col">
+                                  <span className="text-[10px] font-medium text-zinc-300">Mouth De-Click (микроклики и слюна)</span>
+                                  <span className="text-[9px] text-zinc-500">Удаление щелчков языка и слюны</span>
+                                </div>
+                              </label>
+                            </div>
+
+                            {renderProcessingActions('vocalSpotCleaning', 'Применить точечную очистку', 'bg-emerald-600 hover:bg-emerald-500')}
+                          </div>
+                        );
+                      } else if (stepKey === "normalization") {
                         stepName = "Нормализация и Апвард (Финал предобработки)";
                         stepDesc = "Финальное выравнивание LUFS и тихих фраз очищенного сигнала";
                         stepIcon = <Volume2 className="w-3.5 h-3.5 text-indigo-400" />;
