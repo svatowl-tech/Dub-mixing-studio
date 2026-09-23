@@ -24,12 +24,413 @@ export class TimingAlignmentService {
   static isDubTrack(track: AudioTrack): boolean {
     const name = (track.name || '').toLowerCase().trim();
     if (track.type === 'voice' || (track.type as string) === 'dub' || (track.type as string) === 'user') return true;
-    if (track.type === 'original') return false;
-    // Check if it matches voice/dub actor tracks like "Голос 1", "Голос дабера", "Дорожка 2", "Mic"
-    if (/^(голос|дорожка|дорога|актер|дабер|диктор|дубляж|dub|voice|mic|audio\s*\d+)/i.test(name)) {
-      return true;
+    if (track.type === 'original' || name === 'оригинал' || name === 'звуки (музыка)' || name === 'голоса (вокал)') return false;
+    return true;
+  }
+
+  /**
+   * Очищает никнейм или название дорожки от системных префиксов и расширений для надежного мэтчинга
+   */
+  static cleanNameForMatching(name: string): string {
+    return (name || '')
+      .replace(/\.[^/.]+$/, '') // remove extension
+      .replace(/\[[^\]]*\]/g, ' ') // remove [...]
+      .replace(/\([^\)]*\)/g, ' ') // remove (...)
+      .replace(/^(?:голос|дабер|актёр|актер|диктор|дорожка|трек|track|voice|dub|actor|mic)[\s\d_:#\-\.]+/i, '')
+      .replace(/[\-_.]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  /**
+   * Вычисляет коэффициент похожести между ником актера в сабах и именем аудиодорожки (0.0 .. 1.0)
+   */
+  static calculateNameSimilarity(strA: string, strB: string): number {
+    const a = this.cleanNameForMatching(strA);
+    const b = this.cleanNameForMatching(strB);
+    if (!a || !b) return 0;
+    if (a === b) return 1.0;
+    if (a.includes(b) || b.includes(a)) return 0.85;
+
+    // Token intersection
+    const tokensA = a.split(' ').filter(Boolean);
+    const tokensB = b.split(' ').filter(Boolean);
+    const common = tokensA.filter(t => tokensB.some(tb => tb === t || (t.length > 3 && (tb.includes(t) || t.includes(tb)))));
+    if (common.length > 0) {
+      return 0.75 + 0.15 * (common.length / Math.max(tokensA.length, tokensB.length));
     }
-    return false;
+
+    // Levenshtein distance
+    const maxLen = Math.max(a.length, b.length);
+    if (maxLen === 0) return 1.0;
+    const dist = this.levenshteinDistance(a, b);
+    return Math.max(0, 1.0 - (dist / maxLen));
+  }
+
+  private static levenshteinDistance(s1: string, s2: string): number {
+    const m = s1.length;
+    const n = s2.length;
+    const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
+        dp[i][j] = Math.min(
+          dp[i - 1][j] + 1,
+          dp[i][j - 1] + 1,
+          dp[i - 1][j - 1] + cost
+        );
+      }
+    }
+    return dp[m][n];
+  }
+
+  /**
+   * Автоматическое сопоставление актеров из субтитров с дорожками даберов по никнейму.
+   * Каждому актеру присваивается своя дорожка, а фрагменты привязываются к репликам.
+   */
+  static autoMatchActorsToTracks(
+    tracks: AudioTrack[],
+    subtitles: SubtitleLine[]
+  ): { updatedTracks: AudioTrack[]; roleMap: Record<string, string>; matchSummary: string[] } {
+    const distinctRoles = Array.from(
+      new Set(
+        subtitles
+          .map(s => s.role)
+          .filter(r => r && r.trim() && r !== 'Default' && r !== 'Original' && r !== 'Оригинал')
+      )
+    );
+
+    const dubTracks = tracks.filter(t => this.isDubTrack(t));
+    const roleMap: Record<string, string> = {};
+    const matchSummary: string[] = [];
+    const usedTrackIds = new Set<string>();
+
+    // 1. Поиск соответствий по максимальной похожести имени
+    for (const role of distinctRoles) {
+      let bestTrack: AudioTrack | null = null;
+      let highestScore = 0;
+
+      for (const track of dubTracks) {
+        if (usedTrackIds.has(track.id)) continue;
+
+        let score = this.calculateNameSimilarity(track.name, role);
+        if (track.role) {
+          const roleScore = this.calculateNameSimilarity(track.role, role);
+          score = Math.max(score, roleScore);
+        }
+
+        // Также проверяем имена оригинальных файлов в сегментах трека
+        if (track.segments) {
+          for (const seg of track.segments) {
+            if (seg.originalFileName) {
+              const segScore = this.calculateNameSimilarity(seg.originalFileName, role);
+              score = Math.max(score, segScore);
+            }
+          }
+        }
+
+        if (score > highestScore && score >= 0.45) {
+          highestScore = score;
+          bestTrack = track;
+        }
+      }
+
+      if (bestTrack) {
+        usedTrackIds.add(bestTrack.id);
+        roleMap[role] = bestTrack.id;
+        matchSummary.push(`Актёр "${role}" -> Дорожка "${bestTrack.name}" (совпадение ${(highestScore * 100).toFixed(0)}%)`);
+      }
+    }
+
+    // 2. Если остались неназначенные дорожки и неназначенные роли, связываем их по порядку
+    const remainingRoles = distinctRoles.filter(r => !roleMap[r]);
+    const remainingTracks = dubTracks.filter(t => !usedTrackIds.has(t.id));
+
+    for (let i = 0; i < Math.min(remainingRoles.length, remainingTracks.length); i++) {
+      const role = remainingRoles[i];
+      const track = remainingTracks[i];
+      usedTrackIds.add(track.id);
+      roleMap[role] = track.id;
+      matchSummary.push(`Актёр "${role}" -> Дорожка "${track.name}" (по порядку в сценарии)`);
+    }
+
+    // 3. Обновляем дорожки: выставляем role/actor и привязываем фразы субтитров
+    const updatedTracks = tracks.map(track => {
+      if (!this.isDubTrack(track)) return track;
+
+      // Ищем привязанную роль
+      let assignedRole = Object.keys(roleMap).find(r => roleMap[r] === track.id) || track.role;
+      if (!assignedRole && distinctRoles.length === 1 && dubTracks.length === 1) {
+        assignedRole = distinctRoles[0];
+      }
+
+      const actorSubs = assignedRole
+        ? subtitles.filter(s => s.role.toLowerCase() === (assignedRole as string).toLowerCase()).sort((a, b) => a.start - b.start)
+        : [...subtitles].sort((a, b) => a.start - b.start);
+
+      const segments = [...(track.segments || [])].sort((a, b) => a.startTime - b.startTime);
+      const updatedSegments: AudioSegment[] = segments.map((seg, sIdx) => {
+        // Если сегмент уже привязан к субтитру
+        let matchedSub = seg.matchedSubId ? subtitles.find(s => s.id === seg.matchedSubId) : undefined;
+
+        if (!matchedSub && actorSubs.length > 0) {
+          // Ищем ближайший по таймкоду субтитр этого актера
+          matchedSub = actorSubs.find(s => Math.abs(s.start - seg.startTime) < 8.0);
+          if (!matchedSub && sIdx < actorSubs.length) {
+            // Либо берем по индексу реплики актера в хронологии
+            matchedSub = actorSubs[sIdx];
+          }
+        }
+
+        return {
+          ...seg,
+          matchedSubId: matchedSub ? matchedSub.id : seg.matchedSubId,
+          text: (matchedSub && matchedSub.text) ? matchedSub.text : seg.text
+        };
+      });
+
+      return {
+        ...track,
+        role: assignedRole || track.role,
+        segments: updatedSegments
+      };
+    });
+
+    return { updatedTracks, roleMap, matchSummary };
+  }
+
+  /**
+   * Проверяет, было ли пересечение реплик преднамеренным в оригинальном сценарии/субтитрах
+   */
+  static doSubtitlesOverlapInScript(subA?: SubtitleLine, subB?: SubtitleLine): boolean {
+    if (!subA || !subB) return false;
+    const earlier = subA.start <= subB.start ? subA : subB;
+    const later = subA.start <= subB.start ? subB : subA;
+    // Если в субтитрах вторая реплика начинается раньше окончания первой (или одновременный старт)
+    return (later.start < earlier.end - 0.05) || (Math.abs(later.start - earlier.start) <= 0.15);
+  }
+
+  /**
+   * Глобальное разрешение коллизий по всему проекту:
+   * 1. Разводит дорожки даберов так, чтобы они не перекрывали друг друга, ЕСЛИ этого нет в субтитрах.
+   * 2. Если в сабах есть намеренное перекрытие, оно сохраняется и у даберов.
+   * 3. Если в сабах перекрытия нет, фразы аккуратно раздвигаются с комфортным зазором (50-70мс).
+   */
+  static resolveProjectWideCollisions(
+    tracks: AudioTrack[],
+    subtitles: SubtitleLine[],
+    config: TimingAlignmentConfig
+  ): { updatedTracks: AudioTrack[]; resolvedCount: number; preservedCount: number; collisionLogs: string[] } {
+    const minGap = 0.06; // 60 мс естественный зазор между репликами
+    let resolvedCount = 0;
+    let preservedCount = 0;
+    const collisionLogs: string[] = [];
+
+    const subsMap = new Map<string, SubtitleLine>();
+    for (const sub of subtitles) {
+      subsMap.set(sub.id, sub);
+    }
+
+    const dubTracks = tracks.filter(t => this.isDubTrack(t));
+    if (dubTracks.length === 0) {
+      return { updatedTracks: tracks, resolvedCount: 0, preservedCount: 0, collisionLogs: [] };
+    }
+
+    // Собираем все сегменты со всех дорожек дубляжа в единый список для разведения
+    interface TimelineSegmentRef {
+      trackId: string;
+      trackName: string;
+      segment: AudioSegment;
+      matchedSub?: SubtitleLine;
+    }
+
+    const allRefs: TimelineSegmentRef[] = [];
+    for (const track of dubTracks) {
+      for (const seg of track.segments || []) {
+        const sub = seg.matchedSubId ? subsMap.get(seg.matchedSubId) : undefined;
+        allRefs.push({
+          trackId: track.id,
+          trackName: track.name,
+          segment: { ...seg },
+          matchedSub: sub
+        });
+      }
+    }
+
+    // Сортируем все фразы по времени старта
+    allRefs.sort((a, b) => a.segment.startTime - b.segment.startTime);
+
+    // Итеративное выравнивание коллизий
+    for (let i = 0; i < allRefs.length; i++) {
+      const curr = allRefs[i];
+
+      for (let p = 0; p < i; p++) {
+        const prev = allRefs[p];
+        const prevEnd = prev.segment.startTime + prev.segment.duration;
+
+        // Проверяем, есть ли наезд текущей фразы на предыдущую
+        if (curr.segment.startTime < prevEnd - 0.02) {
+          const isIntentionalInSubtitles = this.doSubtitlesOverlapInScript(prev.matchedSub, curr.matchedSub);
+
+          if (isIntentionalInSubtitles && prev.trackId !== curr.trackId) {
+            // Перекрытие есть в сабах (одновременный диалог/перебивание) -> СОХРАНЯЕМ!
+            preservedCount++;
+          } else {
+            // В сабах перекрытия НЕТ (или одна и та же дорожка) -> РАЗВОДИМ ФРАЗЫ!
+            const oldStart = curr.segment.startTime;
+            const newStart = parseFloat((prevEnd + minGap).toFixed(3));
+            const shiftSec = parseFloat((newStart - oldStart).toFixed(2));
+
+            curr.segment.startTime = newStart;
+            curr.segment.timingWarning = undefined;
+            curr.segment.timingWarningDetail = undefined;
+
+            resolvedCount++;
+            collisionLogs.push(
+              `Разведена коллизия: [${curr.trackName}] сдвинут на +${shiftSec}с (${oldStart.toFixed(2)}с -> ${newStart.toFixed(2)}с) после окончания [${prev.trackName}]`
+            );
+          }
+        }
+      }
+    }
+
+    // Собираем обратно дорожки с обновленными таймингами
+    const segmentsByTrack = new Map<string, AudioSegment[]>();
+    for (const ref of allRefs) {
+      if (!segmentsByTrack.has(ref.trackId)) {
+        segmentsByTrack.set(ref.trackId, []);
+      }
+      segmentsByTrack.get(ref.trackId)!.push(ref.segment);
+    }
+
+    const updatedTracks = tracks.map(track => {
+      if (!this.isDubTrack(track)) return track;
+      const updatedSegs = segmentsByTrack.get(track.id) || track.segments || [];
+      updatedSegs.sort((a, b) => a.startTime - b.startTime);
+      return {
+        ...track,
+        segments: updatedSegs
+      };
+    });
+
+    return { updatedTracks, resolvedCount, preservedCount, collisionLogs };
+  }
+
+  /**
+   * Комплексный конвейер Авто-тайминга (Auto-Timing & Collision Resolution):
+   * 1. Автоматическое сопоставление актеров из субтитров с дорожками даберов.
+   * 2. Выравнивание старта каждой фразы по началу соответствующего субтитра.
+   * 3. Глобальный сквозной анализ и устранение коллизий по всему проекту.
+   */
+  static async autoAlignProject(
+    tracks: AudioTrack[],
+    originalVoiceTrack: AudioTrack | undefined,
+    subtitles: SubtitleLine[],
+    mixingType: MixingType,
+    config: TimingAlignmentConfig,
+    onProgress?: (percent: number, message: string) => void
+  ): Promise<{
+    updatedTracks: AudioTrack[];
+    issues: TimingIssue[];
+    stats: {
+      matchedActors: number;
+      alignedPhrases: number;
+      resolvedCollisions: number;
+      preservedIntentionalOverlaps: number;
+    };
+    logs: string[];
+  }> {
+    const logs: string[] = [];
+    const leadSeconds = mixingType === MixingType.VOICEOVER ? (config.voiceoverLeadMs || 200) / 1000 : 0;
+
+    onProgress?.(10, 'Авто-сопоставление актеров из субтитров с дорожками...');
+    
+    // 1. Сопоставление актеров
+    const matchResult = this.autoMatchActorsToTracks(tracks, subtitles);
+    let workingTracks = matchResult.updatedTracks;
+    logs.push(...matchResult.matchSummary);
+
+    onProgress?.(35, 'Выравнивание старта фраз по началу субтитров...');
+
+    // 2. Выравнивание старта каждой фразы по началу субтитра
+    let alignedPhrases = 0;
+    const subsById = new Map<string, SubtitleLine>();
+    for (const s of subtitles) {
+      subsById.set(s.id, s);
+    }
+
+    workingTracks = workingTracks.map(track => {
+      if (!this.isDubTrack(track) || !track.segments) return track;
+
+      const segments = track.segments.map(seg => {
+        let targetSub = seg.matchedSubId ? subsById.get(seg.matchedSubId) : undefined;
+        if (!targetSub) {
+          targetSub = this.findClosestSubtitle(seg.startTime, seg.duration, subtitles, track.role || track.name);
+        }
+
+        if (targetSub) {
+          const targetStart = targetSub.start + leadSeconds;
+          alignedPhrases++;
+          return {
+            ...seg,
+            startTime: parseFloat(targetStart.toFixed(3)),
+            matchedSubId: targetSub.id,
+            text: seg.text || targetSub.text,
+            alignedWithOriginal: true,
+            targetStartTime: targetSub.start,
+            targetDuration: targetSub.end - targetSub.start
+          };
+        }
+        return seg;
+      });
+
+      return {
+        ...track,
+        segments
+      };
+    });
+
+    onProgress?.(65, 'Сквозная проверка и разведение коллизий между дорожками...');
+
+    // 3. Проверка и разведение коллизий по всему проекту
+    const collisionRes = this.resolveProjectWideCollisions(workingTracks, subtitles, config);
+    workingTracks = collisionRes.updatedTracks;
+    logs.push(...collisionRes.collisionLogs);
+
+    onProgress?.(90, 'Финальный аудит тайминга проекта...');
+
+    // 4. Валидация тайминга
+    const issues = this.validateAllTracksTiming(
+      workingTracks,
+      originalVoiceTrack,
+      subtitles,
+      mixingType,
+      config
+    );
+
+    const stats = {
+      matchedActors: Object.keys(matchResult.roleMap).length,
+      alignedPhrases,
+      resolvedCollisions: collisionRes.resolvedCount,
+      preservedIntentionalOverlaps: collisionRes.preservedCount
+    };
+
+    logs.push(
+      `Итог авто-тайминга: Сопоставлено актеров: ${stats.matchedActors}, выровнено фраз: ${stats.alignedPhrases}, устранено нежелательных наездов: ${stats.resolvedCollisions}, сохранено художественных перекрытий: ${stats.preservedIntentionalOverlaps}.`
+    );
+
+    onProgress?.(100, 'Авто-тайминг успешно завершен!');
+
+    return {
+      updatedTracks: workingTracks,
+      issues,
+      stats,
+      logs
+    };
   }
 
   /**

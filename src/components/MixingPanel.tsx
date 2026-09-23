@@ -69,7 +69,9 @@ import {
   DereverbResult,
   VolumeLevelerReport,
   NormalizationStats,
-  SeparationResult
+  SeparationResult,
+  LoudnessComparisonReport,
+  MasteringStats
 } from '../types';
 import { GlobalStepSettingsService } from '../services/globalStepSettingsService';
 import { 
@@ -515,6 +517,8 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
   const [qaLufs, setQaLufs] = useState<number>(-14.0);
   const [qaTruePeak, setQaTruePeak] = useState<number>(-1.0);
   const [qaAuditReport, setQaAuditReport] = useState<QaAuditReport | null>(null);
+  const [loudnessComparison, setLoudnessComparison] = useState<LoudnessComparisonReport | null>(null);
+  const [isAnalyzingLoudness, setIsAnalyzingLoudness] = useState(false);
 
   // Phase 4: Quality Control (QA) handler
   const handleRunQualityControl = async (showModal = true) => {
@@ -545,17 +549,52 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
     }
   };
 
+  // Phase 4: Loudness Comparison Analysis (Original vs Master Mix)
+  const handleAnalyzeLoudnessComparison = async () => {
+    if (!project || !project.tracks || project.tracks.length === 0) {
+      showToast('В проекте нет дорожек для анализа громкости');
+      return;
+    }
+    setIsAnalyzingLoudness(true);
+    try {
+      const report = await FinalRenderService.analyzeAndCompareLoudnessAsync(project.tracks, activePreset.phase4, project);
+      setLoudnessComparison(report);
+      showToast(`Анализ завершен: Дельта ${report.currentDeltaDb >= 0 ? '+' : ''}${report.currentDeltaDb.toFixed(1)} dB к оригиналу (${report.readabilityStatus === 'optimal' ? 'Идеальная читаемость' : 'Требуется подгонка'})`);
+    } catch (e: any) {
+      console.error(e);
+      showToast(`Ошибка анализа: ${e.message}`);
+    } finally {
+      setIsAnalyzingLoudness(false);
+    }
+  };
+
   // Phase 4: Mastering Limiter handler
-  const handleApplyMasteringLimiter = () => {
+  const handleApplyMasteringLimiter = async () => {
     if (!project || !project.tracks || project.tracks.length === 0) {
       showToast('В проекте нет дорожек для мастеринга');
       return;
     }
-    const res = FinalRenderService.applyMasteringLimiter(project.tracks, activePreset.phase4, project.vocalBusVolume ?? 1.0);
-    onUpdateProject({ tracks: res.updatedTracks });
-    playbackEngine.updateTracks(res.updatedTracks).catch(console.error);
-    addAuditLogs(res.logs);
-    showToast(`Мастеринг применен: Цель ${activePreset.phase4.masteringLimiter?.targetIntegratedLufs || -14.0} LUFS, Потолок ${res.ceilingDb.toFixed(1)} dBTP`);
+    setIsExecutingPhase3Step('masteringLimiter');
+    try {
+      const res = await FinalRenderService.applyMasteringLimiterAsync(project.tracks, activePreset.phase4, project);
+      onUpdateProject({ tracks: res.updatedTracks });
+      playbackEngine.updateTracks(res.updatedTracks).catch(console.error);
+      addAuditLogs(res.logs);
+
+      // Re-run comparison report to update UI badge and meters
+      const newReport = await FinalRenderService.analyzeAndCompareLoudnessAsync(res.updatedTracks, activePreset.phase4, project);
+      setLoudnessComparison(newReport);
+
+      const relMsg = res.masteringStats?.relativeOffsetAppliedDb != null 
+        ? ` (+${res.masteringStats.relativeOffsetAppliedDb.toFixed(1)} dB к оригиналу)` 
+        : '';
+      showToast(`Мастеринг применен: ${res.masteringStats?.finalIntegratedLufs ?? activePreset.phase4.masteringLimiter?.targetIntegratedLufs ?? -14.0} LUFS${relMsg}, Потолок ${res.ceilingDb.toFixed(1)} dBTP`);
+    } catch (e: any) {
+      console.error(e);
+      showToast(`Ошибка мастеринга: ${e.message}`);
+    } finally {
+      setIsExecutingPhase3Step(null);
+    }
   };
 
   // Phase 4: Auto-fix QA Issue
@@ -7048,18 +7087,47 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                           stereoWidth: 100
                         };
                         stepElement = (
-                          <div className="space-y-3 text-xs">
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <div className="space-y-3.5 text-xs">
+                            {/* Loudness Standard and Core Parameters */}
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                               <div className="space-y-1">
-                                <label className="text-[10px] text-zinc-500 uppercase font-black">Стандарт громкости</label>
+                                <label className="text-[10px] text-zinc-400 uppercase font-black">Стандарт громкости</label>
                                 <select 
-                                  value={limiter.loudnessStandard || 'original_match'}
+                                  value={limiter.loudnessStandard || 'original_relative'}
                                   onChange={(e) => {
                                     const std = e.target.value as any;
                                     let lufs = limiter.targetIntegratedLufs;
                                     let ceil = limiter.truePeakCeilingDb;
-                                    if (std === 'original_match') {
-                                      // Автоматический замер оригинального референса
+                                    let relDb = limiter.relativeGainDb ?? 4.0;
+                                    let autoRel = false;
+
+                                    if (std === 'original_relative') {
+                                      relDb = 4.0;
+                                      autoRel = true;
+                                      // Calculate target relative to detected original
+                                      let origSumSq = 0;
+                                      let origSampleCount = 0;
+                                      project?.tracks?.forEach(t => {
+                                        const name = t.name.toLowerCase();
+                                        if (t.type === 'original' || name.includes('оригинал') || name.includes('original') || name.includes('звуки')) {
+                                          t.segments?.forEach(s => {
+                                            if (s.waveform && s.waveform.length > 0) {
+                                              origSumSq += s.waveform.reduce((acc, v) => acc + v * v, 0);
+                                              origSampleCount += s.waveform.length;
+                                            }
+                                          });
+                                        }
+                                      });
+                                      if (origSampleCount > 0) {
+                                        const origRms = Math.sqrt(origSumSq / origSampleCount);
+                                        const origLufs = Math.max(-50, Math.min(-6, 20 * Math.log10(Math.max(0.001, origRms)) - 2.5));
+                                        lufs = Math.round((origLufs + relDb) * 10) / 10;
+                                      } else {
+                                        lufs = -10.5;
+                                      }
+                                      ceil = -1.0;
+                                    } else if (std === 'original_match') {
+                                      // Автоматический замер оригинального референса 1:1
                                       let origSumSq = 0;
                                       let origSampleCount = 0;
                                       project?.tracks?.forEach(t => {
@@ -7084,12 +7152,20 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                                     else if (std === 'broadcast_ebu' || std === 'ebu_r128') { lufs = -23.0; ceil = -1.0; }
                                     else if (std === 'podcast_stream' || std === 'streaming_podcast') { lufs = -16.0; ceil = -1.0; }
                                     updatePhase4({
-                                      masteringLimiter: { ...limiter, loudnessStandard: std, targetIntegratedLufs: lufs, truePeakCeilingDb: ceil }
+                                      masteringLimiter: { 
+                                        ...limiter, 
+                                        loudnessStandard: std, 
+                                        targetIntegratedLufs: lufs, 
+                                        truePeakCeilingDb: ceil,
+                                        relativeGainDb: relDb,
+                                        autoRelativeMatch: autoRel
+                                      }
                                     });
                                   }}
-                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-medium"
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-200 font-medium focus:border-indigo-500"
                                 >
-                                  <option value="original_match">🎯 Под уровень оригинала (Референсный баланс)</option>
+                                  <option value="original_relative">🎯 Авто-баланс к оригиналу (+3.5..+4.5 dB для читаемости)</option>
+                                  <option value="original_match">⚖️ 1:1 по уровню оригинала (0.0 dB)</option>
                                   <option value="youtube_web">YouTube / Web (-14 LUFS, -1 dBTP)</option>
                                   <option value="ebu_r128">EBU R128 ТВ (-23 LUFS, -1 dBTP)</option>
                                   <option value="streaming_podcast">Подкаст / Стриминг (-16 LUFS)</option>
@@ -7099,44 +7175,168 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
                               <div className="space-y-1">
                                 <div className="flex justify-between items-center">
-                                  <label className="text-[10px] text-zinc-500 uppercase font-black">Цель LUFS</label>
+                                  <label className="text-[10px] text-zinc-400 uppercase font-black">Цель LUFS</label>
                                   <span className="text-[10px] font-mono text-indigo-400 font-bold">{limiter.targetIntegratedLufs} LUFS</span>
                                 </div>
                                 <input 
                                   type="number" 
-                                  step="0.5"
-                                  min="-30"
-                                  max="-8"
+                                  step="0.5" 
+                                  min="-30" 
+                                  max="-6" 
                                   value={limiter.targetIntegratedLufs}
                                   onChange={(e) => updatePhase4({
                                     masteringLimiter: { ...limiter, targetIntegratedLufs: parseFloat(e.target.value) || -14.0 }
                                   })}
-                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-mono"
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-200 font-mono"
                                 />
                               </div>
 
                               <div className="space-y-1">
                                 <div className="flex justify-between items-center">
-                                  <label className="text-[10px] text-zinc-500 uppercase font-black">True-Peak Потолок</label>
+                                  <label className="text-[10px] text-zinc-400 uppercase font-black">True-Peak Потолок</label>
                                   <span className="text-[10px] font-mono text-emerald-400 font-bold">{limiter.truePeakCeilingDb} dBTP</span>
                                 </div>
                                 <input 
                                   type="number" 
-                                  step="0.1"
-                                  min="-3.0"
-                                  max="-0.1"
+                                  step="0.1" 
+                                  min="-3.0" 
+                                  max="-0.1" 
                                   value={limiter.truePeakCeilingDb}
                                   onChange={(e) => updatePhase4({
                                     masteringLimiter: { ...limiter, truePeakCeilingDb: parseFloat(e.target.value) || -1.0 }
                                   })}
-                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-300 font-mono"
+                                  className="w-full bg-zinc-950 border border-white/10 rounded-lg p-1.5 text-xs text-zinc-200 font-mono"
                                 />
                               </div>
                             </div>
 
+                            {/* Relative Gain Offset Slider (3.5 - 4.5 dB optimal clarity standard) */}
+                            <div className="p-3 rounded-xl bg-gradient-to-r from-indigo-950/30 via-zinc-900/60 to-zinc-950 border border-indigo-500/20 space-y-2.5">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <Volume2 className="w-4 h-4 text-indigo-400" />
+                                  <div>
+                                    <div className="text-[11px] font-bold text-white flex items-center gap-1.5">
+                                      Превышение громкости мастер-микса над оригиналом
+                                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono font-bold">
+                                        Стандарт 3.5–4.5 dB
+                                      </span>
+                                    </div>
+                                    <div className="text-[10px] text-zinc-400">
+                                      Гарантирует четкую читаемость дублированной речи на фоне оригинального звука
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="text-right">
+                                  <span className="text-sm font-mono font-black text-indigo-300">
+                                    +{limiter.relativeGainDb ?? 4.0} dB
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="space-y-1.5">
+                                <input 
+                                  type="range" 
+                                  min="1.0" 
+                                  max="8.0" 
+                                  step="0.5" 
+                                  value={limiter.relativeGainDb ?? 4.0}
+                                  onChange={(e) => {
+                                    const val = parseFloat(e.target.value);
+                                    updatePhase4({
+                                      masteringLimiter: {
+                                        ...limiter,
+                                        relativeGainDb: val,
+                                        autoRelativeMatch: true
+                                      }
+                                    });
+                                  }}
+                                  className="w-full accent-indigo-500 h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
+                                />
+                                <div className="flex justify-between text-[9px] font-mono text-zinc-500">
+                                  <span>+1.0 dB (Слабо)</span>
+                                  <span className="text-indigo-400 font-bold">▲ Золотой стандарт (+3.5...+4.5 dB)</span>
+                                  <span>+8.0 dB (Громко)</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Loudness Comparison Report Card (Original vs Master Mix) */}
+                            <div className="p-3 rounded-xl bg-zinc-950/80 border border-white/5 space-y-2.5">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] font-black uppercase text-zinc-400 flex items-center gap-1.5">
+                                  <Split className="w-3.5 h-3.5 text-indigo-400" />
+                                  Анализ и сравнение громкости (Оригинал vs Мастер)
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={handleAnalyzeLoudnessComparison}
+                                  disabled={isAnalyzingLoudness}
+                                  className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                                >
+                                  {isAnalyzingLoudness ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3 text-indigo-400" />}
+                                  <span>Запустить замер LUFS</span>
+                                </button>
+                              </div>
+
+                              {loudnessComparison ? (
+                                <div className="space-y-2">
+                                  <div className="grid grid-cols-3 gap-2 text-[10px]">
+                                    <div className="p-2 rounded-lg bg-zinc-900 border border-white/5 space-y-0.5">
+                                      <span className="text-zinc-500 block">Оригинал:</span>
+                                      <div className="font-mono font-bold text-zinc-200 text-xs">
+                                        {loudnessComparison.originalLufs.toFixed(1)} LUFS
+                                      </div>
+                                      <div className="text-[9px] text-zinc-500 font-mono">
+                                        Пик: {loudnessComparison.originalPeakDb.toFixed(1)} dB
+                                      </div>
+                                    </div>
+
+                                    <div className="p-2 rounded-lg bg-zinc-900 border border-white/5 space-y-0.5">
+                                      <span className="text-zinc-500 block">Наш Мастер-микс:</span>
+                                      <div className="font-mono font-bold text-indigo-300 text-xs">
+                                        {loudnessComparison.masterLufs.toFixed(1)} LUFS
+                                      </div>
+                                      <div className="text-[9px] text-zinc-500 font-mono">
+                                        Пик: {loudnessComparison.masterPeakDb.toFixed(1)} dBTP
+                                      </div>
+                                    </div>
+
+                                    <div className={cn(
+                                      "p-2 rounded-lg border space-y-0.5",
+                                      loudnessComparison.readabilityStatus === 'optimal'
+                                        ? "bg-emerald-950/20 border-emerald-500/30"
+                                        : "bg-amber-950/20 border-amber-500/30"
+                                    )}>
+                                      <span className="text-zinc-400 block">Дельта превышения:</span>
+                                      <div className={cn(
+                                        "font-mono font-bold text-xs flex items-center gap-1",
+                                        loudnessComparison.readabilityStatus === 'optimal' ? "text-emerald-400" : "text-amber-400"
+                                      )}>
+                                        {loudnessComparison.currentDeltaDb >= 0 ? `+${loudnessComparison.currentDeltaDb.toFixed(1)} dB` : `${loudnessComparison.currentDeltaDb.toFixed(1)} dB`}
+                                      </div>
+                                      <div className="text-[9px] font-bold">
+                                        {loudnessComparison.readabilityStatus === 'optimal' ? 'Идеальная читаемость' : 'Требует подгонки'}
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="text-[10px] text-zinc-300 bg-zinc-900/50 p-2 rounded-lg border border-white/5 flex items-start gap-2">
+                                    <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" />
+                                    <span>{loudnessComparison.recommendationText}</span>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="text-[10px] text-zinc-500 p-2 rounded-lg bg-zinc-900/40 border border-white/5 text-center">
+                                  Нажмите «Запустить замер LUFS» для сравнения оригинального референса с нашим мастер-миксом
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Oversampling, Dither, Stereo Width */}
                             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                               <div className="space-y-1">
-                                <label className="text-[10px] text-zinc-500 uppercase font-black">Oversampling (ISP)</label>
+                                <label className="text-[10px] text-zinc-400 uppercase font-black">Oversampling (ISP)</label>
                                 <select 
                                   value={limiter.oversampling}
                                   onChange={(e) => updatePhase4({
@@ -7151,7 +7351,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                               </div>
 
                               <div className="space-y-1">
-                                <label className="text-[10px] text-zinc-500 uppercase font-black">Дитеринг (Dither)</label>
+                                <label className="text-[10px] text-zinc-400 uppercase font-black">Дитеринг (Dither)</label>
                                 <select 
                                   value={limiter.dither}
                                   onChange={(e) => updatePhase4({
@@ -7167,7 +7367,7 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
 
                               <div className="space-y-1">
                                 <div className="flex justify-between items-center">
-                                  <label className="text-[10px] text-zinc-500 uppercase font-black">Ширина стереобазы</label>
+                                  <label className="text-[10px] text-zinc-400 uppercase font-black">Ширина стереобазы</label>
                                   <span className="text-[10px] font-mono text-zinc-400">{limiter.stereoWidth}%</span>
                                 </div>
                                 <input 
@@ -7183,14 +7383,18 @@ export const MixingPanel: React.FC<MixingPanelProps> = ({ project, onUpdateProje
                               </div>
                             </div>
 
-                            <div className="flex justify-end pt-1">
+                            <div className="flex justify-between items-center pt-1.5 border-t border-white/5">
+                              <span className="text-[10px] text-zinc-500">
+                                Автоматическая подгонка мастер-микса к целевому уровню читаемости
+                              </span>
                               <button
                                 type="button"
                                 onClick={handleApplyMasteringLimiter}
-                                className="px-3.5 py-1.5 rounded-xl bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
+                                disabled={isExecutingPhase3Step === 'masteringLimiter'}
+                                className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-md shadow-indigo-600/30 disabled:opacity-50"
                               >
-                                <Sliders className="w-3.5 h-3.5 text-indigo-300" />
-                                <span>Применить мастеринг к проекту</span>
+                                {isExecutingPhase3Step === 'masteringLimiter' ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sliders className="w-3.5 h-3.5 text-white" />}
+                                <span>Выровнять громкость и применить лимитер</span>
                               </button>
                             </div>
                           </div>

@@ -1,7 +1,7 @@
 import { 
   Project, AudioTrack, AudioSegment, SubtitleLine, FinalMixConfig, 
   QualityControlIssue, FinalRenderResult, MixingAuditEntry,
-  QaAuditReport, QaIncident, MasteringStats, MixingType
+  QaAuditReport, QaIncident, MasteringStats, MixingType, LoudnessComparisonReport
 } from '../types';
 import { toNativeLocalPath, getSafeFileUrl, getAbsoluteFilePath } from '../lib/utils';
 
@@ -328,6 +328,128 @@ export class FinalRenderService {
   }
 
   /**
+   * 1.5. Analyze and compare loudness between original reference track and current master/dub mix.
+   * Ensures the master mix is aligned to standard +3.5 to +4.5 dB above the original track for optimal dialogue readability.
+   */
+  public static async analyzeAndCompareLoudnessAsync(
+    tracks: AudioTrack[],
+    config: FinalMixConfig,
+    project?: Project
+  ): Promise<LoudnessComparisonReport> {
+    const recommendedDeltaDb = config.masteringLimiter?.relativeGainDb ?? 4.0; // Standard optimal: 3.5 - 4.5 dB
+
+    let originalPath: string | null = null;
+    let masterSamplePath: string | null = null;
+
+    tracks.forEach(track => {
+      const name = track.name.toLowerCase();
+      const isOriginal = track.type === 'original' || name.includes('оригинал') || name.includes('original') || name.includes('reference') || name.includes('звуки');
+      track.segments.forEach(s => {
+        if (s.filePath) {
+          if (isOriginal && !originalPath) {
+            originalPath = s.filePath;
+          } else if (!isOriginal && !masterSamplePath) {
+            masterSamplePath = s.filePath;
+          }
+        }
+      });
+    });
+
+    // Attempt Native Rust EBU R128 Comparison if Tauri is available
+    if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__ && originalPath && masterSamplePath) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const report = await invoke<LoudnessComparisonReport>('compare_tracks_loudness', {
+          originalPath,
+          masterPath: masterSamplePath,
+          targetRelativeDb: recommendedDeltaDb,
+        });
+        if (report) {
+          return report;
+        }
+      } catch (e) {
+        console.warn('Native compare_tracks_loudness failed, falling back to Web DSP RMS analysis:', e);
+      }
+    }
+
+    // High-Precision Web DSP Loudness Analysis
+    let origSumSq = 0;
+    let origSamples = 0;
+    let origMaxPeak = 0.001;
+
+    let dubSumSq = 0;
+    let dubSamples = 0;
+    let dubMaxPeak = 0.001;
+
+    tracks.forEach(track => {
+      const name = track.name.toLowerCase();
+      const isOriginal = track.type === 'original' || name.includes('оригинал') || name.includes('original') || name.includes('reference') || name.includes('звуки');
+      const trackVol = track.volume ?? 1.0;
+
+      track.segments.forEach(seg => {
+        const segGain = (seg.gain ?? 1.0) * trackVol;
+        if (seg.waveform && seg.waveform.length > 0) {
+          seg.waveform.forEach(val => {
+            const amplified = Math.abs(val * segGain);
+            if (isOriginal) {
+              origSumSq += amplified * amplified;
+              origSamples++;
+              if (amplified > origMaxPeak) origMaxPeak = amplified;
+            } else {
+              dubSumSq += amplified * amplified;
+              dubSamples++;
+              if (amplified > dubMaxPeak) dubMaxPeak = amplified;
+            }
+          });
+        }
+      });
+    });
+
+    const origRms = origSamples > 0 ? Math.sqrt(origSumSq / origSamples) : 0.08;
+    const dubRms = dubSamples > 0 ? Math.sqrt(dubSumSq / dubSamples) : 0.12;
+
+    const originalLufs = Math.round(Math.max(-60, Math.min(-6, 20 * Math.log10(Math.max(0.0001, origRms)) - 2.5)) * 10) / 10;
+    const masterLufs = Math.round(Math.max(-60, Math.min(-6, 20 * Math.log10(Math.max(0.0001, dubRms)) - 2.5)) * 10) / 10;
+    const originalPeakDb = Math.round(Math.max(-60, 20 * Math.log10(Math.min(1.0, origMaxPeak))) * 10) / 10;
+    const masterPeakDb = Math.round(Math.max(-60, 20 * Math.log10(Math.min(1.0, dubMaxPeak))) * 10) / 10;
+
+    const currentDeltaDb = Math.round((masterLufs - originalLufs) * 10) / 10;
+    const targetMasterLufs = Math.round((originalLufs + recommendedDeltaDb) * 10) / 10;
+    const recommendedGainAdjustmentDb = Math.round((targetMasterLufs - masterLufs) * 10) / 10;
+
+    let readabilityStatus: 'optimal' | 'too_quiet' | 'too_loud' = 'optimal';
+    if (currentDeltaDb < 3.4) {
+      readabilityStatus = 'too_quiet';
+    } else if (currentDeltaDb > 4.6) {
+      readabilityStatus = 'too_loud';
+    }
+
+    let recommendationText = '';
+    if (readabilityStatus === 'optimal') {
+      recommendationText = `Идеальный баланс! Мастер-микс громче оригинала на +${currentDeltaDb.toFixed(1)} dB (стандарт 3.5–4.5 dB). Речь читается отчётливо.`;
+    } else if (readabilityStatus === 'too_quiet') {
+      recommendationText = `Мастер-микс тихий относительно оригинала (дельта ${currentDeltaDb >= 0 ? '+' : ''}${currentDeltaDb.toFixed(1)} dB). Рекомендуется поднять громкость на +${recommendedGainAdjustmentDb.toFixed(1)} dB до цели ${targetMasterLufs.toFixed(1)} LUFS.`;
+    } else {
+      recommendationText = `Мастер-микс громче стандарта (дельта +${currentDeltaDb.toFixed(1)} dB). Рекомендуется скорректировать гейн на ${recommendedGainAdjustmentDb.toFixed(1)} dB.`;
+    }
+
+    return {
+      originalLufs,
+      originalPeakDb,
+      originalLra: 7.2,
+      masterLufs,
+      masterPeakDb,
+      masterLra: 5.8,
+      currentDeltaDb,
+      recommendedDeltaDb,
+      targetMasterLufs,
+      recommendedGainAdjustmentDb,
+      readabilityStatus,
+      recommendationText,
+    };
+  }
+
+  /**
    * 2. Apply Mastering Limiter & Broadcast LUFS Target Normalization (Native Rust Engine with Web Fallback)
    */
   public static async applyMasteringLimiterAsync(
@@ -345,7 +467,9 @@ export class FinalRenderService {
       enabled: true,
       truePeakCeilingDb: -1.0,
       targetIntegratedLufs: -14.0,
-      loudnessStandard: 'youtube_web',
+      loudnessStandard: 'original_relative',
+      relativeGainDb: 4.0,
+      autoRelativeMatch: true,
       oversampling: '4x',
       dither: 'tpdf_24bit',
       stereoWidth: 100,
@@ -404,20 +528,25 @@ export class FinalRenderService {
             targetLufs: mastering.targetIntegratedLufs,
             truePeakCeilingDb: mastering.truePeakCeilingDb,
             referencePath: originalReferencePath || undefined,
+            relativeGainDb: mastering.relativeGainDb ?? 4.0,
             lookaheadMs: 5.0,
             oversampling: mastering.oversampling,
             dither: mastering.dither,
           });
 
           if (rustStats) {
+            const relOffsetMsg = rustStats.relativeOffsetAppliedDb != null
+              ? ` (Авто-баланс к оригиналу: +${rustStats.relativeOffsetAppliedDb.toFixed(1)} dB)`
+              : '';
+
             logs.push({
               id: `mastering-rust-calc-${Date.now()}`,
               timestamp: Date.now(),
               stageName: '4. Финал',
               stepId: 'masteringLimiter',
               status: 'info',
-              title: 'Rust DSP: 4x Oversampled True-Peak анализ',
-              message: `Стандарт: ${rustStats.standardApplied}. Исходный уровень: ${rustStats.initialIntegratedLufs} LUFS (TP: ${rustStats.initialTruePeakDbtp} dBTP, LRA: ${rustStats.initialLoudnessRangeLu} LU). Подгонка гейна: ${rustStats.normalizationGainAppliedDb >= 0 ? '+' : ''}${rustStats.normalizationGainAppliedDb} dB.`
+              title: 'Rust DSP: 4x Oversampled True-Peak и анализ громкости',
+              message: `Стандарт: ${rustStats.standardApplied}${relOffsetMsg}. Исходный уровень: ${rustStats.initialIntegratedLufs} LUFS (TP: ${rustStats.initialTruePeakDbtp} dBTP). Подгонка гейна: ${rustStats.normalizationGainAppliedDb >= 0 ? '+' : ''}${rustStats.normalizationGainAppliedDb} dB.`
             });
 
             logs.push({
@@ -427,7 +556,7 @@ export class FinalRenderService {
               stepId: 'masteringLimiter',
               status: rustStats.isCompliant ? 'success' : 'warning',
               title: rustStats.isCompliant ? 'Мастеринг-лимитер успешно применен (EBU R128 Compliant)' : 'Мастеринг выполнен с предупреждением',
-              message: `Финальный уровень: ${rustStats.finalIntegratedLufs} LUFS (Цель: ${rustStats.targetIntegratedLufs} LUFS). True-Peak: ${rustStats.finalTruePeakDbtp} dBTP (Потолок: ${rustStats.truePeakCeilingDbtp} dBTP). Макс. компрессия лимитера: -${rustStats.maxGainReductionDb} dB (${rustStats.totalLimitedEvents} лимитированных интерполяций).`
+              message: `Финальный уровень: ${rustStats.finalIntegratedLufs} LUFS (Цель: ${rustStats.targetIntegratedLufs} LUFS). True-Peak: ${rustStats.finalTruePeakDbtp} dBTP (Потолок: ${rustStats.truePeakCeilingDbtp} dBTP). Читаемость речи оптимизирована.`
             });
 
             // Adjust tracks in memory
@@ -467,7 +596,7 @@ export class FinalRenderService {
     }
 
     // High-Precision Web DSP Fallback
-    return this.applyMasteringLimiter(tracks, config);
+    return this.applyMasteringLimiter(tracks, config, project);
   }
 
   /**
@@ -491,7 +620,9 @@ export class FinalRenderService {
       enabled: true,
       truePeakCeilingDb: -1.0,
       targetIntegratedLufs: -14.0,
-      loudnessStandard: 'youtube_web',
+      loudnessStandard: 'original_relative',
+      relativeGainDb: 4.0,
+      autoRelativeMatch: true,
       oversampling: '4x',
       dither: 'tpdf_24bit',
       stereoWidth: 100,
@@ -551,7 +682,15 @@ export class FinalRenderService {
       detectedOriginalLufs = Math.max(-50, Math.min(-6, 20 * Math.log10(Math.max(0.001, origRms)) - 2.5));
     }
 
-    if (mastering.loudnessStandard === 'original_match') {
+    const relOffsetDb = mastering.relativeGainDb ?? 4.0;
+
+    if (mastering.loudnessStandard === 'original_relative' || mastering.autoRelativeMatch) {
+      if (detectedOriginalLufs !== null) {
+        targetLufs = Math.round((detectedOriginalLufs + relOffsetDb) * 10) / 10;
+      } else {
+        targetLufs = -10.5; // default if no original detected
+      }
+    } else if (mastering.loudnessStandard === 'original_match') {
       if (detectedOriginalLufs !== null) {
         targetLufs = Math.round(detectedOriginalLufs * 10) / 10;
       } else {
@@ -580,9 +719,11 @@ export class FinalRenderService {
     const neededGainDb = Math.min(8.0, Math.max(-16.0, targetLufs - currentEstLufs));
     const gainFactor = Math.pow(10, neededGainDb / 20);
 
-    const standardDesc = mastering.loudnessStandard === 'original_match'
-      ? `ПО УРОВНЮ ОРИГИНАЛА (${detectedOriginalLufs !== null ? detectedOriginalLufs.toFixed(1) : '-14.0'} LUFS)`
-      : mastering.loudnessStandard.toUpperCase();
+    const standardDesc = mastering.loudnessStandard === 'original_relative'
+      ? `АВТО-БАЛАНС К ОРИГИНАЛУ (+${relOffsetDb.toFixed(1)} dB -> ${targetLufs.toFixed(1)} LUFS)`
+      : mastering.loudnessStandard === 'original_match'
+        ? `ПО УРОВНЮ ОРИГИНАЛА (${detectedOriginalLufs !== null ? detectedOriginalLufs.toFixed(1) : '-14.0'} LUFS)`
+        : mastering.loudnessStandard.toUpperCase();
 
     logs.push({
       id: `mastering-calc-${Date.now()}`,

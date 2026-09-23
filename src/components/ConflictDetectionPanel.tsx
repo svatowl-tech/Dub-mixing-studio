@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { Project, ConflictReport, TimelineValidationSummary } from '../types';
 import { SmartAlignService } from '../services/smartAlignService';
+import { TimingAlignmentService } from '../services/timingAlignmentService';
 import { cn } from '../lib/utils';
 
 interface ConflictDetectionPanelProps {
@@ -41,31 +42,43 @@ export const ConflictDetectionPanel: React.FC<ConflictDetectionPanelProps> = ({
   const runAnalysis = async () => {
     setIsScanning(true);
     try {
-      // Подготавливаем аудио-сегменты
-      const clips = (project.tracks ? project.tracks.flatMap(t => t.segments) : []).map(seg => ({
-        id: seg.id,
-        trackId: (seg as any).trackId || 'main_track',
-        characterId: (seg as any).characterId,
-        characterName: (seg as any).characterName,
-        startMs: Math.round((seg.startTime || 0) * 1000),
-        endMs: Math.round(((seg.startTime || 0) + (seg.duration || 0)) * 1000),
-        durationMs: Math.round((seg.duration || 0) * 1000),
-        subtitleId: (seg as any).subtitleId,
-        isDialogOverlapAllowed: false,
-        isMuted: Boolean((seg as any).isMuted)
-      }));
-
-      // Подготавливаем субтитры сценария
-      const subtitles = (project.subtitles || []).map(sub => ({
+      const rawSubtitles = project.subtitles || [];
+      const subtitles = rawSubtitles.map(sub => ({
         id: String(sub.id),
         startMs: Math.round((sub.start || 0) * 1000),
-        endMs: Math.round((sub.end || 0) * 1000),
+        endMs: Math.round(((sub.end || 0) || (sub.start + 1)) * 1000),
         characterName: sub.role,
         text: sub.text
       }));
 
+      // Подготавливаем аудио-сегменты с учетом допустимых нахлестов из субтитров
+      const clips = (project.tracks ? project.tracks.flatMap(t => (t.segments || []).map(seg => {
+        const sub = seg.matchedSubId ? rawSubtitles.find(s => s.id === seg.matchedSubId) : undefined;
+        let isDialogOverlapAllowed = false;
+        if (sub) {
+          isDialogOverlapAllowed = rawSubtitles.some(otherSub => 
+            otherSub.id !== sub.id &&
+            otherSub.role !== sub.role &&
+            TimingAlignmentService.doSubtitlesOverlapInScript(sub, otherSub)
+          );
+        }
+
+        return {
+          id: seg.id,
+          trackId: t.id,
+          characterId: (seg as any).characterId || t.role,
+          characterName: (seg as any).characterName || t.role || t.name,
+          startMs: Math.round((seg.startTime || 0) * 1000),
+          endMs: Math.round(((seg.startTime || 0) + (seg.duration || 0)) * 1000),
+          durationMs: Math.round((seg.duration || 0) * 1000),
+          subtitleId: seg.matchedSubId || (seg as any).subtitleId,
+          isDialogOverlapAllowed,
+          isMuted: Boolean(t.isMuted)
+        };
+      })) : []);
+
       const res = await SmartAlignService.validateTimelineCompliance(clips, subtitles, {
-        minGapMs: 40,
+        minGapMs: 50,
         timingDriftThresholdMs: 400,
         autoResolveMinorClashes: true
       });

@@ -352,8 +352,10 @@ export const createDefaultPhase4 = (type: MixingType) => ({
   masteringLimiter: {
     enabled: true, // "И дальше только делаем финальный рендер видео с нашей мастер-мастерингом и трупик-лимитером. Причём мы не делаем мастеринг, мы делаем только лимитер."
     truePeakCeilingDb: -1.0, // Чтобы дорожки не вылезали по громкости за оригинал
-    targetIntegratedLufs: -16.0,
-    loudnessStandard: 'youtube_web' as const,
+    targetIntegratedLufs: -14.0,
+    loudnessStandard: 'original_relative' as const, // Мастер-микс автоматически выше оригинала на +3.5..+4.5 dB (стандарт читаемости)
+    relativeGainDb: 4.0, // Превышение над оригиналом +4.0 dB
+    autoRelativeMatch: true,
     oversampling: '4x' as const,
     dither: 'tpdf_24bit' as const,
     stereoWidth: 100, // Без мастерингового расширения стереобазы, только лимитер

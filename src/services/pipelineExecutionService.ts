@@ -1847,7 +1847,7 @@ export class PipelineExecutionService {
 
         if (stepId === 'smartAlign') {
           const origTrack = TimingAlignmentService.findOriginalVoiceTrack(project.tracks);
-          console.group(`[Pipeline] ▶ Phase 2: Smart Align (Acoustic Timing & Lip-Sync Alignment)`);
+          console.group(`[Pipeline] ▶ Phase 2: Smart Align & Auto-Timing (Actor Matching, Phrase Start Sync & Collision Resolution)`);
           console.log(`[SmartAlign] Reference Voice Track:`, origTrack ? `"${origTrack.name}" (ID: ${origTrack.id})` : 'NOT FOUND (Using Subtitle Timecodes as Reference)');
           console.log(`[SmartAlign] Preset Config:`, activePreset.phase2);
 
@@ -1855,75 +1855,41 @@ export class PipelineExecutionService {
             ...prev,
             [stepId]: {
               ...prev[stepId],
-              progress: 10,
-              log: 'Анализ таймкодов субтитров и сопоставление старта фраз с оригиналом...'
+              progress: 5,
+              log: 'Сопоставление актёров с дорожками, синхронизация начала фраз по сабам и разведение коллизий...'
             }
           }));
 
-          const alignedTracks: AudioTrack[] = [];
-          let totalAligned = 0;
-          let allIssues: TimingIssue[] = [];
-          const dubTracks = project.tracks.filter(t => !((t.type === 'original' || (origTrack && t.id === origTrack.id)) && !TimingAlignmentService.isDubTrack(t)));
-          const totalTrackCount = Math.max(1, dubTracks.length);
-          let processedTracks = 0;
-          const alignAuditLogs: any[] = [];
-
-          for (const track of project.tracks) {
-            const isOrigStem = (track.type === 'original' || (origTrack && track.id === origTrack.id)) && !TimingAlignmentService.isDubTrack(track);
-            if (!isOrigStem) {
-              console.log(`[SmartAlign] Aligning dub track "${track.name}" (${track.segments?.length || 0} segments)...`);
+          const res = await TimingAlignmentService.autoAlignProject(
+            project.tracks,
+            origTrack,
+            project.subtitles || [],
+            project.mixingType || activePreset.type,
+            activePreset.phase2,
+            (percent, msg) => {
               setStepExecution(prev => ({
                 ...prev,
                 [stepId]: {
                   ...prev[stepId],
-                  progress: Math.round(10 + (processedTracks / totalTrackCount) * 80),
-                  log: `Smart Align: выравнивание дорожки "${track.name}" (${processedTracks + 1}/${totalTrackCount})...`
+                  progress: Math.round(5 + percent * 0.9),
+                  log: msg
                 }
               }));
-
-              const res = await TimingAlignmentService.alignTrackPhrases(
-                track,
-                origTrack,
-                project.subtitles || [],
-                project.mixingType || activePreset.type,
-                activePreset.phase2,
-                (percent, msg) => {
-                  setStepExecution(prev => ({
-                    ...prev,
-                    [stepId]: {
-                      ...prev[stepId],
-                      progress: Math.round(10 + ((processedTracks + percent / 100) / totalTrackCount) * 80),
-                      log: msg
-                    }
-                  }));
-                }
-              );
-              totalAligned += (res.alignedCount || 0);
-              allIssues.push(...res.issues);
-              alignedTracks.push(res.updatedTrack);
-              processedTracks++;
-
-              console.log(`[SmartAlign] Track "${track.name}" aligned ${res.alignedCount} phrases. Average shift: ${res.avgShiftMs?.toFixed(1) || 0} ms. Detected issues: ${res.issues.length}`);
-
-              alignAuditLogs.push({
-                id: `audit-align-track-${track.id}-${Date.now()}`,
-                timestamp: Date.now(),
-                stageName: '2. Тайминг',
-                stepId: 'smartAlign',
-                status: res.issues.length > 0 ? 'warning' : 'success',
-                title: `Smart Align: ${track.name}`,
-                message: `Синхронизировано ${res.alignedCount} фраз с оригиналом (средний сдвиг: ${res.avgShiftMs?.toFixed(1) || 0} мс). Замечаний тайминга: ${res.issues.length}.`
-              });
-            } else {
-              alignedTracks.push(track);
             }
-          }
+          );
 
-          onUpdateProject({ tracks: alignedTracks });
-          await playbackEngine.updateTracks(alignedTracks);
-          setTimingIssues(allIssues);
+          onUpdateProject({ tracks: res.updatedTracks });
+          await playbackEngine.updateTracks(res.updatedTracks);
+          setTimingIssues(res.issues);
 
-          const logMsg = `Smart Align: синхронизировано ${totalAligned} фраз дубляжа с оригинальным голосом и субтитрами. Обнаружено замечаний: ${allIssues.length}.`;
+          const matchedActorsStr = res.stats.matchedActors > 0 
+            ? ` Назначено дорожек актёрам: ${res.stats.matchedActors}.`
+            : '';
+          const collisionStr = res.stats.resolvedCollisions > 0 
+            ? ` Разведено коллизий: ${res.stats.resolvedCollisions}.`
+            : ' Коллизий нет.';
+
+          const logMsg = `Smart Align: выровнено ${res.stats.alignedPhrases} фраз дубляжа.${matchedActorsStr}${collisionStr}`;
           console.log(`[SmartAlign] Summary: ${logMsg}`);
           console.groupEnd();
 
@@ -1932,17 +1898,27 @@ export class PipelineExecutionService {
             [stepId]: { status: 'success', progress: 100, log: logMsg, hasRollback: true }
           }));
 
+          const auditEntries = res.logs.map((l, i) => ({
+            id: `audit-align-step-${Date.now()}-${i}`,
+            timestamp: Date.now(),
+            stageName: '2. Тайминг',
+            stepId: 'smartAlign',
+            status: 'success' as const,
+            title: 'Авто-тайминг',
+            message: l
+          }));
+
           addAuditLogs([
             {
               id: `audit-align-${Date.now()}`,
               timestamp: Date.now(),
               stageName: '2. Тайминг',
               stepId: 'smartAlign',
-              status: allIssues.length > 0 ? 'warning' : 'success',
-              title: 'Smart Align',
+              status: res.issues.length > 0 ? 'warning' : 'success',
+              title: 'Smart Align & Авто-тайминг',
               message: logMsg
             },
-            ...alignAuditLogs
+            ...auditEntries
           ]);
 
           showToast(logMsg);
@@ -1961,8 +1937,25 @@ export class PipelineExecutionService {
             }
           }));
 
+          let updatedTracks = project.tracks;
+          let fixedCount = 0;
+
+          if (activePreset.phase2.conflictDetection?.autoFixOverlaps) {
+            const collisionRes = TimingAlignmentService.resolveProjectWideCollisions(
+              project.tracks,
+              project.subtitles || [],
+              activePreset.phase2
+            );
+            updatedTracks = collisionRes.updatedTracks;
+            fixedCount = collisionRes.resolvedCount;
+            if (fixedCount > 0) {
+              onUpdateProject({ tracks: updatedTracks });
+              await playbackEngine.updateTracks(updatedTracks);
+            }
+          }
+
           const issues = TimingAlignmentService.validateAllTracksTiming(
-            project.tracks,
+            updatedTracks,
             origTrack,
             project.subtitles || [],
             activePreset.type,
@@ -1970,23 +1963,13 @@ export class PipelineExecutionService {
           );
 
           const overlapIssues = issues.filter(i => i.type === 'overlap');
-          let updatedTracks = project.tracks;
-          let fixedCount = 0;
-
-          if (activePreset.phase2.conflictDetection?.autoFixOverlaps && overlapIssues.length > 0) {
-            updatedTracks = TimingAlignmentService.autoFixAllIssues(overlapIssues, project.tracks);
-            fixedCount = overlapIssues.length;
-            onUpdateProject({ tracks: updatedTracks });
-            await playbackEngine.updateTracks(updatedTracks);
-          }
-
           setTimingIssues(issues);
 
-          const logMsg = overlapIssues.length > 0
-            ? (activePreset.phase2.conflictDetection?.autoFixOverlaps
-                ? `Предотвращение наездов: обнаружено и автоматически устранено ${fixedCount} наездов дорожек друг на друга.`
-                : `Обнаружено ${overlapIssues.length} наездов реплик друг на друга. Требуется ручная проверка.`)
-            : `Коллизий не обнаружено: дорожки синхронизированы и не мешают друг другу.`;
+          const logMsg = fixedCount > 0
+            ? `Предотвращение наездов: автоматически разведено ${fixedCount} наездов фраз. Дорожки не перекрывают друг друга (за исключением запланированных по сабам).`
+            : (overlapIssues.length > 0
+                ? `Обнаружено ${overlapIssues.length} наездов реплик друг на друга. Требуется ручная проверка.`
+                : `Коллизий не обнаружено: дорожки синхронизированы и звучат раздельно.`);
 
           console.log(`[ConflictDetection] Summary: ${logMsg}`);
           console.groupEnd();

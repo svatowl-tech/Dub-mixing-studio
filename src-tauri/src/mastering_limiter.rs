@@ -18,13 +18,15 @@ pub enum MasteringStandard {
     EbuR128,
     /// Film / Movie reference matching: dynamically match the integrated LUFS of the original reference track
     OriginalMatch,
+    /// Relative Dub Balance: Dub sits +3.5 to +4.5 dB above the original reference track for optimal speech clarity
+    OriginalRelative,
     /// Custom target loudness and ceiling
     Custom,
 }
 
 impl Default for MasteringStandard {
     fn default() -> Self {
-        MasteringStandard::YoutubeWeb
+        MasteringStandard::OriginalRelative
     }
 }
 
@@ -34,6 +36,7 @@ impl MasteringStandard {
             MasteringStandard::YoutubeWeb => -14.0,
             MasteringStandard::EbuR128 => -23.0,
             MasteringStandard::OriginalMatch => -14.0, // fallback if reference is absent
+            MasteringStandard::OriginalRelative => -10.5, // fallback if reference is absent (-14.5 + 4.0)
             MasteringStandard::Custom => -14.0,
         }
     }
@@ -43,6 +46,7 @@ impl MasteringStandard {
             MasteringStandard::YoutubeWeb => -1.0,
             MasteringStandard::EbuR128 => -1.0,
             MasteringStandard::OriginalMatch => -1.0,
+            MasteringStandard::OriginalRelative => -1.0,
             MasteringStandard::Custom => -1.0,
         }
     }
@@ -75,19 +79,21 @@ pub struct MasteringLimiterConfig {
     pub oversampling_factor: Option<u32>, // 1, 2, 4 (default 4x)
     pub dither: Option<DitherType>,
     pub reference_audio_path: Option<String>,
+    pub relative_gain_db: Option<f64>, // e.g. +4.0 dB relative to original reference track (3.5 - 4.5 dB standard)
 }
 
 impl Default for MasteringLimiterConfig {
     fn default() -> Self {
         Self {
-            standard: MasteringStandard::YoutubeWeb,
-            target_lufs: Some(-14.0),
+            standard: MasteringStandard::OriginalRelative,
+            target_lufs: None,
             true_peak_ceiling_db: Some(-1.0),
             lookahead_ms: Some(5.0),
             release_ms: Some(50.0),
             oversampling_factor: Some(4),
             dither: Some(DitherType::Tpdf24Bit),
             reference_audio_path: None,
+            relative_gain_db: Some(4.0),
         }
     }
 }
@@ -113,7 +119,26 @@ pub struct MasteringStats {
     pub channels: u16,
     pub duration_sec: f64,
     pub reference_track_lufs: Option<f64>,
+    pub relative_offset_applied_db: Option<f64>,
     pub output_path: String,
+}
+
+/// Loudness comparison report between original reference track and dub master mix
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoudnessComparisonReport {
+    pub original_lufs: f64,
+    pub original_peak_db: f64,
+    pub original_lra: f64,
+    pub master_lufs: f64,
+    pub master_peak_db: f64,
+    pub master_lra: f64,
+    pub current_delta_db: f64,
+    pub recommended_delta_db: f64,
+    pub target_master_lufs: f64,
+    pub recommended_gain_adjustment_db: f64,
+    pub readability_status: String, // "optimal" (3.5 - 4.5 dB), "too_quiet", "too_loud"
+    pub recommendation_text: String,
 }
 
 #[derive(Debug)]
@@ -591,15 +616,22 @@ pub fn process_mastering_limiter(
     // 1. Determine Target Loudness based on Standard or Reference Audio
     let mut target_lufs = config.target_lufs.unwrap_or_else(|| config.standard.target_lufs());
     let mut detected_ref_lufs = None;
+    let mut relative_offset_applied = None;
 
-    if config.standard == MasteringStandard::OriginalMatch {
+    if config.standard == MasteringStandard::OriginalRelative || config.standard == MasteringStandard::OriginalMatch || config.relative_gain_db.is_some() {
         if let Some(ref_path_str) = &config.reference_audio_path {
             let ref_path = Path::new(ref_path_str);
             if ref_path.exists() {
                 if let Ok((ref_lufs, _, _)) = analyze_file_ebur128(ref_path) {
                     if ref_lufs > -60.0 {
-                        target_lufs = ref_lufs;
                         detected_ref_lufs = Some(ref_lufs);
+                        if config.standard == MasteringStandard::OriginalRelative || config.relative_gain_db.is_some() {
+                            let rel_offset = config.relative_gain_db.unwrap_or(4.0);
+                            target_lufs = (ref_lufs + rel_offset).clamp(-30.0, -8.0);
+                            relative_offset_applied = Some(rel_offset);
+                        } else if config.standard == MasteringStandard::OriginalMatch {
+                            target_lufs = ref_lufs;
+                        }
                     }
                 }
             }
@@ -792,6 +824,7 @@ pub fn process_mastering_limiter(
         MasteringStandard::YoutubeWeb => "YouTube / Web Streaming (-14 LUFS, -1.0 dBTP)",
         MasteringStandard::EbuR128 => "EBU R128 European Broadcast (-23.0 LUFS, -1.0 dBTP)",
         MasteringStandard::OriginalMatch => "Original Film Reference Match (-1.0 dBTP)",
+        MasteringStandard::OriginalRelative => "Auto Dub Clarity (+3.5..+4.5 dB over Original)",
         MasteringStandard::Custom => "Custom Mastering Preset",
     };
 
@@ -813,6 +846,7 @@ pub fn process_mastering_limiter(
         channels: channels as u16,
         duration_sec: (duration_sec * 100.0).round() / 100.0,
         reference_track_lufs: detected_ref_lufs.map(|v| (v * 10.0).round() / 10.0),
+        relative_offset_applied_db: relative_offset_applied,
         output_path: output_path.to_string_lossy().to_string(),
     })
 }
@@ -830,6 +864,7 @@ pub async fn apply_mastering_limiter(
     target_lufs: Option<f64>,
     true_peak_ceiling_db: Option<f64>,
     reference_path: Option<String>,
+    relative_gain_db: Option<f64>,
     lookahead_ms: Option<f64>,
     oversampling: Option<String>,
     dither: Option<String>,
@@ -840,8 +875,9 @@ pub async fn apply_mastering_limiter(
     let parsed_standard = match standard.as_deref() {
         Some("ebu_r128") | Some("EbuR128") => MasteringStandard::EbuR128,
         Some("original_match") | Some("OriginalMatch") => MasteringStandard::OriginalMatch,
+        Some("original_relative") | Some("OriginalRelative") => MasteringStandard::OriginalRelative,
         Some("custom") | Some("Custom") => MasteringStandard::Custom,
-        _ => MasteringStandard::YoutubeWeb,
+        _ => MasteringStandard::OriginalRelative,
     };
 
     let parsed_dither = match dither.as_deref() {
@@ -865,6 +901,7 @@ pub async fn apply_mastering_limiter(
         oversampling_factor: Some(oversampling_factor),
         dither: Some(parsed_dither),
         reference_audio_path: reference_path.map(|p| crate::file_io::normalize_windows_path(&p)),
+        relative_gain_db: relative_gain_db.or(Some(4.0)),
     };
 
     tokio::task::spawn_blocking(move || {
@@ -873,4 +910,79 @@ pub async fn apply_mastering_limiter(
     })
     .await
     .map_err(|e| format!("Mastering task join failed: {}", e))?
+}
+
+/// Tauri command to analyze and compare loudness between Original Reference Track and Master Mix Track
+#[tauri::command]
+pub async fn compare_tracks_loudness(
+    original_path: String,
+    master_path: String,
+    target_relative_db: Option<f64>,
+) -> Result<LoudnessComparisonReport, String> {
+    let orig_p = std::path::PathBuf::from(crate::file_io::normalize_windows_path(&original_path));
+    let mast_p = std::path::PathBuf::from(crate::file_io::normalize_windows_path(&master_path));
+
+    let recommended_delta_db = target_relative_db.unwrap_or(4.0); // Standard optimal dub offset: 3.5 - 4.5 dB
+
+    tokio::task::spawn_blocking(move || {
+        if !orig_p.exists() {
+            return Err(format!("Original audio file does not exist: {}", orig_p.display()));
+        }
+        if !mast_p.exists() {
+            return Err(format!("Master audio file does not exist: {}", mast_p.display()));
+        }
+
+        let (orig_lufs, orig_peak_db, orig_lra) = analyze_file_ebur128(&orig_p)
+            .map_err(|e| format!("Failed to analyze original track: {:?}", e))?;
+        let (mast_lufs, mast_peak_db, mast_lra) = analyze_file_ebur128(&mast_p)
+            .map_err(|e| format!("Failed to analyze master mix track: {:?}", e))?;
+
+        let current_delta_db = (mast_lufs - orig_lufs * 10.0).round() / 10.0;
+        let diff_delta = (mast_lufs - orig_lufs) - recommended_delta_db;
+        let target_master_lufs = ((orig_lufs + recommended_delta_db) * 10.0).round() / 10.0;
+        let recommended_gain_adjustment_db = (target_master_lufs - mast_lufs * 10.0).round() / 10.0;
+
+        let readability_status = if (3.4..=4.6).contains(&(mast_lufs - orig_lufs)) {
+            "optimal".to_string()
+        } else if (mast_lufs - orig_lufs) < 3.4 {
+            "too_quiet".to_string()
+        } else {
+            "too_loud".to_string()
+        };
+
+        let recommendation_text = match readability_status.as_str() {
+            "optimal" => format!(
+                "Идеальный баланс! Мастер-микс громче оригинала на {:.1} dB (стандарт читаемости: 3.5–4.5 dB). Речь звучит отчётливо и чисто.",
+                mast_lufs - orig_lufs
+            ),
+            "too_quiet" => format!(
+                "Мастер-микс тихий относительно оригинала (дельта {:.1} dB). Рекомендуется поднять громкость на {:+.1} dB до цели {:.1} LUFS.",
+                mast_lufs - orig_lufs,
+                recommended_gain_adjustment_db,
+                target_master_lufs
+            ),
+            _ => format!(
+                "Мастер-микс громче стандарта (дельта {:.1} dB). Рекомендуется уменьшить гейн на {:.1} dB для предотвращения перегрузки.",
+                mast_lufs - orig_lufs,
+                recommended_gain_adjustment_db.abs()
+            ),
+        };
+
+        Ok(LoudnessComparisonReport {
+            original_lufs: (orig_lufs * 10.0).round() / 10.0,
+            original_peak_db: (orig_peak_db * 10.0).round() / 10.0,
+            original_lra: (orig_lra * 10.0).round() / 10.0,
+            master_lufs: (mast_lufs * 10.0).round() / 10.0,
+            master_peak_db: (mast_peak_db * 10.0).round() / 10.0,
+            master_lra: (mast_lra * 10.0).round() / 10.0,
+            current_delta_db: ((mast_lufs - orig_lufs) * 10.0).round() / 10.0,
+            recommended_delta_db: (recommended_delta_db * 10.0).round() / 10.0,
+            target_master_lufs,
+            recommended_gain_adjustment_db,
+            readability_status,
+            recommendation_text,
+        })
+    })
+    .await
+    .map_err(|e| format!("Comparison task join failed: {}", e))?
 }

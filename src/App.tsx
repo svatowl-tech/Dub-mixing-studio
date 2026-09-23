@@ -27,6 +27,7 @@ import { generateWaveformPeaksFromBlob } from './lib/waveformBridge';
 import { FixService } from './services/fixService';
 import { BulkImportService } from './services/bulkImportService';
 import { UniversalParserService } from './services/UniversalParserService';
+import { TimingAlignmentService } from './services/timingAlignmentService';
 import { playbackEngine } from './services/playbackEngine';
 import { logger } from './lib/logger';
 
@@ -1193,11 +1194,17 @@ export default function App() {
       
       setProject(prev => {
         const baseProject = prev || createDefaultProject(file.name.replace(/\.[^/.]+$/, ""), fileDir);
+        let updatedTracks = baseProject.tracks;
+        if (updatedTracks && updatedTracks.length > 0 && subtitles.length > 0) {
+          const matchRes = TimingAlignmentService.autoMatchActorsToTracks(updatedTracks, subtitles);
+          updatedTracks = matchRes.updatedTracks;
+        }
         return {
           ...baseProject,
           subtitles,
           roles,
-          selectedRole: roles[0] || 'Default'
+          selectedRole: roles[0] || 'Default',
+          tracks: updatedTracks
         };
       });
     }
@@ -1298,11 +1305,17 @@ export default function App() {
 
     setProject(prev => {
       const currentProject = prev || createDefaultProject(subsData.name.replace(/\.[^/.]+$/, ""), finalProjectRoot || "");
+      let updatedTracks = currentProject.tracks;
+      if (updatedTracks && updatedTracks.length > 0 && subsData.parsed.subtitles?.length > 0) {
+        const matchRes = TimingAlignmentService.autoMatchActorsToTracks(updatedTracks, subsData.parsed.subtitles);
+        updatedTracks = matchRes.updatedTracks;
+      }
       return {
         ...currentProject,
         subtitles: subsData.parsed.subtitles,
         roles: subsData.parsed.roles,
-        selectedRole: subsData.parsed.roles[0] || 'Default'
+        selectedRole: subsData.parsed.roles[0] || 'Default',
+        tracks: updatedTracks
       };
     });
   };

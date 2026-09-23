@@ -8,6 +8,52 @@ import { parseSubtitleFileNative, isTauriEnvironment } from '../lib/subtitleFuzz
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
 
+export function extractSpeakerAndCleanText(rawText: string, defaultRole = 'Default'): { role: string; text: string } {
+  let text = rawText.trim();
+  if (!text) return { role: defaultRole, text: '' };
+
+  // 1. WebVTT <v Speaker>text</v>
+  const vttSpeakerMatch = text.match(/^<v\s+([^>]+)>(.*)(?:<\/v>)?$/is);
+  if (vttSpeakerMatch) {
+    return {
+      role: vttSpeakerMatch[1].trim(),
+      text: vttSpeakerMatch[2].replace(/<\/v>/gi, '').trim()
+    };
+  }
+
+  // 2. [Speaker]: Text or [Speaker] Text
+  const bracketSpeakerMatch = text.match(/^\[([a-zA-Zа-яА-ЯёЁ0-9_\s\-\.]{1,30})\]\s*[:\-—]?\s*(.+)$/s);
+  if (bracketSpeakerMatch) {
+    return {
+      role: bracketSpeakerMatch[1].trim(),
+      text: bracketSpeakerMatch[2].trim()
+    };
+  }
+
+  // 3. (Speaker): Text or (Speaker) Text
+  const parenSpeakerMatch = text.match(/^\(([a-zA-Zа-яА-ЯёЁ0-9_\s\-\.]{1,30})\)\s*[:\-—]?\s*(.+)$/s);
+  if (parenSpeakerMatch) {
+    return {
+      role: parenSpeakerMatch[1].trim(),
+      text: parenSpeakerMatch[2].trim()
+    };
+  }
+
+  // 4. Speaker: Text (where Speaker is 1-3 words without punctuation)
+  const colonSpeakerMatch = text.match(/^([a-zA-Zа-яА-ЯёЁ0-9_]{2,20}(?:\s+[a-zA-Zа-яА-ЯёЁ0-9_]{2,20}){0,2})\s*:\s+(.+)$/s);
+  if (colonSpeakerMatch && !colonSpeakerMatch[1].toLowerCase().startsWith('http') && !/^\d+$/.test(colonSpeakerMatch[1])) {
+    return {
+      role: colonSpeakerMatch[1].trim(),
+      text: colonSpeakerMatch[2].trim()
+    };
+  }
+
+  return {
+    role: defaultRole,
+    text
+  };
+}
+
 export class UniversalParserService {
   /**
    * Parses the raw content of a file into SubtitleLine objects.
@@ -88,12 +134,13 @@ export class UniversalParserService {
     while ((match = srtRegex.exec(content)) !== null) {
       const [ , startStr, endStr, text] = match;
       const cleanText = text.replace(/<[^>]+>/g, '').replace(/\{[^}]+\}/g, '').trim().replace(/\\N/g, ' ').replace(/\\n/g, ' ').replace(/\n/g, ' ');
+      const { role, text: parsedText } = extractSpeakerAndCleanText(cleanText, 'Default');
       lines.push({
         id: `srt-${lines.length}-${Date.now()}`,
         start: this.srtTimeToSeconds(startStr),
         end: this.srtTimeToSeconds(endStr),
-        text: cleanText,
-        role: 'Default',
+        text: parsedText,
+        role,
       });
     }
     return lines;
@@ -111,13 +158,14 @@ export class UniversalParserService {
 
       // Strip VTT tags like <v Speaker> or <c.class>
       const cleanText = text.replace(/<[^>]+>/g, '').trim().replace(/\\N/g, ' ').replace(/\\n/g, ' ').replace(/\n/g, ' ');
+      const { role, text: parsedText } = extractSpeakerAndCleanText(text.trim(), 'Default');
       
       lines.push({
         id: `vtt-${lines.length}-${Date.now()}`,
         start: this.vttTimeToSeconds(startStr),
         end: this.vttTimeToSeconds(endStr),
-        text: cleanText,
-        role: 'Default',
+        text: parsedText || cleanText,
+        role,
       });
     }
     return lines;
@@ -128,9 +176,8 @@ export class UniversalParserService {
     const rows = content.split('\n').filter(line => line.trim().length > 0);
     
     rows.forEach((row, index) => {
-      // Basic CSV splitting (doesn't handle quotes perfectly, but good enough for simple scripts)
       const parts = row.split(';');
-      if (parts.length === 1) { // Try comma if semicolon fails
+      if (parts.length === 1) {
         const commaParts = row.split(',');
         if (commaParts.length > 1) parts.splice(0, 1, ...commaParts);
       }
@@ -141,14 +188,18 @@ export class UniversalParserService {
       if (parts.length >= 2) {
         role = parts[0].trim();
         text = parts.slice(1).join(',').trim();
+      } else {
+        const extracted = extractSpeakerAndCleanText(text);
+        role = extracted.role;
+        text = extracted.text;
       }
 
       lines.push({
         id: `csv-${index}-${Date.now()}`,
-        start: 0, // No timecodes 
+        start: 0, 
         end: 0,
-        text: text.replace(/^["']|["']$/g, ''), // Strip surrounding quotes
-        role: role.replace(/^["']|["']$/g, ''), // Strip surrounding quotes
+        text: text.replace(/^["']|["']$/g, ''),
+        role: role.replace(/^["']|["']$/g, ''),
       });
     });
 
@@ -157,29 +208,25 @@ export class UniversalParserService {
 
   private static parseFB2(content: string): SubtitleLine[] {
     const lines: SubtitleLine[] = [];
-    
-    // Extract everything between <body...> and </body>
     const bodyMatch = content.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
     let bodyText = bodyMatch ? bodyMatch[1] : content;
 
-    // Remove empty lines, images, binary
     bodyText = bodyText.replace(/<binary[^>]*>[\s\S]*?<\/binary>/gi, '');
     bodyText = bodyText.replace(/<empty-line\b[^>]*\/>/gi, '');
 
-    // Get paragraphs <p>
     const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
     let match;
     let index = 0;
     while ((match = pRegex.exec(bodyText)) !== null) {
-      // Strip other inner tags like <strong>, <emphasis>, <a>
       let text = match[1].replace(/<[^>]+>/g, '').trim();
       if (text.length > 0) {
+        const { role, text: parsedText } = extractSpeakerAndCleanText(text);
         lines.push({
           id: `fb2-${index++}-${Date.now()}`,
           start: 0,
           end: 0,
-          text: text,
-          role: 'Default',
+          text: parsedText,
+          role,
         });
       }
     }
@@ -188,13 +235,12 @@ export class UniversalParserService {
 
   private static async parseDOCX(content: string | ArrayBuffer): Promise<SubtitleLine[]> {
     try {
-      // mammoth needs array buffer
       const buffer = typeof content === 'string' 
           ? new TextEncoder().encode(content).buffer 
           : content;
       
       const result = await mammoth.extractRawText({ arrayBuffer: buffer });
-      const text = result.value; // The raw text
+      const text = result.value;
       return this.parseTXT(text);
     } catch (err) {
       console.error('DOCX parsing failed:', err);
@@ -210,7 +256,6 @@ export class UniversalParserService {
       let fullText = '';
       const spine = book.spine as any;
       if (spine && spine.each) {
-          // Loop through all chapters
           const chapters: string[] = [];
           for (let i = 0; i < spine.items.length; i++) {
               const item = spine.items[i];
@@ -255,13 +300,16 @@ export class UniversalParserService {
   private static parseTXT(content: string): SubtitleLine[] {
     return content.split('\n')
       .filter(line => line.trim().length > 0)
-      .map((line, index) => ({
-        id: `txt-${index}-${Date.now()}`,
-        start: 0,
-        end: 0,
-        text: line.trim().replace(/\\N/g, ' ').replace(/\\n/g, ' '),
-        role: 'Default',
-      }));
+      .map((line, index) => {
+        const { role, text } = extractSpeakerAndCleanText(line.trim().replace(/\\N/g, ' ').replace(/\\n/g, ' '));
+        return {
+          id: `txt-${index}-${Date.now()}`,
+          start: 0,
+          end: 0,
+          text,
+          role,
+        };
+      });
   }
 
   private static srtTimeToSeconds(time: string): number {
@@ -284,3 +332,4 @@ export class UniversalParserService {
     return 0;
   }
 }
+

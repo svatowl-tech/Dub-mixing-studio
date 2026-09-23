@@ -129,6 +129,7 @@ export interface Project {
 export interface AudioTrack {
   id: string;
   name: string;
+  role?: string;
   type?: 'original' | 'voice' | 'music' | 'effects' | 'dub';
   filePath?: string;
   audioUrl?: string;
@@ -1382,6 +1383,21 @@ export interface QaAuditReport {
   incidents: QaIncident[];
 }
 
+export interface LoudnessComparisonReport {
+  originalLufs: number;
+  originalPeakDb: number;
+  originalLra: number;
+  masterLufs: number;
+  masterPeakDb: number;
+  masterLra: number;
+  currentDeltaDb: number;
+  recommendedDeltaDb: number;
+  targetMasterLufs: number;
+  recommendedGainAdjustmentDb: number;
+  readabilityStatus: 'optimal' | 'too_quiet' | 'too_loud';
+  recommendationText: string;
+}
+
 export interface MasteringStats {
   standardApplied: string;
   initialIntegratedLufs: number;
@@ -1400,6 +1416,7 @@ export interface MasteringStats {
   channels: number;
   durationSec: number;
   referenceTrackLufs?: number | null;
+  relativeOffsetAppliedDb?: number | null;
   outputPath: string;
 }
 
@@ -1453,6 +1470,21 @@ export interface FinalRenderResult {
   renderedAt: number;
 }
 
+export interface LoudnessComparisonReport {
+  originalLufs: number;
+  originalPeakDb: number;
+  originalLra: number;
+  masterLufs: number;
+  masterPeakDb: number;
+  masterLra: number;
+  currentDeltaDb: number;
+  recommendedDeltaDb: number;
+  targetMasterLufs: number;
+  recommendedGainAdjustmentDb: number;
+  readabilityStatus: 'optimal' | 'too_quiet' | 'too_loud';
+  recommendationText: string;
+}
+
 // Этап 4: Финальный рендер и экспорт (Final Mix & Render)
 export interface FinalMixConfig {
   enabled: boolean;
@@ -1474,7 +1506,9 @@ export interface FinalMixConfig {
     enabled: boolean;
     truePeakCeilingDb: number; // -1.0 dBTP (стандарт)
     targetIntegratedLufs: number; // -14.0 LUFS (YouTube/Web), -23.0 (EBU R128), -16.0 (Podcast)
-    loudnessStandard: 'original_match' | 'youtube_web' | 'ebu_r128' | 'streaming_podcast' | 'custom';
+    loudnessStandard: 'original_relative' | 'original_match' | 'youtube_web' | 'ebu_r128' | 'streaming_podcast' | 'custom';
+    relativeGainDb?: number; // Превышение над оригиналом (+3.5..+4.5 dB для идеальной читаемости дубляжа)
+    autoRelativeMatch?: boolean; // Автоматически выстраивать финальную громкость относительно оригинала
     oversampling: '2x' | '4x' | '8x';
     dither: 'none' | 'tpdf_16bit' | 'tpdf_24bit';
     stereoWidth: number; // 100%

@@ -107,7 +107,7 @@ use gain_matching::apply_smart_gain_matching;
 use intelligent_normalization::process_intelligent_normalization_with_clips;
 use logger::log_debug;
 use loudness_engine::{analyze_track_loudness, reset_realtime_loudness, RealtimeLoudnessMeter};
-use mastering_limiter::apply_mastering_limiter;
+use mastering_limiter::{apply_mastering_limiter, compare_tracks_loudness};
 use media_processor::{
     apply_audio_effect, concat_backstage_videos, create_blank_video, create_proxy_video,
     extract_mkv_assets, get_media_info, merge_project_segments, merge_segments, mux_video,
@@ -417,6 +417,7 @@ fn main() {
             batch_process_master_vocal_bus,
             run_project_qa_audit,
             apply_mastering_limiter,
+            compare_tracks_loudness,
             generate_ass_subtitle_file,
             burn_subtitles_to_video,
             process_subtitle_burn_stage,

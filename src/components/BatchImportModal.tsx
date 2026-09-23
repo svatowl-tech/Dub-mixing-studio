@@ -5,6 +5,7 @@ import { useUIState } from '../contexts/UIContext';
 import { useProjectData } from '../contexts/ProjectContext';
 import { useDropzone } from 'react-dropzone';
 import { AudioTrack, AudioSegment, Project } from '../types';
+import { TimingAlignmentService } from '../services/timingAlignmentService';
 import { getSafeFileUrl } from '../lib/utils';
 import { addToWebFileCache } from '../lib/tauriLegacyWrapper';
 import { IOLogger } from '../lib/ioLogger';
@@ -285,6 +286,13 @@ export const BatchImportModal = () => {
         processing: { enabled: false }
       };
 
+      let finalTracks = [originalTrack, ...newTracks];
+      const existingSubs = project?.subtitles || [];
+      if (existingSubs.length > 0) {
+        const matchRes = TimingAlignmentService.autoMatchActorsToTracks(finalTracks, existingSubs);
+        finalTracks = matchRes.updatedTracks;
+      }
+
       const newProject = {
         ...(project || {}),
         id: project ? project.id : `proj-${Date.now()}`,
@@ -292,7 +300,7 @@ export const BatchImportModal = () => {
         videoUrl: finalVideoPath ? getSafeFileUrl(finalVideoPath) : undefined,
         videoPath: finalVideoPath,
         projectPath: projectRoot,
-        tracks: [originalTrack, ...newTracks],
+        tracks: finalTracks,
         roles: audioFiles.map(a => a.roleName),
         originalPeaks: originalPeaks.length > 0 ? originalPeaks : undefined,
         referenceAudioPath: refPath,
