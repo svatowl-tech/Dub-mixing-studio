@@ -9,6 +9,7 @@ import {
 import { useUIState } from '../contexts/UIContext';
 import { computeSpectrogramFromFile, computeSpectrogramFromPcm, SpectrogramData } from '../lib/spectralBridge';
 import { getSafeFileUrl, createPrefixedAudioPath, invalidateFileUrl } from '../lib/utils';
+import { playbackEngine } from '../services/playbackEngine';
 import { open as rawOpen, save as rawSave } from '@tauri-apps/plugin-dialog';
 import SynchronizedAudioVisualizer from './SynchronizedAudioVisualizer';
 import { ModelSelector } from './ModelSelector';
@@ -124,9 +125,14 @@ export const SingleTrackStudioModal: React.FC = () => {
   // Decode audio file into AudioBuffer
   const decodeFileToBuffer = async (path: string): Promise<AudioBuffer | null> => {
     try {
-      const ctx = getAudioContext();
       const safeUrl = getSafeFileUrl(path);
-      const resp = await fetch(safeUrl);
+      if (safeUrl) {
+        const buffered = await playbackEngine.loadBuffer(safeUrl, path);
+        if (buffered) return buffered;
+      }
+
+      const ctx = getAudioContext();
+      const resp = await fetch(safeUrl || path);
       const arrayBuffer = await resp.arrayBuffer();
 
       const decoded = await ctx.decodeAudioData(arrayBuffer);

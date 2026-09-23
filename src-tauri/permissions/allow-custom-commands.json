@@ -30,6 +30,7 @@
           "list_audio_files",
           "write_audio_file",
           "init_project_folder",
+          "check_file_exists",
           "get_file_info",
           "save_subtitles",
           "generate_stress_test",

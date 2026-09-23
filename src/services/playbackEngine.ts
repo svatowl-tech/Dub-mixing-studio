@@ -17,6 +17,45 @@ async function callTauri(cmd: string, args?: Record<string, any>): Promise<any> 
   }
 }
 
+/**
+ * Strips ID3v2 tags from FLAC or audio buffers that fail in browser decodeAudioData.
+ * Many audio editors/recorders attach ID3 headers before the 'fLaC' marker, causing
+ * Chromium/WebView2 to throw EncodingError: Unable to decode audio data.
+ */
+function cleanAudioBuffer(arrayBuffer: ArrayBuffer): ArrayBuffer {
+  try {
+    const bytes = new Uint8Array(arrayBuffer);
+    // Check for ID3 header: "ID3" (0x49, 0x44, 0x33)
+    if (bytes.length > 10 && bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+      const flags = bytes[5];
+      const hasFooter = (flags & 0x10) !== 0;
+      const size = ((bytes[6] & 0x7f) << 21) |
+                   ((bytes[7] & 0x7f) << 14) |
+                   ((bytes[8] & 0x7f) << 7) |
+                   (bytes[9] & 0x7f);
+      const tagEnd = 10 + size + (hasFooter ? 10 : 0);
+
+      // Search for FLAC sync marker 'fLaC' (0x66, 0x4c, 0x61, 0x43)
+      for (let i = 0; i < Math.min(bytes.length - 4, tagEnd + 1024); i++) {
+        if (bytes[i] === 0x66 && bytes[i + 1] === 0x4c && bytes[i + 2] === 0x61 && bytes[i + 3] === 0x43) {
+          return arrayBuffer.slice(i);
+        }
+      }
+      if (tagEnd < bytes.length) {
+        return arrayBuffer.slice(tagEnd);
+      }
+    }
+
+    // Search for 'fLaC' marker if slightly offset in first 4KB
+    for (let i = 1; i < Math.min(bytes.length - 4, 4096); i++) {
+      if (bytes[i] === 0x66 && bytes[i + 1] === 0x4c && bytes[i + 2] === 0x61 && bytes[i + 3] === 0x43) {
+        return arrayBuffer.slice(i);
+      }
+    }
+  } catch (_) {}
+  return arrayBuffer;
+}
+
 function formatNativeTracks(tracks: any[], originalAudioPath?: string | null) {
   let hasOriginalTrack = false;
   const formatted = (tracks || []).map(t => {
@@ -202,6 +241,9 @@ export class PlaybackEngine {
     monoNode?: GainNode;
   }> = new Map();
 
+  private originalAudioCheckKey: string | null = null;
+  private originalAudioCheckPromise: Promise<string | null> | null = null;
+
   constructor() {}
 
   private isTauriRuntime(): boolean {
@@ -210,67 +252,89 @@ export class PlaybackEngine {
 
   public async ensureOriginalAudioLoaded(project: any): Promise<string | null> {
     if (!project) return null;
-    let foundPath: string | null = null;
 
-    // 1. Поиск в существующих дорожках проекта
-    const origTrack = (project.tracks || []).find((t: any) => 
-      t.type === 'original' || (t.name && (t.name.toLowerCase().includes('оригинал') || t.name.toLowerCase().includes('original')))
-    );
-    if (origTrack && origTrack.segments && origTrack.segments.length > 0) {
-      for (const seg of origTrack.segments) {
-        if (seg.filePath) {
-          foundPath = seg.filePath;
-          break;
-        }
-      }
+    const currentKey = `${project.id || ''}:${project.projectPath || ''}:${project.videoPath || project.videoUrl || ''}`;
+    if (this.originalAudioCheckKey === currentKey && this.originalAudioPath) {
+      this.syncVideoMuteState(project.tracks);
+      return this.originalAudioPath;
     }
 
-    // 2. Поиск по стандартным путям проекта
-    if (!foundPath && project.projectPath) {
-      const pPath = project.projectPath.replace(/\\/g, '/');
-      const takesWav = `${pPath}/takes/original_audio.wav`;
-      const rootWav = `${pPath}/original_audio.wav`;
+    if (this.originalAudioCheckPromise && this.originalAudioCheckKey === currentKey) {
+      return this.originalAudioCheckPromise;
+    }
 
-      if (this.isTauriRuntime()) {
-        try {
-          const { invoke } = await import('@tauri-apps/api/core');
-          const existsTakes = await invoke<boolean>('check_file_exists', { path: takesWav }).catch(() => false);
-          if (existsTakes) {
-            foundPath = takesWav;
-          } else {
-            const existsRoot = await invoke<boolean>('check_file_exists', { path: rootWav }).catch(() => false);
-            if (existsRoot) {
-              foundPath = rootWav;
-            } else if (project.videoPath || project.videoUrl) {
-              const vPath = toNativeLocalPath(project.videoPath || project.videoUrl);
-              if (vPath) {
-                const extractedPath = await invoke<string>('ensure_original_audio_extracted', { 
-                  projectPath: project.projectPath, 
-                  videoPath: vPath 
-                }).catch(() => null);
-                if (extractedPath) {
-                  foundPath = extractedPath;
+    this.originalAudioCheckKey = currentKey;
+    this.originalAudioCheckPromise = (async () => {
+      let foundPath: string | null = null;
+
+      // 1. Поиск в существующих дорожках проекта
+      const origTrack = (project.tracks || []).find((t: any) => 
+        t.type === 'original' || (t.name && (t.name.toLowerCase().includes('оригинал') || t.name.toLowerCase().includes('original')))
+      );
+      if (origTrack && origTrack.segments && origTrack.segments.length > 0) {
+        for (const seg of origTrack.segments) {
+          if (seg.filePath) {
+            foundPath = seg.filePath;
+            break;
+          }
+        }
+      }
+
+      // 2. Поиск по стандартным путям проекта
+      if (!foundPath && project.projectPath) {
+        const pPath = project.projectPath.replace(/\\/g, '/');
+        const takesWav = `${pPath}/takes/original_audio.wav`;
+        const rootWav = `${pPath}/original_audio.wav`;
+
+        if (this.isTauriRuntime()) {
+          try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const existsTakes = await invoke<boolean>('check_file_exists', { path: takesWav }).catch(() => false);
+            if (existsTakes) {
+              foundPath = takesWav;
+            } else {
+              const existsRoot = await invoke<boolean>('check_file_exists', { path: rootWav }).catch(() => false);
+              if (existsRoot) {
+                foundPath = rootWav;
+              } else if (project.videoPath || project.videoUrl) {
+                const vPath = toNativeLocalPath(project.videoPath || project.videoUrl);
+                if (vPath) {
+                  const extractedPath = await invoke<string>('ensure_original_audio_extracted', { 
+                    projectPath: project.projectPath, 
+                    videoPath: vPath 
+                  }).catch(() => null);
+                  if (extractedPath) {
+                    foundPath = extractedPath;
+                  }
                 }
               }
             }
+          } catch (e) {
+            console.warn('[PlaybackEngine] Check original audio path error:', e);
           }
-        } catch (e) {
-          console.warn('[PlaybackEngine] Check original audio path error:', e);
-        }
-      } else {
-        const globalCache = (window as any).webFileCache;
-        if (globalCache && (globalCache.has(takesWav) || globalCache.has('original_audio.wav'))) {
-          foundPath = takesWav;
+        } else {
+          const globalCache = (window as any).webFileCache;
+          if (globalCache && (globalCache.has(takesWav) || globalCache.has('original_audio.wav'))) {
+            foundPath = takesWav;
+          }
         }
       }
-    }
 
-    this.originalAudioPath = foundPath;
-    this.originalAudioExists = Boolean(foundPath);
-    console.log(`[PlaybackEngine] Original audio check: exists=${this.originalAudioExists}, path=${foundPath || 'none'}`);
-    
-    this.syncVideoMuteState(project.tracks);
-    return foundPath;
+      const prevPath = this.originalAudioPath;
+      this.originalAudioPath = foundPath;
+      this.originalAudioExists = Boolean(foundPath);
+
+      if (prevPath !== foundPath) {
+        console.log(`[PlaybackEngine] Original audio check: exists=${this.originalAudioExists}, path=${foundPath || 'none'}`);
+      }
+      
+      this.syncVideoMuteState(project.tracks);
+      return foundPath;
+    })().finally(() => {
+      this.originalAudioCheckPromise = null;
+    });
+
+    return this.originalAudioCheckPromise;
   }
 
   public syncVideoMuteState(tracks?: any[]) {
@@ -704,6 +768,7 @@ export class PlaybackEngine {
     } else {
       this.bufferCache.clear();
       this.pendingBuffers.clear();
+      this.originalAudioCheckKey = null;
       callTauri('clear_native_playback_cache').catch(() => {});
     }
     console.log("[PlaybackEngine] Cache cleared", targetUrlOrPath || 'ALL');
@@ -727,6 +792,14 @@ export class PlaybackEngine {
 
     if (filePaths.length > 0) {
       callTauri('preload_playback_buffers', { filePaths: Array.from(new Set(filePaths)) }).catch(console.warn);
+    }
+
+    // In desktop Tauri runtime, timeline playback is natively managed by Rust CPAL directly
+    // from cached memory buffers (AudioBufferCache/Symphonia).
+    // Pre-decoding and duplicating full audio into WebView WebAudio buffers is unnecessary,
+    // wastes system memory, triggers heavy GC pauses, and fails on formats unsupported by WebView2 decodeAudioData (e.g. 24-bit/32-bit FLAC).
+    if (this.isTauriRuntime()) {
+      return;
     }
 
     const chunkSize = 8;
@@ -801,6 +874,58 @@ export class PlaybackEngine {
     }
   }
 
+  /**
+   * Native Tauri decoder fallback via Symphonia for audio files that fail in browser decodeAudioData
+   * (e.g. 24-bit/32-bit FLAC, custom sample rates, files with non-standard containers in WebView2).
+   */
+  private async loadNativeAudioBuffer(ctx: AudioContext, targetPath: string): Promise<AudioBuffer | null> {
+    const localPath = toNativeLocalPath(targetPath);
+    if (!localPath || !this.isTauriRuntime()) return null;
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const meta = await invoke<any>('load_audio_file', { filePath: localPath });
+      if (!meta || (!meta.bufferId && !meta.buffer_id)) return null;
+
+      const bufferId = meta.bufferId || meta.buffer_id;
+      const channels = meta.channels || 1;
+      const sampleRate = meta.sampleRate || meta.sample_rate || 48000;
+      const totalFrames = meta.totalFrames || meta.total_frames || 0;
+      const totalSamples = meta.totalSamples || meta.total_samples || (totalFrames * channels);
+
+      if (totalFrames <= 0 || totalSamples <= 0) return null;
+
+      const audioBuffer = ctx.createBuffer(channels, totalFrames, sampleRate);
+
+      // Fetch samples in chunks of up to 500,000 samples to keep IPC responsive
+      const CHUNK_SIZE = 500000;
+      for (let offset = 0; offset < totalSamples; offset += CHUNK_SIZE) {
+        const fetchLen = Math.min(CHUNK_SIZE, totalSamples - offset);
+        const slice = await invoke<number[]>('get_audio_slice', {
+          bufferId,
+          startSample: offset,
+          length: fetchLen,
+        });
+
+        if (!slice || slice.length === 0) break;
+
+        for (let i = 0; i < slice.length; i++) {
+          const globalSampleIdx = offset + i;
+          const frameIdx = Math.floor(globalSampleIdx / channels);
+          const ch = globalSampleIdx % channels;
+          if (frameIdx < totalFrames && ch < channels) {
+            audioBuffer.getChannelData(ch)[frameIdx] = slice[i];
+          }
+        }
+      }
+
+      return audioBuffer;
+    } catch (err) {
+      console.warn(`[PlaybackEngine] Native audio buffer decode fallback failed for ${localPath}:`, err);
+      return null;
+    }
+  }
+
   public async loadBuffer(url: string, filePath?: string): Promise<AudioBuffer | null> {
     if (this.bufferCache.has(url)) {
       return this.bufferCache.get(url)!;
@@ -860,25 +985,59 @@ export class PlaybackEngine {
           }
         }
 
-        let arrayBuffer: ArrayBuffer;
+        let arrayBuffer: ArrayBuffer | null = null;
         if (fileOrBlob) {
           arrayBuffer = await fileOrBlob.arrayBuffer();
-        } else {
-          const response = await fetch(url);
-          if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+        } else if (url) {
+          try {
+            const response = await fetch(url);
+            if (response.ok) {
+              arrayBuffer = await response.arrayBuffer();
+            } else {
+              console.warn(`[PlaybackEngine] Fetch returned status ${response.status} for ${url}`);
+            }
+          } catch (fetchErr) {
+            console.warn(`[PlaybackEngine] Fetch failed for ${url}:`, fetchErr);
           }
-          arrayBuffer = await response.arrayBuffer();
         }
         
-        let audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        let audioBuffer: AudioBuffer | null = null;
+
+        // Attempt 1: Standard Web Audio API decodeAudioData
+        if (arrayBuffer) {
+          try {
+            audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+          } catch (decodeErr) {
+            // Attempt 2: Strip ID3v2 header if present (common reason for FLAC failure in Chromium WebAudio)
+            try {
+              const cleaned = cleanAudioBuffer(arrayBuffer);
+              if (cleaned !== arrayBuffer) {
+                audioBuffer = await ctx.decodeAudioData(cleaned.slice(0));
+              }
+            } catch (_) {}
+          }
+        }
+
+        // Attempt 3: If browser decoding failed or wasn't supported (e.g. 24-bit/32-bit FLAC in WebView2),
+        // fallback to native Symphonia decoder via Tauri backend (complete codec support)
+        if (!audioBuffer && isTauriEnv) {
+          const targetPath = filePath || toNativeLocalPath(url);
+          if (targetPath) {
+            audioBuffer = await this.loadNativeAudioBuffer(ctx, targetPath);
+          }
+        }
+
+        if (!audioBuffer) {
+          throw new Error('Unable to decode audio data with browser or native decoders');
+        }
+
         IOLogger.log('MEDIA', 'loadBuffer', 'SUCCESS', { url, duration: audioBuffer.duration, channels: audioBuffer.numberOfChannels });
         
         this.bufferCache.set(url, audioBuffer);
         return audioBuffer;
       } catch (e) {
         IOLogger.log('MEDIA', 'loadBuffer', 'ERROR', { url }, String(e));
-        console.error("[PlaybackEngine] Failed to load audio buffer:", url, e);
+        console.warn("[PlaybackEngine] Failed to load audio buffer into WebAudio:", url, e);
         return null;
       } finally {
         this.pendingBuffers.delete(url);

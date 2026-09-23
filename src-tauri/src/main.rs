@@ -99,7 +99,7 @@ use export_engine::{
     export_backstage_video, export_stems, quick_preview_export, render_voiceover_mix,
 };
 use file_io::{
-    copy_file, copy_file_to_project, ensure_track_audio_wav, get_file_info, init_project_folder,
+    check_file_exists, copy_file, copy_file_to_project, ensure_track_audio_wav, get_file_info, init_project_folder,
     list_audio_files, move_project_folder, open_path, read_binary_file, read_text_file,
     save_media_recorder_take, save_project_file, write_audio_file,
 };
@@ -335,9 +335,11 @@ fn main() {
             list_audio_files,
             write_audio_file,
             init_project_folder,
+            check_file_exists,
             get_file_info,
             save_media_recorder_take,
             save_project_file,
+            check_file_exists,
             copy_file_to_project,
             save_subtitles,
             generate_stress_test,

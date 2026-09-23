@@ -507,6 +507,7 @@ export default function App() {
   const sidebarRef = useRef<HTMLDivElement>(null);
   const timelineContainerRef = useRef<HTMLDivElement>(null);
   const projectRef = useRef<Project | null>(null);
+  const lastLoadedProjectIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!window.electronAPI) return;
@@ -519,16 +520,17 @@ export default function App() {
 
   useEffect(() => {
     projectRef.current = project;
-    // When switching projects, clear the buffer cache to save memory
-    if (project?.id) {
+    // When actually switching between different projects, clear the buffer cache to save memory
+    if (project?.id && lastLoadedProjectIdRef.current !== project.id) {
        playbackEngine.clearCache();
+       lastLoadedProjectIdRef.current = project.id;
     }
     if (project) {
       playbackEngine.setAudioOffset(project.audioOffsetMs || 0);
       playbackEngine.setPlayOriginalTrackSegments(!!project.audioSettings?.playOriginalTrackSegments);
       playbackEngine.ensureOriginalAudioLoaded(project);
     }
-  }, [project?.id, project?.audioOffsetMs, project?.audioSettings?.playOriginalTrackSegments, project?.tracks]);
+  }, [project?.id, project?.projectPath, project?.audioOffsetMs, project?.audioSettings?.playOriginalTrackSegments, project?.tracks?.length]);
 
   useEffect(() => {
     return () => {
@@ -2613,7 +2615,7 @@ export default function App() {
         playbackEngine.bindReferenceAudio(referenceAudioRef.current);
       }
     }
-  }, [project, videoRef, referenceAudioRef, isPopoutOpen]);
+  }, [project?.id, project?.projectPath, project?.videoPath, project?.videoUrl, videoRef, referenceAudioRef, isPopoutOpen]);
 
   const handleQuickPreview = async (segmentId: string) => {
     if (!project || !project.projectPath) {
