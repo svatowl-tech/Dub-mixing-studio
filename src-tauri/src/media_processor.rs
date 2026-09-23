@@ -506,33 +506,60 @@ pub async fn render_final_video(
     log_debug(&format!("Рендеринг финального видео в: {}", norm_output));
     let encoder = get_hw_encoder(&app_handle).await;
 
-    let filter = format!(
-        "[0:a]volume={}[bg]; [1:a]volume={}[dub]; [bg][dub]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
-        bg_volume, dub_volume
-    );
-
-    let args = vec![
-        "-y".to_string(),
-        "-i".to_string(),
-        norm_video,
-        "-i".to_string(),
-        norm_dub,
-        "-filter_complex".to_string(),
-        filter,
-        "-map".to_string(),
-        "0:v:0".to_string(),
-        "-map".to_string(),
-        "[a]".to_string(),
-        "-c:v".to_string(),
-        encoder,
-        "-c:a".to_string(),
-        "aac".to_string(),
-        "-metadata".to_string(),
-        format!("title={}", title),
-        "-metadata".to_string(),
-        format!("artist={}", artist),
-        norm_output.clone(),
-    ];
+    let args = if bg_volume <= 0.001 {
+        // Если фон не требуется (полный дубляж или мастер-трек уже содержит сведенный микс с фоном оригинала)
+        vec![
+            "-y".to_string(),
+            "-i".to_string(),
+            norm_video,
+            "-i".to_string(),
+            norm_dub,
+            "-map".to_string(),
+            "0:v:0".to_string(),
+            "-map".to_string(),
+            "1:a:0".to_string(),
+            "-c:v".to_string(),
+            encoder,
+            "-c:a".to_string(),
+            "aac".to_string(),
+            "-b:a".to_string(),
+            "320k".to_string(),
+            "-metadata".to_string(),
+            format!("title={}", title),
+            "-metadata".to_string(),
+            format!("artist={}", artist),
+            norm_output.clone(),
+        ]
+    } else {
+        let filter = format!(
+            "[0:a]volume={}[bg]; [1:a]volume={}[dub]; [bg][dub]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]",
+            bg_volume, dub_volume
+        );
+        vec![
+            "-y".to_string(),
+            "-i".to_string(),
+            norm_video,
+            "-i".to_string(),
+            norm_dub,
+            "-filter_complex".to_string(),
+            filter,
+            "-map".to_string(),
+            "0:v:0".to_string(),
+            "-map".to_string(),
+            "[a]".to_string(),
+            "-c:v".to_string(),
+            encoder,
+            "-c:a".to_string(),
+            "aac".to_string(),
+            "-b:a".to_string(),
+            "320k".to_string(),
+            "-metadata".to_string(),
+            format!("title={}", title),
+            "-metadata".to_string(),
+            format!("artist={}", artist),
+            norm_output.clone(),
+        ]
+    };
 
     run_ffmpeg_with_progress(
         app_handle,

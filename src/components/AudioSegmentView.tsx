@@ -324,7 +324,8 @@ export const AudioSegmentView = React.memo(({
         <VirtualizedWaveform 
           peaks={seg.waveform} 
           zoom={zoom} 
-          duration={seg.fileDuration || seg.duration} 
+          duration={seg.duration} 
+          fileDuration={seg.fileDuration}
           color="#60a5fa" 
           visibleRange={timelineVisibleRange}
           isRelative={true}

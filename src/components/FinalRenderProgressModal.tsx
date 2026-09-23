@@ -54,8 +54,18 @@ export const FinalRenderProgressModal: React.FC<FinalRenderProgressModalProps> =
 
         if (saveRes && saveRes.success && saveRes.data) {
           const destPath = saveRes.data;
-          if (result.videoFilePath && result.videoFilePath !== destPath && api.copyFileToProject) {
-            await api.copyFileToProject({ src: result.videoFilePath, destDir: destPath });
+          if (result.videoFilePath && result.videoFilePath !== destPath) {
+            let copySuccess = false;
+            if (api.copyFile) {
+              const copyRes = await api.copyFile(result.videoFilePath, destPath);
+              copySuccess = !!copyRes?.success;
+            } else if (api.copyFileToProject) {
+              const copyRes = await api.copyFileToProject(result.videoFilePath, destPath);
+              copySuccess = !!copyRes?.success;
+            }
+            if (!copySuccess && result.videoBlobUrl) {
+              downloadFile(result.videoBlobUrl, result.videoFileName || 'final_video.mp4');
+            }
           } else if (result.videoBlobUrl) {
             downloadFile(result.videoBlobUrl, result.videoFileName || 'final_video.mp4');
           }

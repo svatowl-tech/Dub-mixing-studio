@@ -67,8 +67,8 @@ use audio_buffer_manager::{
 use audio_engine::{
     check_crashes, clear_native_playback_cache, force_stop_all, get_audio_devices,
     get_native_playback_position, preload_playback_buffers, seek_native_playback,
-    start_native_playback, start_recording, stop_native_playback, stop_recording,
-    update_native_playback_tracks, AudioRecorder, AudioState, NativeAudioPlayer,
+    set_vocal_bus_volume, start_native_playback, start_recording, stop_native_playback,
+    stop_recording, update_native_playback_tracks, AudioRecorder, AudioState, NativeAudioPlayer,
 };
 use audio_separator::{
     check_audio_separator_status, install_audio_separator_pkg, run_audio_separator_cmd,
@@ -482,7 +482,8 @@ fn main() {
             parse_subtitle_file_native,
             match_transcription_with_script,
             classify_project_cues,
-            ensure_original_audio_extracted
+            ensure_original_audio_extracted,
+            set_vocal_bus_volume
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

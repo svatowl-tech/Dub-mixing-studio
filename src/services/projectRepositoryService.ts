@@ -54,6 +54,19 @@ export function convertProjectToFullPayload(project: Project): FullProjectPayloa
   }));
 
   // Сохраняем остальные настройки в metadata
+  const fileDurations: Record<string, number> = {};
+  (project.tracks || []).forEach(t => {
+    t.segments?.forEach(s => {
+      if (s.filePath) {
+        const norm = s.filePath.replace(/\\/g, '/');
+        const dur = Math.max(s.fileDuration || 0, (s.fileOffset || 0) + (s.duration || 0));
+        if (dur > (fileDurations[norm] || 0)) {
+          fileDurations[norm] = dur;
+        }
+      }
+    });
+  });
+
   const metadata: Record<string, any> = {
     videoUrl: project.videoUrl,
     videoPath: project.videoPath,
@@ -77,6 +90,7 @@ export function convertProjectToFullPayload(project: Project): FullProjectPayloa
     activePresetId: project.activePresetId,
     customPresets: project.customPresets || [],
     mixingType: project.mixingType,
+    fileDurations,
   };
 
   return {
@@ -98,18 +112,39 @@ export function convertProjectToFullPayload(project: Project): FullProjectPayloa
  * Конвертер: Преобразует FullProjectPayload (SQLite DTO) обратно в модель Project (React state)
  */
 export function convertFullPayloadToProject(payload: FullProjectPayload): Project {
+  const fileDurationsMeta = (payload.metadata?.fileDurations as Record<string, number>) || {};
+
+  // Compute maximum file offset + duration extent for each filePath across all tracks/clips
+  const computedFileDurations: Record<string, number> = {};
+  (payload.tracks || []).forEach(t => {
+    (t.clips || []).forEach(c => {
+      if (c.filePath) {
+        const norm = c.filePath.replace(/\\/g, '/');
+        const clipExtent = ((c.sourceOffsetMs ?? 0) + (c.durationMs ?? 0)) / 1000.0;
+        computedFileDurations[norm] = Math.max(computedFileDurations[norm] || 0, clipExtent);
+      }
+    });
+  });
+
   const tracks: AudioTrack[] = (payload.tracks || []).map((t) => {
     const segments: AudioSegment[] = (t.clips || []).map((c) => {
       // Преобразуем gainDb обратно в linear multiplier
       const gainLinear = Math.pow(10, (c.gainDb ?? 0.0) / 20);
+      const normPath = c.filePath ? c.filePath.replace(/\\/g, '/') : '';
+      const clipDuration = (c.durationMs ?? 0) / 1000.0;
+      const clipOffset = (c.sourceOffsetMs ?? 0) / 1000.0;
+      const resolvedFileDur = (normPath && fileDurationsMeta[normPath])
+        || (normPath && computedFileDurations[normPath])
+        || (clipOffset + clipDuration);
+
       return {
         id: c.id,
         blobUrl: '',
         playbackRate: 1.0,
         startTime: (c.startTimeMs ?? 0) / 1000.0,
-        duration: (c.durationMs ?? 0) / 1000.0,
-        fileOffset: (c.sourceOffsetMs ?? 0) / 1000.0,
-        fileDuration: (c.durationMs ?? 0) / 1000.0,
+        duration: clipDuration,
+        fileOffset: clipOffset,
+        fileDuration: Math.max(clipDuration, resolvedFileDur),
         filePath: c.filePath,
         backstageVideoPath: c.backstageVideoPath || undefined,
         gain: gainLinear,

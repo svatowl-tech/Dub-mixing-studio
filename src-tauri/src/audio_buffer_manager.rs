@@ -309,7 +309,7 @@ impl AudioBufferCache {
 // ДЕКОДЕРЫ И ЗАГРУЗЧИКИ (WAV ZERO-COPY MMAP И NATIVE SYMPHONIA)
 // ============================================================================
 
-/// Синхронная прямая загрузка аудиофайла (WAV Zero-Copy Mmap или Symphonia)
+/// Синхронная прямая загрузка аудиофайла (WAV Zero-Copy Mmap, Symphonia или универсальный fallback)
 pub fn load_audio_file_sync(file_path: &str) -> Result<CachedTrackBuffer, String> {
     let norm_path_str = normalize_windows_path(file_path);
     let path = Path::new(&norm_path_str);
@@ -318,15 +318,47 @@ pub fn load_audio_file_sync(file_path: &str) -> Result<CachedTrackBuffer, String
     }
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
     if ext == "wav" {
-        match load_wav_mmap(path) {
-            Ok(b) => Ok(b),
-            Err(err) => {
-                log_debug(&format!("[AudioBufferManager] Mmap WAV fallback to Symphonia: {}", err));
-                load_compressed_symphonia(path)
-            }
+        if let Ok(b) = load_wav_mmap(path) {
+            return Ok(b);
         }
-    } else {
-        load_compressed_symphonia(path)
+    }
+    if let Ok(b) = load_compressed_symphonia(path) {
+        return Ok(b);
+    }
+
+    // Универсальный резервный фоллбэк через read_audio_file_any_format (включая FFmpeg pipe)
+    match read_audio_file_any_format(path) {
+        Ok((samples, sample_rate, channels)) => {
+            let ch_count = channels as usize;
+            let total_frames = if ch_count > 0 { samples.len() / ch_count } else { 0 };
+            let duration_seconds = total_frames as f64 / sample_rate as f64;
+            let buffer_id = format!("buf_{}", Uuid::new_v4());
+            log_info(&format!(
+                "[AudioBufferManager] Файл успешно загружен через универсальный fallback: {}",
+                norm_path_str
+            ));
+            Ok(CachedTrackBuffer {
+                buffer_id,
+                file_path: file_path.to_string(),
+                data: AudioBufferData::PcmFloat {
+                    samples,
+                    sample_rate,
+                    channels,
+                    bit_depth: 32,
+                    total_frames,
+                },
+                duration_seconds,
+                sample_rate,
+                channels,
+                bit_depth: 32,
+                total_frames,
+                last_accessed: Instant::now(),
+            })
+        }
+        Err(err) => Err(format!(
+            "Не удалось загрузить аудиофайл {} ни одним методом: {}",
+            norm_path_str, err
+        )),
     }
 }
 

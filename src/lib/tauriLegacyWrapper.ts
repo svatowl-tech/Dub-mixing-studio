@@ -363,20 +363,68 @@ export const tauriAPI = {
     }
   },
 
-  copyFileToProject: async (src: string, destDir: string): Promise<BridgeResponse<string>> => {
-    IOLogger.log('BRIDGE', 'copyFileToProject', 'START', { src, destDir });
+  copyFileToProject: async (
+    srcOrOptions: string | { src?: string; destDir?: string; destPath?: string; dest?: string },
+    destDir?: string
+  ): Promise<BridgeResponse<string>> => {
+    let actualSrc = '';
+    let actualDest = '';
+
+    if (srcOrOptions && typeof srcOrOptions === 'object') {
+      actualSrc = srcOrOptions.src || '';
+      actualDest = srcOrOptions.destDir || srcOrOptions.destPath || srcOrOptions.dest || destDir || '';
+    } else {
+      actualSrc = String(srcOrOptions || '');
+      actualDest = destDir || '';
+    }
+
+    IOLogger.log('BRIDGE', 'copyFileToProject', 'START', { src: actualSrc, destDir: actualDest });
     if (!IS_TAURI) {
       // In web, we just pretend we copied it and return a simulated path or the original
-      IOLogger.log('BRIDGE', 'copyFileToProject', 'SUCCESS', { web: true, path: src });
-      return { success: true, data: src };
+      IOLogger.log('BRIDGE', 'copyFileToProject', 'SUCCESS', { web: true, path: actualSrc });
+      return { success: true, data: actualSrc };
     }
     try {
-        const result = await invoke<string>('copy_file_to_project', { src, destDir });
+        const result = await invoke<string>('copy_file_to_project', {
+          src: actualSrc,
+          destDir: actualDest,
+          srcPath: actualSrc,
+          destPath: actualDest,
+        });
         IOLogger.log('BRIDGE', 'copyFileToProject', 'SUCCESS', { result });
         return { success: true, data: result };
     } catch(err) {
-        IOLogger.log('BRIDGE', 'copyFileToProject', 'ERROR', { src }, String(err));
+        IOLogger.log('BRIDGE', 'copyFileToProject', 'ERROR', { src: actualSrc }, String(err));
         return { success: false, error: String(err) };
+    }
+  },
+
+  copyFile: async (
+    srcOrOptions: string | { src?: string; dest?: string; destPath?: string; destDir?: string },
+    dest?: string
+  ): Promise<BridgeResponse<string>> => {
+    let actualSrc = '';
+    let actualDest = '';
+
+    if (srcOrOptions && typeof srcOrOptions === 'object') {
+      actualSrc = srcOrOptions.src || '';
+      actualDest = srcOrOptions.dest || srcOrOptions.destPath || srcOrOptions.destDir || dest || '';
+    } else {
+      actualSrc = String(srcOrOptions || '');
+      actualDest = dest || '';
+    }
+
+    IOLogger.log('BRIDGE', 'copyFile', 'START', { src: actualSrc, dest: actualDest });
+    if (!IS_TAURI) {
+      return { success: true, data: actualDest || actualSrc };
+    }
+    try {
+      const result = await invoke<string>('copy_file', { src: actualSrc, dest: actualDest });
+      IOLogger.log('BRIDGE', 'copyFile', 'SUCCESS', { result });
+      return { success: true, data: result };
+    } catch (err) {
+      IOLogger.log('BRIDGE', 'copyFile', 'ERROR', { src: actualSrc, dest: actualDest }, String(err));
+      return { success: false, error: String(err) };
     }
   },
 

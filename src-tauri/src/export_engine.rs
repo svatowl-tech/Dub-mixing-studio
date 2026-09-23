@@ -102,13 +102,27 @@ pub fn resolve_path(segment_path: &str, project_path: Option<&str>, output_path:
         return segment_path_norm;
     }
 
-    let clean_path = segment_path_norm.trim_start_matches("./").trim_start_matches(".\\");
+    let clean_path = segment_path_norm
+        .trim_start_matches("./")
+        .trim_start_matches(".\\")
+        .trim_start_matches('/')
+        .trim_start_matches('\\');
 
     if let Some(proj_path) = project_path {
         let proj_path_norm = normalize_windows_path(proj_path);
         let test_path = Path::new(&proj_path_norm).join(clean_path);
         if test_path.exists() {
-            return test_path.to_string_lossy().to_string();
+            return test_path.to_string_lossy().to_string().replace('\\', "/");
+        }
+
+        // Проверяем подпапки assets и takes внутри project_path
+        let assets_test = Path::new(&proj_path_norm).join("assets").join(clean_path);
+        if assets_test.exists() {
+            return assets_test.to_string_lossy().to_string().replace('\\', "/");
+        }
+        let takes_test = Path::new(&proj_path_norm).join("takes").join(clean_path);
+        if takes_test.exists() {
+            return takes_test.to_string_lossy().to_string().replace('\\', "/");
         }
 
         // Поиск перекрытия имен папок (Overlap alignment)
@@ -126,7 +140,7 @@ pub fn resolve_path(segment_path: &str, project_path: Option<&str>, output_path:
                     };
                     let align_path = Path::new(&prefix).join(stripped);
                     if align_path.exists() {
-                        return align_path.to_string_lossy().to_string();
+                        return align_path.to_string_lossy().to_string().replace('\\', "/");
                     }
                 }
             }
@@ -138,7 +152,15 @@ pub fn resolve_path(segment_path: &str, project_path: Option<&str>, output_path:
     if let Some(out_parent) = Path::new(&out_path_norm).parent() {
         let test_path = out_parent.join(clean_path);
         if test_path.exists() {
-            return test_path.to_string_lossy().to_string();
+            return test_path.to_string_lossy().to_string().replace('\\', "/");
+        }
+        let assets_test = out_parent.join("assets").join(clean_path);
+        if assets_test.exists() {
+            return assets_test.to_string_lossy().to_string().replace('\\', "/");
+        }
+        let takes_test = out_parent.join("takes").join(clean_path);
+        if takes_test.exists() {
+            return takes_test.to_string_lossy().to_string().replace('\\', "/");
         }
     }
 
@@ -153,45 +175,56 @@ fn default_gain() -> f64 {
 }
 
 #[allow(dead_code)]
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportSegmentData {
     #[serde(default)]
     pub id: String,
+    #[serde(default, alias = "startTime", alias = "start_time")]
     pub start_time: f64,
+    #[serde(default, alias = "duration")]
     pub duration: f64,
+    #[serde(default, alias = "filePath", alias = "file_path")]
     pub file_path: Option<String>,
-    #[serde(default = "default_gain")]
+    #[serde(default = "default_gain", alias = "gain")]
     pub gain: f64,
-    #[serde(default)]
+    #[serde(default, alias = "fileOffset", alias = "file_offset")]
     pub file_offset: f64,
-    #[serde(default)]
+    #[serde(default, alias = "fileDuration", alias = "file_duration")]
     pub file_duration: f64,
+    #[serde(default, alias = "playbackRate", alias = "playback_rate")]
     pub playback_rate: Option<f64>,
+    #[serde(default, alias = "panning")]
     pub panning: Option<f64>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectTrack {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub name: String,
+    #[serde(default, alias = "type", alias = "trackType", alias = "track_type")]
+    pub track_type: Option<String>,
+    #[serde(default, alias = "isMuted", alias = "is_muted")]
     pub is_muted: Option<bool>,
+    #[serde(default, alias = "isSolo", alias = "is_solo")]
     pub is_solo: Option<bool>,
+    #[serde(default, alias = "volume")]
     pub volume: Option<f64>,
-    #[serde(default)]
+    #[serde(default, alias = "segments")]
     pub segments: Vec<ExportSegmentData>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportProjectData {
-    #[serde(default)]
+    #[serde(default, alias = "tracks")]
     pub tracks: Vec<ProjectTrack>,
-    #[serde(default)]
+    #[serde(default, alias = "audioOffsetMs", alias = "audio_offset_ms")]
     pub audio_offset_ms: f64,
+    #[serde(default, alias = "projectPath", alias = "project_path")]
     pub project_path: Option<String>,
 }
 
@@ -1378,35 +1411,69 @@ pub async fn render_voiceover_mix(
     // Если Clean_VO файл не был загружен напрямую, рендерим из данных проекта
     if vo_stereo.is_empty() {
         if let Some(ref pjson) = request.project_json {
-            if let Ok(mut proj_data) = serde_json::from_str::<ExportProjectData>(pjson) {
-                log_info("[VoiceoverMix] Рендеринг Clean VO из треков проекта...");
-                proj_data.tracks.retain(|t| {
-                    let n = t.name.to_lowercase();
-                    !n.contains("оригинал") && !n.contains("original") && !n.contains("reference")
-                });
+            match serde_json::from_str::<ExportProjectData>(pjson) {
+                Ok(mut proj_data) => {
+                    log_info(&format!(
+                        "[VoiceoverMix] Получено треков в project_json: {}",
+                        proj_data.tracks.len()
+                    ));
+                    proj_data.tracks.retain(|t| {
+                        let n = t.name.to_lowercase();
+                        let is_ref = t.track_type.as_deref().unwrap_or("") == "original"
+                            || n.contains("оригинал")
+                            || n.contains("original")
+                            || n.contains("reference");
+                        !is_ref
+                    });
+                    log_info(&format!(
+                        "[VoiceoverMix] Треков озвучки для Clean VO: {}",
+                        proj_data.tracks.len()
+                    ));
 
-                let (prep_tracks, total_frames, unique_paths) =
-                    prepare_project_tracks(&proj_data, &output_norm, false);
-
-                if total_frames > 0 && !prep_tracks.is_empty() {
-                    let all_segments: Vec<PreparedSegment> = prep_tracks
-                        .into_iter()
-                        .flat_map(|t| t.segments)
-                        .collect();
-                    let audio_cache = preload_audio_files_parallel(&unique_paths);
-
-                    let mut rendered = vec![0.0f32; total_frames * 2];
-                    let num_blocks = (total_frames + BLOCK_FRAMES - 1) / BLOCK_FRAMES;
-
-                    for b in 0..num_blocks {
-                        let start_f = (b * BLOCK_FRAMES) as i64;
-                        let count_f = BLOCK_FRAMES.min(total_frames - b * BLOCK_FRAMES);
-                        let mut block = vec![0.0f32; count_f * 2];
-                        render_segments_into_block(start_f, count_f, &all_segments, &audio_cache, &mut block);
-                        let out_idx = (b * BLOCK_FRAMES) * 2;
-                        rendered[out_idx..out_idx + count_f * 2].copy_from_slice(&block);
+                    let any_dub_solo = proj_data.tracks.iter().any(|t| t.is_solo.unwrap_or(false));
+                    for t in &mut proj_data.tracks {
+                        if !any_dub_solo {
+                            t.is_solo = Some(false);
+                        }
                     }
-                    vo_stereo = rendered;
+
+                    let (prep_tracks, total_frames, unique_paths) =
+                        prepare_project_tracks(&proj_data, &output_norm, !any_dub_solo);
+
+                    log_info(&format!(
+                        "[VoiceoverMix] Подготовлено треков: {}, фреймов: {}, уникальных файлов: {}",
+                        prep_tracks.len(), total_frames, unique_paths.len()
+                    ));
+
+                    if total_frames > 0 && !prep_tracks.is_empty() {
+                        let all_segments: Vec<PreparedSegment> = prep_tracks
+                            .into_iter()
+                            .flat_map(|t| t.segments)
+                            .collect();
+                        let audio_cache = preload_audio_files_parallel(&unique_paths);
+
+                        let mut rendered = vec![0.0f32; total_frames * 2];
+                        let num_blocks = (total_frames + BLOCK_FRAMES - 1) / BLOCK_FRAMES;
+
+                        for b in 0..num_blocks {
+                            let start_f = (b * BLOCK_FRAMES) as i64;
+                            let count_f = BLOCK_FRAMES.min(total_frames - b * BLOCK_FRAMES);
+                            let mut block = vec![0.0f32; count_f * 2];
+                            render_segments_into_block(start_f, count_f, &all_segments, &audio_cache, &mut block);
+                            let out_idx = (b * BLOCK_FRAMES) * 2;
+                            rendered[out_idx..out_idx + count_f * 2].copy_from_slice(&block);
+                        }
+                        vo_stereo = rendered;
+                        log_info(&format!(
+                            "[VoiceoverMix] Успешно отрендерено Clean VO: {} фреймов ({} с)",
+                            total_frames, total_frames as f64 / EXPORT_SAMPLE_RATE as f64
+                        ));
+                    } else {
+                        log_error("[VoiceoverMix] Предупреждение: 0 фреймов или нет активных сегментов для сведения Clean VO!");
+                    }
+                }
+                Err(e) => {
+                    log_error(&format!("[VoiceoverMix] Ошибка десериализации project_json: {}", e));
                 }
             }
         }

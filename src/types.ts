@@ -1643,7 +1643,8 @@ declare global {
       loadSegmentsInRange: (trackId: string, startTime: number, endTime: number) => Promise<BridgeResponse<any[]>>;
       saveProjectJson: (data: { projectPath: string, projectData: Project }) => Promise<BridgeResponse<boolean>>;
       loadProjectJson: (projectPath: string) => Promise<BridgeResponse<Project>>;
-      copyFileToProject: (src: string, destDir: string) => Promise<BridgeResponse<string>>;
+      copyFileToProject: (src: string | { src?: string; destDir?: string; destPath?: string; dest?: string }, destDir?: string) => Promise<BridgeResponse<string>>;
+      copyFile?: (src: string | { src?: string; dest?: string; destPath?: string; destDir?: string }, dest?: string) => Promise<BridgeResponse<string>>;
       importLegacyJson: (jsonString: string) => Promise<BridgeResponse<string>>;
       muxVideo: (data: { videoPath: string, audioPath: string, outputPath: string, duration?: number }) => Promise<BridgeResponse<{ success: boolean }>>;
       quickPreviewExport: (data: { projectPath: string, segmentId: string }) => Promise<BridgeResponse<{ success: boolean }>>;

@@ -4,6 +4,7 @@ export const VirtualizedWaveform = ({
   peaks, 
   zoom, 
   duration, 
+  fileDuration,
   color, 
   visibleRange: vRange, 
   isRelative = false,
@@ -18,6 +19,7 @@ export const VirtualizedWaveform = ({
   peaks: number[], 
   zoom: number, 
   duration: number, 
+  fileDuration?: number,
   color: string, 
   visibleRange: { start: number, end: number }, 
   isRelative?: boolean,
@@ -106,10 +108,27 @@ export const VirtualizedWaveform = ({
     const effectiveGain = (gain ?? 1.0) * (trackVolume ?? 1.0) * (visualGain ?? 1.0);
 
     const totalPeaks = peaks.length;
-    const peaksPerSecond = totalPeaks / duration;
+    // Determine the true duration of the underlying audio file that generated the peaks
+    const minRequiredSourceDuration = (segmentOffset || 0) + duration;
+    const effectiveFileDuration = (fileDuration && fileDuration >= minRequiredSourceDuration)
+      ? fileDuration
+      : (fileDuration && fileDuration > duration)
+        ? fileDuration
+        : Math.max(minRequiredSourceDuration, duration, 0.001);
+
+    const peaksPerSecond = totalPeaks / effectiveFileDuration;
     
-    const startIdx = Math.max(0, Math.floor((drawStart + segmentOffset) * peaksPerSecond));
-    const endIdx = Math.min(totalPeaks, Math.ceil((drawEnd + segmentOffset) * peaksPerSecond));
+    let startIdx = Math.max(0, Math.floor((drawStart + segmentOffset) * peaksPerSecond));
+    let endIdx = Math.min(totalPeaks, Math.ceil((drawEnd + segmentOffset) * peaksPerSecond));
+
+    if (startIdx >= endIdx && totalPeaks > 0) {
+      if (startIdx >= totalPeaks) {
+        startIdx = Math.max(0, totalPeaks - 2);
+        endIdx = totalPeaks;
+      } else {
+        endIdx = Math.min(totalPeaks, startIdx + 2);
+      }
+    }
     
     const drawPoints: { x: number, yTop: number, yBottom: number, isClipping: boolean }[] = [];
     
@@ -142,6 +161,10 @@ export const VirtualizedWaveform = ({
       const yBottom = (height + h) / 2;
       
       drawPoints.push({ x, yTop, yBottom, isClipping });
+    }
+
+    if (drawPoints.length === 1) {
+      drawPoints.push({ ...drawPoints[0], x: drawPoints[0].x + Math.max(1, zoom * 0.05) });
     }
 
     // Helper for beautiful translucent gradient fills
@@ -252,7 +275,7 @@ export const VirtualizedWaveform = ({
       ctx.lineWidth = 2;
       ctx.stroke();
     }
-  }, [peaks, zoom, duration, color, vRange, isRelative, segmentOffset, segmentStartTime, audioOffsetMs, gain, trackVolume, scaleMode, visualGain]);
+  }, [peaks, zoom, duration, fileDuration, color, vRange, isRelative, segmentOffset, segmentStartTime, audioOffsetMs, gain, trackVolume, scaleMode, visualGain]);
   
   return <canvas ref={canvasRef} className="absolute top-0 h-full pointer-events-none" />;
 };

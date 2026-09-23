@@ -186,7 +186,19 @@
           "compute_waveform_buckets_from_peaks",
           "parse_subtitle_file_native",
           "match_transcription_with_script",
-          "classify_project_cues"
+          "classify_project_cues",
+          "copy_file",
+          "cancel_export",
+          "render_voiceover_mix",
+          "analyze_voice_tracks",
+          "load_track_analysis",
+          "process_intelligent_normalization_with_clips",
+          "process_spectral_balancing",
+          "process_speech_leveler",
+          "process_vocal_spot_cleaning",
+          "adjust_peak_audio",
+          "ensure_original_audio_extracted",
+          "set_vocal_bus_volume"
         ],
         "deny": []
       }

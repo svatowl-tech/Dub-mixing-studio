@@ -283,6 +283,7 @@ pub struct PlaybackActiveTrack {
     pub volume: f32,
     pub is_muted: bool,
     pub is_solo: bool,
+    pub is_original: bool,
     pub segments: Vec<PlaybackActiveSegment>,
     pub dsp_params: ParsedTrackDsp,
 }
@@ -302,6 +303,12 @@ pub fn build_playback_snapshot(tracks: &[NativePlaybackTrack], sample_rate: u32)
         if !is_active || track.volume <= 0.0 {
             continue;
         }
+
+        let track_name_lower = track.name.to_lowercase();
+        let is_original = track_name_lower.contains("оригинал")
+            || track_name_lower.contains("original")
+            || track_name_lower.contains("reference")
+            || track.id == "reference-track";
 
         let track_gain = track.volume;
         let dsp_params = parse_track_dsp(track.processing.as_ref());
@@ -339,6 +346,7 @@ pub fn build_playback_snapshot(tracks: &[NativePlaybackTrack], sample_rate: u32)
             volume: track.volume,
             is_muted: track.is_muted,
             is_solo: track.is_solo,
+            is_original,
             segments: active_segments,
             dsp_params,
         });
@@ -358,6 +366,7 @@ pub struct NativeAudioPlayer {
     pub snapshot: Arc<ArcSwap<PlaybackSnapshot>>,
     pub audio_cache: Arc<ArcSwap<HashMap<String, Arc<CachedTrackBuffer>>>>,
     pub stream: Option<cpal::Stream>,
+    pub vocal_bus_volume: Arc<std::sync::atomic::AtomicU32>,
 }
 
 unsafe impl Send for NativeAudioPlayer {}
@@ -379,7 +388,12 @@ impl NativeAudioPlayer {
             snapshot: Arc::new(ArcSwap::from_pointee(PlaybackSnapshot::default())),
             audio_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             stream: None,
+            vocal_bus_volume: Arc::new(std::sync::atomic::AtomicU32::new(1.0_f32.to_bits())),
         }
+    }
+
+    pub fn set_vocal_bus_volume(&mut self, volume: f32) {
+        self.vocal_bus_volume.store(volume.max(0.0).to_bits(), Ordering::Relaxed);
     }
 
     pub fn preload_buffers(&self, paths: Vec<String>) -> Result<Vec<String>, String> {
@@ -439,6 +453,7 @@ impl NativeAudioPlayer {
         let clock = Arc::clone(&self.clock);
         let snapshot_swap = Arc::clone(&self.snapshot);
         let cache_swap = Arc::clone(&self.audio_cache);
+        let vocal_bus_volume = Arc::clone(&self.vocal_bus_volume);
         let mut dsp_pool: HashMap<String, TrackDspEngine> = HashMap::with_capacity(32);
 
         let stream_config: StreamConfig = config.into();
@@ -454,6 +469,7 @@ impl NativeAudioPlayer {
                         &clock,
                         &snapshot_swap,
                         &cache_swap,
+                        &vocal_bus_volume,
                         &mut dsp_pool,
                     );
                 },
@@ -827,6 +843,7 @@ fn mix_audio_buffer(
     clock: &Arc<crate::transport_clock::TransportClock>,
     snapshot_swap: &Arc<ArcSwap<PlaybackSnapshot>>,
     cache_swap: &Arc<ArcSwap<HashMap<String, Arc<CachedTrackBuffer>>>>,
+    vocal_bus_volume: &Arc<std::sync::atomic::AtomicU32>,
     dsp_pool: &mut HashMap<String, TrackDspEngine>,
 ) {
     let num_frames = data.len() / channels.max(1);
@@ -849,12 +866,15 @@ fn mix_audio_buffer(
     // Lock-Free / Wait-Free snapshot load (0 ns latency)
     let snapshot = snapshot_swap.load();
     let cache = cache_swap.load();
+    let vocal_bus_gain = f32::from_bits(vocal_bus_volume.load(Ordering::Relaxed));
 
     for track in snapshot.tracks.iter() {
         let is_active = if snapshot.any_solo { track.is_solo } else { !track.is_muted };
         if !is_active || track.volume <= 0.0 {
             continue;
         }
+
+        let bus_multiplier = if track.is_original { 1.0 } else { vocal_bus_gain };
 
         // Persistent track DSP engine (never instantiated per-buffer)
         let dsp_engine = match dsp_pool.get_mut(&track.id) {
@@ -901,10 +921,10 @@ fn mix_audio_buffer(
 
                 let out_idx = f * channels;
                 if channels >= 2 {
-                    data[out_idx] += proc_l * seg.total_gain_left;
-                    data[out_idx + 1] += proc_r * seg.total_gain_right;
+                    data[out_idx] += proc_l * seg.total_gain_left * bus_multiplier;
+                    data[out_idx + 1] += proc_r * seg.total_gain_right * bus_multiplier;
                 } else {
-                    data[out_idx] += ((proc_l + proc_r) * 0.5) * seg.total_gain_left;
+                    data[out_idx] += ((proc_l + proc_r) * 0.5) * seg.total_gain_left * bus_multiplier;
                 }
             }
         }
@@ -1842,6 +1862,16 @@ pub async fn clear_native_playback_cache(
 ) -> Result<(), String> {
     let player = state.player.lock().map_err(|e| e.to_string())?;
     player.clear_cache();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_vocal_bus_volume(
+    state: State<'_, AudioState>,
+    volume: f32,
+) -> Result<(), String> {
+    let mut player = state.player.lock().map_err(|e| e.to_string())?;
+    player.set_vocal_bus_volume(volume);
     Ok(())
 }
 

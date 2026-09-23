@@ -580,6 +580,7 @@ export default function App() {
         if (res.success && res.data) {
           const peakCount = (res.data as any).length;
           const peakArray = Array.from(res.data as any);
+          const normFilePath = filePath.replace(/\\/g, '/');
           console.log(`[WAVEFORM-QUEUE] Пики успешно сгенерированы! Файл: ${filePath}. Количество точек: ${peakCount}`);
           setProject(p => {
             if (!p) return p;
@@ -587,21 +588,32 @@ export default function App() {
               ...p,
               tracks: p.tracks.map(t => ({
                 ...t,
-                segments: t.segments ? t.segments.map(s => (s.filePath === filePath || s.id === segmentId) ? { 
-                  ...s, 
-                  waveform: peakArray as number[], 
-                  isExtractingWaveform: false 
-                } : s) : []
+                segments: t.segments ? t.segments.map(s => {
+                  const sNorm = s.filePath ? s.filePath.replace(/\\/g, '/') : '';
+                  if (sNorm === normFilePath || s.id === segmentId) {
+                    return { 
+                      ...s, 
+                      waveform: peakArray as number[], 
+                      fileDuration: Math.max(s.fileDuration || 0, duration, (s.fileOffset || 0) + (s.duration || 0)),
+                      isExtractingWaveform: false 
+                    };
+                  }
+                  return s;
+                }) : []
               }))
             };
           });
         } else {
           console.warn(`[WAVEFORM-QUEUE] Бэкенд вернул неуспешный статус для файла: ${filePath}. Пики не сгенерированы.`);
+          const normFilePath = filePath.replace(/\\/g, '/');
           setProject(p => p ? {
             ...p,
             tracks: p.tracks.map(t => ({
               ...t,
-              segments: t.segments ? t.segments.map(s => (s.filePath === filePath || s.id === segmentId) ? { ...s, isExtractingWaveform: false } : s) : []
+              segments: t.segments ? t.segments.map(s => {
+                const sNorm = s.filePath ? s.filePath.replace(/\\/g, '/') : '';
+                return (sNorm === normFilePath || s.id === segmentId) ? { ...s, isExtractingWaveform: false } : s;
+              }) : []
             }))
           } : p);
         }
@@ -609,11 +621,15 @@ export default function App() {
       .catch(err => {
         extractingRefs.current.delete(segmentId);
         console.error(`[WAVEFORM-QUEUE] Ошибка генерации волновой формы для сегмента ${segmentId}:`, err);
+        const normFilePath = filePath.replace(/\\/g, '/');
         setProject(p => p ? {
           ...p,
           tracks: p.tracks.map(t => ({
             ...t,
-            segments: t.segments ? t.segments.map(s => (s.filePath === filePath || s.id === segmentId) ? { ...s, isExtractingWaveform: false } : s) : []
+            segments: t.segments ? t.segments.map(s => {
+              const sNorm = s.filePath ? s.filePath.replace(/\\/g, '/') : '';
+              return (sNorm === normFilePath || s.id === segmentId) ? { ...s, isExtractingWaveform: false } : s;
+            }) : []
           }))
         } : p);
       })
@@ -661,12 +677,21 @@ export default function App() {
     let dubStarted = false;
     const queuedTasks: typeof waveformQueueRef.current = [];
 
-    // Pre-build map of existing non-empty waveforms by filePath for instant sharing
+    // Pre-build map of existing non-empty waveforms and max file durations by normalized filePath
     const existingWaveformsByFile = new Map<string, number[]>();
+    const existingFileDurationsByFile = new Map<string, number>();
+
     tracksToUpdate.forEach(t => {
       t.segments?.forEach(s => {
-        if (s.filePath && s.waveform && s.waveform.length > 0) {
-          existingWaveformsByFile.set(s.filePath, s.waveform);
+        if (s.filePath) {
+          const key = s.filePath.replace(/\\/g, '/');
+          if (s.waveform && s.waveform.length > 0) {
+            existingWaveformsByFile.set(key, s.waveform);
+          }
+          const dur = Math.max(s.fileDuration || 0, (s.fileOffset || 0) + (s.duration || 0));
+          if (dur > (existingFileDurationsByFile.get(key) || 0)) {
+            existingFileDurationsByFile.set(key, dur);
+          }
         }
       });
     });
@@ -682,25 +707,47 @@ export default function App() {
 
         for (let i = 0; i < newSegments.length; i++) {
             const seg = newSegments[i];
-            if (seg.filePath && (!seg.waveform || seg.waveform.length === 0)) {
-                const cachedWaveform = existingWaveformsByFile.get(seg.filePath);
-                if (cachedWaveform) {
-                  newSegments[i] = { ...seg, waveform: cachedWaveform, isExtractingWaveform: false };
+            if (seg.filePath) {
+                const key = seg.filePath.replace(/\\/g, '/');
+                const maxFileDur = Math.max(
+                  seg.fileDuration || 0,
+                  existingFileDurationsByFile.get(key) || 0,
+                  (seg.fileOffset || 0) + (seg.duration || 0)
+                );
+
+                if (!seg.waveform || seg.waveform.length === 0) {
+                  const cachedWaveform = existingWaveformsByFile.get(key);
+                  if (cachedWaveform) {
+                    newSegments[i] = { 
+                      ...seg, 
+                      waveform: cachedWaveform, 
+                      fileDuration: maxFileDur,
+                      isExtractingWaveform: false 
+                    };
+                    trackUpdated = true;
+                    needsUpdate = true;
+                  } else if (!seg.isExtractingWaveform && !extractingRefs.current.has(seg.id)) {
+                    console.log(`[WAVEFORM-HYDRATOR] Обнаружен сегмент без волновой формы. Добавление в очередь: ID=${seg.id}, Файл=${seg.filePath}`);
+                    extractingRefs.current.add(seg.id);
+                    newSegments[i] = { ...seg, isExtractingWaveform: true, fileDuration: maxFileDur };
+                    trackUpdated = true;
+                    dubStarted = true;
+                    
+                    queuedTasks.push({
+                      filePath: seg.filePath,
+                      segmentId: seg.id,
+                      trackId: track.id,
+                      duration: maxFileDur || 10
+                    });
+                  }
+                } else if (!seg.fileDuration || seg.fileDuration < (seg.fileOffset || 0) + (seg.duration || 0)) {
+                  // Waveform exists, but fileDuration was missing or under-calculated for this cut segment
+                  newSegments[i] = {
+                    ...seg,
+                    fileDuration: maxFileDur
+                  };
                   trackUpdated = true;
                   needsUpdate = true;
-                } else if (!seg.isExtractingWaveform && !extractingRefs.current.has(seg.id)) {
-                  console.log(`[WAVEFORM-HYDRATOR] Обнаружен сегмент без волновой формы. Добавление в очередь: ID=${seg.id}, Файл=${seg.filePath}`);
-                  extractingRefs.current.add(seg.id);
-                  newSegments[i] = { ...seg, isExtractingWaveform: true };
-                  trackUpdated = true;
-                  dubStarted = true;
-                  
-                  queuedTasks.push({
-                    filePath: seg.filePath,
-                    segmentId: seg.id,
-                    trackId: track.id,
-                    duration: seg.duration || 10
-                  });
                 }
             }
         }

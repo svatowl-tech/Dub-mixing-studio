@@ -109,13 +109,19 @@ export function splitSegmentAtTime(segment: AudioSegment, splitTime: number): Au
   
   const rate = segment.playbackRate || 1;
   // newFileOffset = originalFileOffset + (currentTime - originalStartTime) * rate
-  const rightFileOffset = Number((segment.fileOffset + (leftDuration * rate)).toFixed(3));
+  const rightFileOffset = Number(((segment.fileOffset || 0) + (leftDuration * rate)).toFixed(3));
 
   const actualSplitTimeOnTimeline = Number((segment.startTime + leftDuration).toFixed(3));
 
+  const resolvedFileDuration = segment.fileDuration && segment.fileDuration > 0
+    ? segment.fileDuration
+    : Math.max(segment.duration + (segment.fileOffset || 0), (segment.fileOffset || 0) + leftDuration + rightDuration);
+
   const leftSeg: AudioSegment = { 
     ...segment, 
-    duration: leftDuration 
+    duration: leftDuration,
+    fileDuration: resolvedFileDuration,
+    waveform: segment.waveform ? [...segment.waveform] : undefined
   };
   
   const rightSeg: AudioSegment = {
@@ -123,7 +129,9 @@ export function splitSegmentAtTime(segment: AudioSegment, splitTime: number): Au
     id: crypto.randomUUID(),
     startTime: actualSplitTimeOnTimeline,
     duration: rightDuration,
-    fileOffset: rightFileOffset
+    fileOffset: rightFileOffset,
+    fileDuration: resolvedFileDuration,
+    waveform: segment.waveform ? [...segment.waveform] : undefined
   };
 
   return [leftSeg, rightSeg];

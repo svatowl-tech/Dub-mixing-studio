@@ -218,16 +218,22 @@ export const safeConfirm = async (message: string, defaultValue: boolean = false
  */
 export const getAbsoluteFilePath = (filePath: string | undefined | null, projectPath: string | undefined | null): string => {
   if (!filePath) return '';
+  let s = filePath.trim();
   
-  if (filePath.startsWith('/') || filePath.match(/^[a-zA-Z]:/) || filePath.startsWith('file:///')) {
-    return filePath.replace(/\\/g, '/');
+  // If it's already an absolute Windows path (e.g. C:/ or C:\) or file URL or asset URL:
+  if (s.match(/^[a-zA-Z]:/) || s.startsWith('file://') || s.startsWith('http://asset.localhost/') || s.startsWith('https://asset.localhost/') || s.startsWith('asset://')) {
+    return s.replace(/\\/g, '/');
   }
-  if (!projectPath) return filePath.replace(/\\/g, '/');
   
-  let cleanPath = filePath.startsWith('./') ? filePath.slice(2) : filePath;
-  cleanPath = cleanPath.replace(/\\/g, '/');
+  // If POSIX absolute on non-Windows:
+  if (s.startsWith('/') && (!projectPath || !projectPath.match(/^[a-zA-Z]:/))) {
+    return s.replace(/\\/g, '/');
+  }
+
+  if (!projectPath) return s.replace(/\\/g, '/');
   
-  const normProjectPath = projectPath.replace(/\\/g, '/');
+  let cleanPath = s.replace(/^\.[\\\/]/, '').replace(/^[\\\/]+/, '').replace(/\\/g, '/');
+  const normProjectPath = projectPath.replace(/\\/g, '/').replace(/\/+$/, '');
   const lastSlashIndex = normProjectPath.lastIndexOf('/');
   const projectFolder = lastSlashIndex !== -1 ? normProjectPath.substring(lastSlashIndex + 1) : normProjectPath;
   

@@ -174,6 +174,7 @@ export const TimelineCanvas = React.memo(({
           startTime: seg.startTime,
           duration: seg.duration,
           fileOffset: seg.fileOffset ?? 0,
+          fileDuration: seg.fileDuration,
           gain: seg.gain ?? 1.0,
           isMuted: (seg as any).isMuted ?? false,
           waveform: seg.waveform,

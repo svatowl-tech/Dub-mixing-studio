@@ -3,7 +3,7 @@ import {
   QualityControlIssue, FinalRenderResult, MixingAuditEntry,
   QaAuditReport, QaIncident, MasteringStats, MixingType
 } from '../types';
-import { toNativeLocalPath, getSafeFileUrl } from '../lib/utils';
+import { toNativeLocalPath, getSafeFileUrl, getAbsoluteFilePath } from '../lib/utils';
 
 /**
  * Service for Stage 4: Final Mix & Render (Финальный рендер и экспорт)
@@ -922,30 +922,39 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
       t.name.toLowerCase().includes('original') ||
       t.id === 'reference-track'
     );
-    const origTrackVol = originalTrack && !originalTrack.isMuted ? (originalTrack.volume ?? 0.20) : 0.20;
-    const origAudioPath = originalTrack?.segments?.[0]?.filePath || project.originalAudioPath || project.referenceAudioPath || `${defaultDestFolder}/takes/original_audio.wav`;
+    const origTrackVol = originalTrack && !originalTrack.isMuted ? (typeof originalTrack.volume === 'number' && !isNaN(originalTrack.volume) ? originalTrack.volume : 0.20) : 0.20;
+    const rawOrigPath = originalTrack?.segments?.[0]?.filePath || project.originalAudioPath || project.referenceAudioPath || `${defaultDestFolder}/takes/original_audio.wav`;
+    const absOrigPath = getAbsoluteFilePath(rawOrigPath, project.projectPath);
+    const resolvedOrigAudioPath = toNativeLocalPath(absOrigPath || rawOrigPath);
 
     const exportTracks = project.tracks.map(t => {
       const isOrig = t.type === 'original' || t.name.toLowerCase().includes('оригинал') || t.name.toLowerCase().includes('original') || t.name.toLowerCase().includes('reference') || t.name.toLowerCase().includes('звуки');
-      const effectiveVolume = isOrig ? t.volume : t.volume * vocalBusMultiplier;
-      const effectiveMuted = isOrig ? t.isMuted : (t.isMuted || !!project.vocalBusMuted);
+      const baseVol = typeof t.volume === 'number' && !isNaN(t.volume) ? t.volume : 1.0;
+      const effectiveVolume = isOrig ? baseVol : (baseVol * vocalBusMultiplier);
+      const effectiveMuted = isOrig ? !!t.isMuted : (!!t.isMuted || !!project.vocalBusMuted);
       return {
         id: t.id,
         name: t.name,
+        type: t.type || (isOrig ? 'original' : 'voice'),
         volume: effectiveVolume,
         isMuted: effectiveMuted,
-        isSolo: t.isSolo,
-        segments: t.segments.map(s => ({
-          id: s.id || `seg-${Date.now()}-${Math.random()}`,
-          filePath: toNativeLocalPath(s.filePath),
-          startTime: s.startTime,
-          duration: s.duration,
-          fileOffset: s.fileOffset || 0,
-          fileDuration: s.fileDuration || s.duration,
-          gain: s.gain,
-          panning: s.panning,
-          playbackRate: s.playbackRate,
-        })).filter(s => s.filePath !== '')
+        isSolo: !!t.isSolo,
+        segments: t.segments.map(s => {
+          const rawSegPath = s.filePath || '';
+          const absSegPath = getAbsoluteFilePath(rawSegPath, project.projectPath);
+          const finalNativePath = toNativeLocalPath(absSegPath || rawSegPath);
+          return {
+            id: s.id || `seg-${Date.now()}-${Math.random()}`,
+            filePath: finalNativePath,
+            startTime: typeof s.startTime === 'number' && !isNaN(s.startTime) ? s.startTime : 0.0,
+            duration: typeof s.duration === 'number' && !isNaN(s.duration) ? s.duration : 0.0,
+            fileOffset: typeof s.fileOffset === 'number' && !isNaN(s.fileOffset) ? s.fileOffset : 0.0,
+            fileDuration: typeof s.fileDuration === 'number' && !isNaN(s.fileDuration) ? s.fileDuration : (s.duration || 0.0),
+            gain: typeof s.gain === 'number' && !isNaN(s.gain) ? s.gain : 1.0,
+            panning: typeof s.panning === 'number' && !isNaN(s.panning) ? s.panning : 0.0,
+            playbackRate: typeof s.playbackRate === 'number' && !isNaN(s.playbackRate) ? s.playbackRate : 1.0,
+          };
+        }).filter(s => s.filePath !== '')
       };
     });
 
@@ -953,17 +962,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
       try {
         const { invoke } = await import('@tauri-apps/api/core');
         if (!isDubbingMode) {
-          // В режиме «Закадр» / «Рекаст» используем честное сведение без даккинга:
+          // В режиме «Закадр» / «Рекаст» передаем треки озвучки и путь к оригиналу:
+          const voTracks = exportTracks.filter(t => {
+            const n = t.name.toLowerCase();
+            return t.type !== 'original' && !n.includes('оригинал') && !n.includes('original') && !n.includes('reference');
+          });
+
           const voMixRes = await invoke<any>('render_voiceover_mix', {
             request: {
               projectPath: project.projectPath,
-              originalAudioPath: toNativeLocalPath(origAudioPath),
+              originalAudioPath: resolvedOrigAudioPath,
               outputPath: toNativeLocalPath(masterAudioPathOnDisk),
               originalTrackVolume: origTrackVol,
               vocalBusVolume: vocalBusMultiplier,
               projectJson: JSON.stringify({
                 projectPath: project.projectPath,
-                tracks: exportTracks,
+                tracks: voTracks.length > 0 ? voTracks : exportTracks,
                 audioOffsetMs: project.audioOffsetMs || 0
               })
             }
@@ -1061,18 +1075,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
     const sourceVideoDiskPath = toNativeLocalPath(project.videoPath || project.videoUrl);
     const targetVideoPath = `${defaultDestFolder}/${videoFileName}`;
 
-    // Если в проекте выбран «Полный дубляж» (Dubbing), оригинальный голос должен глушиться (bgVolume = 0.0),
-    // но если выбран «Закадр» (Voiceover) или «Рекаст», оригинальный звук обязан присутствовать с заданным уровнем (0.15–0.30 / ~-18dB)
+    // Если в проекте выбран «Полный дубляж» (Dubbing), фоновый оригинальный голос глушится (bgVolume = 0.0).
+    // Для «Закадра» (Voiceover), если сведение производилось через render_voiceover_mix,
+    // мастер masterAudioPathOnDisk УЖЕ содержит полностью сведенный баланс (оригинал на заданном уровне + голоса с True-Peak лимитером).
+    // Поэтому повторно подмешивать звук из видео не требуется во избежание эха и фазовых искажений.
     let bgVolume = 0.0;
-    if (isDubbingMode) {
-      bgVolume = 0.0;
-    } else {
-      if (originalTrack && !originalTrack.isMuted) {
-        bgVolume = typeof originalTrack.volume === 'number' ? originalTrack.volume : 0.20;
-      } else if (!originalTrack) {
-        bgVolume = 0.20;
-      }
-    }
 
     // Проверяем наличие отдельной M&E дорожки
     const meTrack = project.tracks.find(t => 

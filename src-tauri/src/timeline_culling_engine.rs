@@ -33,6 +33,8 @@ pub struct TimelineSegmentData {
     pub duration: f64,   // Длительность на таймлайне (секунды)
     #[serde(default)]
     pub file_offset: f64, // Смещение от начала файла (секунды)
+    #[serde(default)]
+    pub file_duration: Option<f64>, // Полная длительность файла (секунды)
     #[serde(default = "default_gain")]
     pub gain: f32,       // Гейн клипа
     #[serde(default)]
@@ -198,7 +200,13 @@ fn get_or_resolve_mipmap(
     // 2. Fallback: создание легковесного Mipmap из переданного waveform массива
     if let Some(ref wf) = segment.waveform {
         if !wf.is_empty() {
-            let synthetic = create_synthetic_mipmap(wf, segment.duration);
+            let total_dur = segment.file_duration.unwrap_or(0.0);
+            let effective_dur = if total_dur >= (segment.file_offset + segment.duration) {
+                total_dur
+            } else {
+                (segment.file_offset + segment.duration).max(segment.duration)
+            };
+            let synthetic = create_synthetic_mipmap(wf, effective_dur);
             let arc_mipmap = Arc::new(synthetic);
             if let Some(k) = key {
                 state.mipmap_cache.insert(k.to_string(), arc_mipmap.clone());
