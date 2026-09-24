@@ -137,12 +137,6 @@ pub fn check_file_exists(path: String) -> bool {
 }
 
 #[tauri::command]
-pub fn check_file_exists(path: String) -> bool {
-    let norm_path = normalize_windows_path(&path);
-    Path::new(&norm_path).exists()
-}
-
-#[tauri::command]
 pub fn get_file_info(path: String) -> Result<FileInfo, String> {
     let norm_path = normalize_windows_path(&path);
     let p = Path::new(&norm_path);

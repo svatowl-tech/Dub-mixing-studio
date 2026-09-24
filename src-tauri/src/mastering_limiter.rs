@@ -937,10 +937,8 @@ pub async fn compare_tracks_loudness(
         let (mast_lufs, mast_peak_db, mast_lra) = analyze_file_ebur128(&mast_p)
             .map_err(|e| format!("Failed to analyze master mix track: {:?}", e))?;
 
-        let current_delta_db = (mast_lufs - orig_lufs * 10.0).round() / 10.0;
-        let diff_delta = (mast_lufs - orig_lufs) - recommended_delta_db;
         let target_master_lufs = ((orig_lufs + recommended_delta_db) * 10.0).round() / 10.0;
-        let recommended_gain_adjustment_db = (target_master_lufs - mast_lufs * 10.0).round() / 10.0;
+        let recommended_gain_adjustment_db = ((target_master_lufs - mast_lufs) * 10.0).round() / 10.0;
 
         let readability_status = if (3.4..=4.6).contains(&(mast_lufs - orig_lufs)) {
             "optimal".to_string()
